@@ -64,3 +64,12 @@ await guildAudit.copy();
 ## 7. 스프레드시트에 복사
 
 복사된 내용을 스프레드시트에 넣으시면 길드원 명단과 해당 공헌 수치에 대한 랭킹을 확인하실 수 있습니다.
+
+## 8. UI 버전 설치 코드
+
+다음 코드를 설치하시면 마우스 클릭으로 명령이 실행되는 화면이 나타납니다.  
+사용 후 닫으시면 됩니다.
+
+```js
+(async()=>{const u="https://cdn.jsdelivr.net/gh/hiphop5782/topwar-inline-script/el-contribution-checker/el-contribution-checker-ui.min.js";const r=await fetch(u,{cache:"no-store"});if(!r.ok)throw Error(`스크립트 다운로드 실패: ${r.status}`);(0,eval)(await r.text())})();
+```
