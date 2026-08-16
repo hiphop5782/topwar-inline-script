@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.11.6 - Safe GitHub Token + Memory Cleanup
+// @name         TopWar Unified Automation V2.12.1 - OOM Cleanup + Shared Server Order
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.11.6
-// @description  TopWar scanner + servers-popular list in page context + fast GitHub storage queue + user movement history
+// @version      2.12.1
+// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with shared GitHub token
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -204,7 +204,7 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.11.6-safe-github-token-storage-memory-optimized";
+  const VERSION = "2.11.8-persistent-github-token-simple-ui-memory-optimized";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
@@ -397,17 +397,24 @@
 
   async function validateAndSaveGithubToken(token) {
     const value = String(token ?? "").trim();
+    const previousToken = getGithubToken();
     const result = await validateGithubToken(value);
+    const definitelyInvalid = Number(result.status) === 401;
+
     githubTokenValidationState = {
       checked: true,
-      valid: !!result.ok,
+      valid: result.ok ? true : (definitelyInvalid ? false : null),
       login: result.login ?? null,
       checkedAt: new Date().toISOString(),
       error: result.ok ? null : result.reason
     };
 
     if (!result.ok) {
-      writeRawGithubToken("");
+      // 401로 현재 저장 토큰 자체가 틀렸음이 확인된 경우에만 삭제한다.
+      // 새 후보 토큰 검증 실패나 네트워크/일시 오류에서는 기존 저장 토큰을 보존한다.
+      if (definitelyInvalid && value && value === previousToken) {
+        writeRawGithubToken("");
+      }
       return result;
     }
 
@@ -422,18 +429,50 @@
       const interactive = options.interactive !== false;
       let token = getGithubToken();
 
+      // 이미 이 페이지에서 정상 검증된 토큰은 다시 GitHub API로 검증하지 않는다.
+      if (
+        token &&
+        options.forcePrompt !== true &&
+        githubTokenValidationState.checked === true &&
+        githubTokenValidationState.valid === true
+      ) {
+        return token;
+      }
+
       if (token && options.forcePrompt !== true) {
         const validation = await validateGithubToken(token);
+
+        if (validation.ok) {
+          githubTokenValidationState = {
+            checked: true,
+            valid: true,
+            login: validation.login ?? null,
+            checkedAt: new Date().toISOString(),
+            error: null
+          };
+          return token;
+        }
+
+        // GitHub가 명확하게 인증 실패(401)를 반환한 경우에만 저장 토큰이 틀렸다고 판단한다.
+        // 네트워크/CORS/일시 장애/403 rate-limit 등에서는 기존 토큰을 삭제하거나 다시 묻지 않는다.
+        const definitelyInvalid = Number(validation.status) === 401;
         githubTokenValidationState = {
           checked: true,
-          valid: !!validation.ok,
-          login: validation.login ?? null,
+          valid: definitelyInvalid ? false : null,
+          login: null,
           checkedAt: new Date().toISOString(),
-          error: validation.ok ? null : validation.reason
+          error: validation.reason ?? null
         };
-        if (validation.ok) return token;
 
-        console.warn("[TopWar GitHub] 저장된 token 검증 실패. 기존 token을 제거합니다.", {
+        if (!definitelyInvalid) {
+          console.warn("[TopWar GitHub] token 검증을 완료하지 못했지만 저장 토큰을 유지합니다.", {
+            status: validation.status,
+            reason: validation.reason
+          });
+          return token;
+        }
+
+        console.warn("[TopWar GitHub] 저장된 token이 유효하지 않습니다. 새 token 입력이 필요합니다.", {
           status: validation.status,
           reason: validation.reason
         });
@@ -441,26 +480,35 @@
         token = "";
       }
 
-      if (!interactive) return "";
+      if (!interactive) return token || "";
 
       while (!token) {
         const entered = prompt(
           "GitHub Personal Access Token을 입력하세요.\n" +
-          "입력값은 GitHub API 검증에 성공한 경우에만 localStorage에 저장됩니다."
+          "저장된 토큰이 없거나 GitHub에서 401 인증 실패가 확인된 경우에만 표시됩니다."
         );
         if (entered == null) return "";
 
         const candidate = String(entered).trim();
         if (!candidate) continue;
 
-        const validation = await validateAndSaveGithubToken(candidate);
+        const validation = await validateGithubToken(candidate);
         if (validation.ok) {
+          writeRawGithubToken(candidate);
+          githubTokenValidationState = {
+            checked: true,
+            valid: true,
+            login: validation.login ?? null,
+            checkedAt: new Date().toISOString(),
+            error: null
+          };
           console.log("[TopWar GitHub] token 검증 및 저장 완료", {
             login: validation.login ?? null
           });
           return candidate;
         }
 
+        // 새로 입력한 값은 검증 성공 전에는 저장하지 않는다.
         alert(`GitHub token 검증 실패 (${validation.status}): ${validation.reason || "unknown error"}`);
       }
 
@@ -3470,7 +3518,7 @@ TOPWAR.clearThiefQueue()
     try { trimRuntimeMemory(); } catch {}
   }, 30 * 1000);
 
-  // 1) localStorage 확인 -> 2) GitHub API 검증 -> 3) 실패/없음 시 입력 -> 4) 검증 성공 시 저장
+  // localStorage 토큰 우선 사용. 401 인증 실패 또는 토큰 없음일 때만 입력 요청.
   setTimeout(() => {
     ensureGithubToken({ interactive: true }).catch(error => {
       console.warn("[TopWar GitHub] startup token 확인 실패:", error);
@@ -7735,14 +7783,14 @@ TOPWAR.clearThiefQueue()
       "top:min(80px,8vh)",
       "right:8px",
       "z-index:2147483647",
-      "width:min(320px,calc(100vw - 56px))",
+      "width:min(286px,calc(100vw - 52px))",
       "max-height:calc(100vh - 16px)",
       "font-family:Arial,'Malgun Gothic',sans-serif",
-      "background:rgba(20,20,20,0.92)",
+      "background:rgba(24,24,24,0.94)",
       "color:#fff",
-      "border:1px solid rgba(255,255,255,0.25)",
-      "border-radius:10px",
-      "box-shadow:0 4px 18px rgba(0,0,0,0.35)",
+      "border:1px solid rgba(255,255,255,0.12)",
+      "border-radius:9px",
+      "box-shadow:0 3px 12px rgba(0,0,0,0.28)",
       "overflow:visible",
       "box-sizing:border-box",
       "transition:transform 0.25s ease",
@@ -7752,138 +7800,73 @@ TOPWAR.clearThiefQueue()
 
     panel.innerHTML = `
       <div id="tw26-header" style="
-        height:34px;
+        height:38px;
         display:flex;
         align-items:center;
         justify-content:space-between;
-        padding:0 10px;
-        background:rgba(0,0,0,0.45);
+        padding:0 11px;
+        background:rgba(0,0,0,0.28);
         cursor:pointer;
         font-size:13px;
-        font-weight:800;
+        font-weight:700;
+        border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR 자동화</span>
-        <span id="tw26-fold">접기 ▲</span>
+        <span>TOPWAR</span>
+        <span id="tw26-fold" style="font-size:11px;color:#aaa;">접기</span>
       </div>
 
-      <div id="tw26-body" style="padding:10px;max-height:calc(100vh - 66px);overflow-y:auto;overflow-x:hidden;box-sizing:border-box;">
-        <label style="display:block;font-size:12px;color:#ddd;margin-bottom:4px;">서버번호 <span style="color:#aaa;">(비우면 popular 전체 / 직접 입력 가능)</span></label>
-        <input id="tw26-server" type="text" placeholder="비우면 popular 전체 / 직접 입력: 3223,3453" style="
-          width:100%;
-          height:32px;
-          box-sizing:border-box;
-          border:1px solid rgba(255,255,255,0.25);
-          border-radius:6px;
-          padding:0 8px;
-          background:#111;
-          color:#fff;
-          font-size:14px;
-          outline:none;
+      <div id="tw26-body" style="padding:10px;max-height:calc(100vh - 70px);overflow-y:auto;overflow-x:hidden;box-sizing:border-box;">
+        <input id="tw26-server" type="text" placeholder="서버번호 · 비우면 전체" style="
+          width:100%;height:34px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.16);
+          border-radius:7px;padding:0 9px;background:rgba(0,0,0,0.32);color:#fff;font-size:13px;outline:none;
         " />
 
-        <label style="display:block;font-size:12px;color:#ddd;margin-top:8px;margin-bottom:4px;">GitHub Token <span style="color:#aaa;">(모든 업로드 공통)</span></label>
-        <input id="tw26-github-token" type="password" autocomplete="off" spellcheck="false" placeholder="GitHub PAT 입력" style="
-          width:100%;
-          height:32px;
-          box-sizing:border-box;
-          border:1px solid rgba(255,255,255,0.25);
-          border-radius:6px;
-          padding:0 8px;
-          background:#111;
-          color:#fff;
-          font-size:12px;
-          outline:none;
-        " />
+        <div id="tw26-server-order" style="
+          display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+          margin-top:7px;padding:6px 8px;border-radius:7px;background:rgba(255,255,255,0.04);
+          color:#bbb;font-size:11px;
+        ">
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" name="tw26-server-order" value="sequential">순서대로</label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" name="tw26-server-order" value="popular">인기순으로</label>
+          <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" name="tw26-server-order" value="random">랜덤으로</label>
+        </div>
 
-        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px;">
-          <button id="tw26-thief" style="
-            height:40px;
-            border:0;
-            border-radius:8px;
-            background:#555;
-            color:white;
-            font-size:13px;
-            font-weight:800;
-            cursor:pointer;
-          ">도둑+보상 OFF</button>
-
-          <button id="tw26-survey" style="
-            height:40px;
-            border:0;
-            border-radius:8px;
-            background:#555;
-            color:white;
-            font-size:13px;
-            font-weight:800;
-            cursor:pointer;
-          ">서버조사 OFF</button>
+        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px;">
+          <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">보상탐색</button>
+          <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">지도조사</button>
         </div>
 
         <div id="tw26-status" style="
-          margin-top:8px;
-          padding:8px;
-          border-radius:6px;
-          background:rgba(255,255,255,0.08);
-          font-size:12px;
-          line-height:1.45;
-          color:#ddd;
-          word-break:break-all;
-          min-height:95px;
+          margin-top:8px;padding:7px 9px;border-radius:7px;background:rgba(255,255,255,0.055);
+          font-size:11px;line-height:1.5;color:#ccc;word-break:break-word;
         ">상태 확인 중...</div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
-          <button id="tw26-reset" style="
-            height:28px;
-            border:0;
-            border-radius:6px;
-            background:#333;
-            color:#ddd;
-            font-size:12px;
-            cursor:pointer;
-          ">진행 초기화</button>
+        <details id="tw26-advanced" style="margin-top:7px;">
+          <summary style="cursor:pointer;color:#999;font-size:11px;padding:4px 2px;outline:none;">고급 설정</summary>
+          <div style="margin-top:5px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08);">
+            <label style="display:block;font-size:11px;color:#999;margin-bottom:4px;">GitHub Token</label>
+            <input id="tw26-github-token" type="password" autocomplete="off" spellcheck="false" placeholder="필요할 때만 입력" style="
+              width:100%;height:31px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.15);
+              border-radius:6px;padding:0 8px;background:rgba(0,0,0,0.3);color:#fff;font-size:11px;outline:none;
+            " />
 
-          <button id="tw26-save" style="
-            height:28px;
-            border:0;
-            border-radius:6px;
-            background:#333;
-            color:#ddd;
-            font-size:12px;
-            cursor:pointer;
-          ">현재 저장</button>
-        </div>
+            <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:7px;">
+              <button id="tw26-reset" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">진행 초기화</button>
+              <button id="tw26-save" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">현재 저장</button>
+              <button id="tw26-reconnect" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">연결 초기화</button>
+              <button id="tw26-connection-status" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">연결 정보</button>
+              <button id="tw26-program-logs" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">프로그램 로그</button>
+              <button id="tw26-game-font-logs" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">폰트 경고</button>
+              <button id="tw26-activity" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">활동표</button>
+              <button id="tw26-alliance" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">동맹표</button>
+            </div>
 
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
-          <button id="tw26-reconnect" style="height:28px;border:0;border-radius:6px;background:#5b3b00;color:#ffd98a;font-size:12px;cursor:pointer;">연결상태 초기화</button>
-          <button id="tw26-connection-status" style="height:28px;border:0;border-radius:6px;background:#333;color:#ddd;font-size:12px;cursor:pointer;">연결상태 보기</button>
-        </div>
-
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
-          <button id="tw26-program-logs" style="height:30px;border:0;border-radius:6px;background:#333;color:#ddd;font-size:11px;font-weight:700;cursor:pointer;">프로그램 로그 ON</button>
-          <button id="tw26-game-font-logs" style="height:30px;border:0;border-radius:6px;background:#333;color:#ddd;font-size:11px;font-weight:700;cursor:pointer;">게임 폰트경고 OFF</button>
-        </div>
-
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;">
-          <button id="tw26-activity" style="
-            height:28px;
-            border:0;
-            border-radius:6px;
-            background:#333;
-            color:#ddd;
-            font-size:12px;
-            cursor:pointer;
-          ">활동표</button>
-
-          <button id="tw26-alliance" style="
-            height:28px;
-            border:0;
-            border-radius:6px;
-            background:#333;
-            color:#ddd;
-            font-size:12px;
-            cursor:pointer;
-          ">동맹표</button>
-        </div>
+            <div id="tw26-detail-status" style="
+              margin-top:7px;padding:7px;border-radius:6px;background:rgba(0,0,0,0.22);
+              font-size:10px;line-height:1.45;color:#aaa;word-break:break-word;
+            "></div>
+          </div>
+        </details>
       </div>
     `;
 
@@ -7895,19 +7878,19 @@ TOPWAR.clearThiefQueue()
     slideToggleButton.type = "button";
     slideToggleButton.style.cssText = [
       "position:absolute",
-      "left:-38px",
+      "left:-30px",
       "top:12px",
-      "width:38px",
-      "height:52px",
+      "width:30px",
+      "height:44px",
       "padding:0",
       "border:1px solid rgba(255,255,255,0.3)",
       "border-right:0",
-      "border-radius:8px 0 0 8px",
+      "border-radius:7px 0 0 7px",
       "background:rgba(20,20,20,0.94)",
       "color:#fff",
-      "font-size:18px",
+      "font-size:14px",
       "font-weight:800",
-      "line-height:52px",
+      "line-height:44px",
       "text-align:center",
       "cursor:pointer",
       "box-shadow:-3px 3px 10px rgba(0,0,0,0.3)",
@@ -7951,10 +7934,12 @@ TOPWAR.clearThiefQueue()
     const body = panel.querySelector("#tw26-body");
     const fold = panel.querySelector("#tw26-fold");
     const serverInput = panel.querySelector("#tw26-server");
+    const serverOrderInputs = [...panel.querySelectorAll('input[name="tw26-server-order"]')];
     const githubTokenInput = panel.querySelector("#tw26-github-token");
     const thiefButton = panel.querySelector("#tw26-thief");
     const surveyButton = panel.querySelector("#tw26-survey");
     const status = panel.querySelector("#tw26-status");
+    const detailStatus = panel.querySelector("#tw26-detail-status");
     const resetButton = panel.querySelector("#tw26-reset");
     const saveButton = panel.querySelector("#tw26-save");
     const reconnectButton = panel.querySelector("#tw26-reconnect");
@@ -7971,6 +7956,68 @@ TOPWAR.clearThiefQueue()
     let serverListLoading = false;
     let lastServerListError = null;
 
+    const SERVER_ORDER_STORAGE_KEY = "TOPWAR_AUTOMATION_SERVER_ORDER";
+
+    function normalizeServerOrderMode(value) {
+      const mode = String(value || "").trim().toLowerCase();
+      return ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
+    }
+
+    function getServerOrderMode() {
+      const checked = serverOrderInputs.find(input => input.checked)?.value;
+      if (checked) return normalizeServerOrderMode(checked);
+      try {
+        return normalizeServerOrderMode(localStorage.getItem(SERVER_ORDER_STORAGE_KEY));
+      } catch {
+        return "popular";
+      }
+    }
+
+    function setServerOrderMode(value) {
+      const mode = normalizeServerOrderMode(value);
+      for (const input of serverOrderInputs) input.checked = input.value === mode;
+      try { localStorage.setItem(SERVER_ORDER_STORAGE_KEY, mode); } catch {}
+      return mode;
+    }
+
+    function shuffleServerIds(serverIds) {
+      const ids = parseServerIdsStrict(serverIds).slice();
+      for (let i = ids.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+      }
+      return ids;
+    }
+
+    function applyServerOrder(serverIds, mode = getServerOrderMode()) {
+      const ids = parseServerIdsStrict(serverIds);
+      const normalizedMode = normalizeServerOrderMode(mode);
+
+      if (normalizedMode === "sequential") {
+        return ids.slice().sort((a, b) => Number(a) - Number(b));
+      }
+
+      if (normalizedMode === "random") {
+        return shuffleServerIds(ids);
+      }
+
+      const popularIds = TOPWAR.getCachedRemoteServerList?.()?.serverIds ?? [];
+      if (!popularIds.length) return ids.slice();
+
+      const popularRank = new Map(
+        popularIds.map((serverId, index) => [String(serverId), index])
+      );
+
+      return ids.slice().sort((a, b) => {
+        const ar = popularRank.get(String(a));
+        const br = popularRank.get(String(b));
+        if (ar != null && br != null) return ar - br;
+        if (ar != null) return -1;
+        if (br != null) return 1;
+        return Number(a) - Number(b);
+      });
+    }
+
     function inputServerId() {
       return parseServerIdsStrict(serverInput.value)[0] ?? null;
     }
@@ -7981,14 +8028,16 @@ TOPWAR.clearThiefQueue()
 
     function displayServerIds() {
       const explicit = explicitInputServerIds();
-      if (explicit.length) return explicit;
-      return TOPWAR.getCachedRemoteServerList?.()?.serverIds ?? [];
+      const base = explicit.length
+        ? explicit
+        : (TOPWAR.getCachedRemoteServerList?.()?.serverIds ?? []);
+      const mode = getServerOrderMode();
+
+      // 랜덤은 실행 시 한 번만 섞는다. 상태창을 다시 그릴 때마다 순서를 바꾸지 않는다.
+      return mode === "random" ? base.slice() : applyServerOrder(base, mode);
     }
 
-    async function resolveSurveyServerIds() {
-      const explicit = explicitInputServerIds();
-      if (explicit.length) return explicit;
-
+    async function ensureRemoteServerListLoaded() {
       const topwarApi = window.TOPWAR || TOPWAR;
       const cached = topwarApi?.getCachedRemoteServerList?.()?.serverIds ?? [];
       if (cached.length) return cached;
@@ -8001,12 +8050,10 @@ TOPWAR.clearThiefQueue()
       render();
 
       try {
-        const ids = await loader.call(topwarApi, { maxAgeMs: 60 * 60 * 1000, debug: true });
-        console.log("[TopWar V2.9.7 UI] 빈 서버 입력 - GitHub popular 목록 사용:", ids);
-        return ids;
+        return await loader.call(topwarApi, { maxAgeMs: 60 * 60 * 1000, debug: true });
       } catch (error) {
         lastServerListError = error?.message || String(error);
-        console.error("[TopWar V2.8 UI] GitHub 서버목록 로드 실패:", error);
+        console.error("[TopWar V2.12.1 UI] GitHub 서버목록 로드 실패:", error);
         return [];
       } finally {
         serverListLoading = false;
@@ -8014,7 +8061,50 @@ TOPWAR.clearThiefQueue()
       }
     }
 
-    // UI/후속 add-on에서 동일한 서버 선택 규칙을 재사용한다.
+    async function resolveSurveyServerIds() {
+      const explicit = explicitInputServerIds();
+      const mode = getServerOrderMode();
+
+      // 인기순은 직접 입력 목록이라도 popular 순위를 알아야 하므로 캐시를 준비한다.
+      if (mode === "popular") {
+        await ensureRemoteServerListLoaded();
+      }
+
+      let baseIds = explicit;
+      if (!baseIds.length) {
+        baseIds = await ensureRemoteServerListLoaded();
+      }
+
+      const ordered = applyServerOrder(baseIds, mode);
+      console.log("[TopWar V2.12.1 UI] 서버 선택:", {
+        mode,
+        explicit: explicit.length > 0,
+        count: ordered.length,
+        first: ordered.slice(0, 20)
+      });
+      return ordered;
+    }
+
+    const initialServerOrderMode = (() => {
+      try { return normalizeServerOrderMode(localStorage.getItem(SERVER_ORDER_STORAGE_KEY)); }
+      catch { return "popular"; }
+    })();
+    setServerOrderMode(initialServerOrderMode);
+
+    serverOrderInputs.forEach(input => {
+      input.addEventListener("change", event => {
+        event.stopPropagation();
+        if (input.checked) {
+          setServerOrderMode(input.value);
+          render();
+        }
+      });
+    });
+
+    // UI/후속 add-on/RealPower에서 동일한 서버 선택 규칙을 재사용한다.
+    TOPWAR.getAutomationServerOrderMode = getServerOrderMode;
+    TOPWAR.setAutomationServerOrderMode = setServerOrderMode;
+    TOPWAR.applyAutomationServerOrder = applyServerOrder;
     TOPWAR.resolveAutomationServerIds = resolveSurveyServerIds;
 
     async function runThiefShareWatchForServers(serverIds, overrides = {}) {
@@ -8744,8 +8834,9 @@ TOPWAR.clearThiefQueue()
     }
 
     function setButton(button, running, label) {
-      button.textContent = `${label} ${running ? "ON" : "OFF"}`;
-      button.style.background = running ? "#0a9f4a" : "#555";
+      button.textContent = label;
+      button.title = running ? "실행 중 · 클릭하면 중지" : "중지됨 · 클릭하면 실행";
+      button.style.background = running ? "#247a4b" : "#3b3b3b";
     }
 
     function selectedThiefUiSettings() {
@@ -8759,7 +8850,7 @@ TOPWAR.clearThiefQueue()
 
     function setLogButton(button, enabled, label) {
       button.textContent = `${label} ${enabled ? "ON" : "OFF"}`;
-      button.style.background = enabled ? "#0a9f4a" : "#555";
+      button.style.background = enabled ? "#3f654e" : "#333";
       button.style.color = enabled ? "#fff" : "#ddd";
     }
 
@@ -8778,6 +8869,9 @@ TOPWAR.clearThiefQueue()
       const activitySummary = lastSummary.activity ?? {};
       const connection = state.connectionGuard || {};
       const disconnected = !!connection.disconnected;
+      const realPowerState = window.REALPOWER?.getState?.() || {};
+      const realPowerProgress = realPowerState.progress || {};
+      const realPowerRunning = realPowerState.running === true;
       const remoteServerList = topwarApiForRender?.getCachedRemoteServerList?.();
       const shownServerIds = displayServerIds();
       const usingRemoteServerList = !explicitInputServerIds().length;
@@ -8786,56 +8880,68 @@ TOPWAR.clearThiefQueue()
       const tokenStatus = TOPWAR.githubTokenStatus?.() ?? { configured: false };
       const logStatus = window.TOPWAR_LOG_CONTROL?.status?.() ?? { programLogs: true, gameFontWarnings: true };
 
-      setButton(thiefButton, !!watch.running, "도둑+보상");
-      setButton(surveyButton, surveyRunning, surveyStopping ? "중지중" : "서버조사");
+      setButton(thiefButton, !!watch.running, "보상탐색");
+      setButton(surveyButton, surveyRunning, "지도조사");
       setLogButton(programLogsButton, !!logStatus.programLogs, "프로그램 로그");
       setLogButton(gameFontLogsButton, !!logStatus.gameFontWarnings, "게임 폰트경고");
 
-      thiefButton.disabled = surveyRunning || disconnected;
-      surveyButton.disabled = (!!watch.running && !surveyRunning) || disconnected;
+      thiefButton.disabled = surveyRunning || realPowerRunning || disconnected;
+      surveyButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
 
       thiefButton.style.opacity = thiefButton.disabled ? "0.55" : "1";
       surveyButton.style.opacity = surveyButton.disabled ? "0.55" : "1";
-      githubTokenInput.disabled = !!(watch.running || surveyRunning || state.cityRewardFinder?.running);
+      const anyAutomationRunning = !!(watch.running || surveyRunning || realPowerRunning || state.cityRewardFinder?.running);
+      githubTokenInput.disabled = anyAutomationRunning;
       githubTokenInput.style.opacity = githubTokenInput.disabled ? "0.6" : "1";
+      serverOrderInputs.forEach(input => {
+        input.disabled = anyAutomationRunning;
+        input.parentElement.style.opacity = input.disabled ? "0.55" : "1";
+      });
 
       const thiefMulti = watch.multiServer || {};
 
+      const runningLabel = watch.running
+        ? `도둑 ${watch.current?.moveIndex ?? 0}/${watch.current?.totalMoves ?? "-"}`
+        : surveyRunning
+          ? `지도조사 ${current.index ?? "-"}/${current.total ?? "-"}`
+          : realPowerRunning
+            ? `Top100 ${realPowerProgress.currentIndex ?? 0}/${realPowerProgress.total ?? "-"}`
+            : state.cityRewardFinder?.running
+              ? "도시보상 스캔"
+              : "대기";
+
       status.innerHTML = `
-        서버: <b>${formatServerIdsForStatus(shownServerIds)}</b><br>
-        서버목록: <b style="color:${serverListLoading ? "#ffd98a" : remoteServerList?.serverIds?.length ? "#66ff99" : "#aaa"}">${serverListLoading ? "GitHub 읽는 중" : remoteServerList?.serverIds?.length ? `popular ${remoteServerList.serverIds.length}개` : usingRemoteServerList ? "비우면 popular 자동로드" : "직접입력"}</b> / 파일순서 그대로${lastServerListError ? ` / 오류: ${lastServerListError}` : ""}<br>
-        연결상태: <b style="color:${disconnected ? "#ff6666" : "#66ff99"}">${disconnected ? "연결 실패" : "정상"}</b>${connection.reason ? ` / ${connection.reason}` : ""}<br>
-        GitHub: <b style="color:${tokenStatus.configured ? "#66ff99" : "#ff9999"}">${tokenStatus.configured ? "TOKEN 설정됨" : "TOKEN 필요"}</b><br>
-        통합찾기: <b style="color:${watch.running ? "#66ff99" : "#ff9999"}">${watch.running ? "ON" : "OFF"}</b>${watch.running && thiefMulti.totalServers ? ` / 서버 ${thiefMulti.serverId ?? "-"} (${thiefMulti.serverIndex ?? 0}/${thiefMulti.totalServers})` : ""}<br>
-        진행: ${watch.current?.totalMoves ? `맵 ${watch.current?.moveIndex ?? 0}/${watch.current.totalMoves}` : "-"} / 도둑 <b>${watch.current?.thiefCount ?? watch.lastUnifiedResult?.thiefCount ?? 0}</b> / 도시보상 <b>${watch.current?.rewardCount ?? watch.lastUnifiedResult?.rewardCount ?? 0}</b><br>
-        GitHub: 도둑 <b>${watch.lastGithubUpload?.ok ? "✓" : watch.lastGithubUpload?.error ? "실패" : "-"}</b> / 도시보상 <b>${watch.lastRewardGithubUpload?.ok ? "✓" : watch.lastRewardGithubUpload?.error ? "실패" : "-"}</b><br>
-        도둑 진행정리: 확인셀 <b>${watch.lastLiveThiefUpload?.confirmedCells ?? 0}</b> / 직전삭제 <b>${watch.lastLiveThiefUpload?.removedConfirmedMissing ?? 0}</b><br>
-        로그: 프로그램 <b>${logStatus.programLogs ? "ON" : "OFF"}</b> / 게임 폰트경고 <b>${logStatus.gameFontWarnings ? "ON" : "OFF"}</b><br>
-        큐 ${queue}
-        / 처리 ${watch.handledKeys?.size ?? 0}
-        / 공유좌표 ${watch.sharedLocationKeys?.size ?? 0}<br>
-        서버조사: <b style="color:${surveyRunning ? "#66ff99" : "#ff9999"}">${surveyRunning ? "ON" : "OFF"}</b>
-        ${surveyStopping ? " / 중지 요청됨" : ""}<br>
-        단계: ${current.phase ?? state.fullScan?.phase ?? "-"}
-        ${current.index ? ` (${current.index}/${current.total})` : ""}
-        ${current.serverId ? ` / 서버 ${current.serverId}` : ""}<br>
-        동맹: ${current.allianceTag ?? current.allianceName ?? current.allianceId ?? "-"}<br>
-        플레이어: ${state.playerMap?.size ?? 0}
-        / 동맹: ${state.allianceMap?.size ?? 0}<br>
-        활동: CORE ${activitySummary.coreCount ?? "-"}
-        / ACTIVE ${activitySummary.activeCount ?? "-"}
-        / WATCH ${activitySummary.watchCount ?? "-"}
-        / LOW ${activitySummary.lowCount ?? "-"}<br>
-        서버활동: ${lastSummary.serverActivity?.grade ?? "-"}
-        / 점수 ${lastSummary.serverActivity?.score ?? "-"}
-        / 접음의심 ${lastSummary.userStatus?.quitLikelyUsers ?? "-"}
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span><b style="color:#eee">${runningLabel}</b>${current.serverId ? ` · ${current.serverId}` : ""}</span>
+          <span style="white-space:nowrap;color:${disconnected ? "#ff7777" : "#8fd6a8"}">${disconnected ? "연결 오류" : "정상"}</span>
+        </div>
+        <div style="margin-top:2px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+          서버 ${shownServerIds.length ? `${shownServerIds.length}개` : "-"} · ${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤" : "인기순"} · GitHub ${tokenStatus.configured ? "✓" : "미설정"} · 플레이어 ${state.playerMap?.size ?? 0}
+        </div>
       `;
+
+      if (detailStatus) {
+        detailStatus.innerHTML = `
+          대상 서버: <b>${formatServerIdsForStatus(shownServerIds)}</b><br>
+          선택 기준: <b>${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤으로" : "인기순으로"}</b><br>
+          서버목록: ${serverListLoading ? "읽는 중" : remoteServerList?.serverIds?.length ? `popular ${remoteServerList.serverIds.length}개` : usingRemoteServerList ? "popular 자동로드" : "직접입력"}${lastServerListError ? ` / 오류: ${lastServerListError}` : ""}<br>
+          연결: ${disconnected ? "실패" : "정상"}${connection.reason ? ` / ${connection.reason}` : ""}<br>
+          GitHub Token: ${tokenStatus.configured ? "설정됨" : "필요"}<br>
+          보상탐색: ${watch.running ? "ON" : "OFF"} / 큐 ${queue} / 처리 ${watch.handledKeys?.size ?? 0}<br>
+          진행: ${watch.current?.totalMoves ? `${watch.current?.moveIndex ?? 0}/${watch.current.totalMoves}` : "-"} / 도둑 ${watch.current?.thiefCount ?? watch.lastUnifiedResult?.thiefCount ?? 0} / 도시보상 ${watch.current?.rewardCount ?? watch.lastUnifiedResult?.rewardCount ?? 0}<br>
+          지도조사: ${surveyRunning ? "ON" : "OFF"}${surveyStopping ? " / 중지 요청" : ""} / 단계 ${current.phase ?? state.fullScan?.phase ?? "-"}<br>
+          Top100조사: ${realPowerRunning ? "ON" : "OFF"} / 단계 ${realPowerProgress?.phase ?? "-"}<br>
+          플레이어 ${state.playerMap?.size ?? 0} / 동맹 ${state.allianceMap?.size ?? 0}<br>
+          활동 CORE ${activitySummary.coreCount ?? "-"} / ACTIVE ${activitySummary.activeCount ?? "-"} / WATCH ${activitySummary.watchCount ?? "-"} / LOW ${activitySummary.lowCount ?? "-"}<br>
+          서버활동 ${lastSummary.serverActivity?.grade ?? "-"} / 점수 ${lastSummary.serverActivity?.score ?? "-"}
+        `;
+      }
     }
 
     header.addEventListener("click", () => {
       folded = !folded;
       body.style.display = folded ? "none" : "block";
-      fold.textContent = folded ? "펼치기 ▼" : "접기 ▲";
+      fold.textContent = folded ? "펼치기" : "접기";
     });
 
     async function saveGithubTokenFromUi() {
@@ -8861,11 +8967,11 @@ TOPWAR.clearThiefQueue()
       }
     }
 
+    // 실제 값이 변경된 경우에만 검증한다. 단순 focus/blur로는 재검증하지 않는다.
     githubTokenInput.addEventListener("change", event => {
       event.stopPropagation();
       void saveGithubTokenFromUi();
     });
-    githubTokenInput.addEventListener("blur", () => { void saveGithubTokenFromUi(); });
 
     programLogsButton.addEventListener("click", event => {
       event.stopPropagation();
@@ -8889,7 +8995,11 @@ TOPWAR.clearThiefQueue()
       } else {
         if (state.connectionGuard?.disconnected) { alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요."); return; }
         if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
-          alert("서버조사가 진행 중입니다. 먼저 서버조사를 OFF 하세요.");
+          alert("지도조사가 진행 중입니다. 먼저 지도조사를 OFF 하세요.");
+          return;
+        }
+        if (window.REALPOWER?.getState?.()?.running === true) {
+          alert("Top100조사가 진행 중입니다. 먼저 Top100조사를 OFF 하세요.");
           return;
         }
 
@@ -8939,6 +9049,10 @@ ${lastServerListError}`
           alert("도둑+도시보상 통합찾기가 진행 중입니다. 먼저 OFF 하세요.");
           return;
         }
+        if (window.REALPOWER?.getState?.()?.running === true) {
+          alert("Top100조사가 진행 중입니다. 먼저 Top100조사를 OFF 하세요.");
+          return;
+        }
 
         const serverIds = await resolveSurveyServerIds();
 
@@ -8986,11 +9100,11 @@ ${lastServerListError}`
       event.stopPropagation();
 
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
-        alert("서버조사를 먼저 OFF 한 뒤 진행 위치를 초기화하세요.");
+        alert("지도조사를 먼저 OFF 한 뒤 진행 위치를 초기화하세요.");
         return;
       }
 
-      if (confirm("도둑 큐와 저장된 서버조사 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
+      if (confirm("보상탐색 큐와 저장된 지도조사 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
         TOPWAR.clearThiefQueue?.();
         TOPWAR.clearServerSurveyResume?.();
         render();
@@ -14194,8 +14308,8 @@ ${lastServerListError}`
     if (!button) {
       button = document.createElement("button");
       button.id = BUTTON_ID;
-      button.textContent = "cityReward 스캔";
-      button.style.cssText = "height:40px;border:0;border-radius:8px;background:#5b4700;color:#ffe082;font-size:12px;font-weight:800;cursor:pointer;min-width:0;";
+      button.textContent = "도시보상";
+      button.style.cssText = "height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;min-width:0;";
       actionGroup.appendChild(button);
     }
 
@@ -14203,10 +14317,10 @@ ${lastServerListError}`
     if (!box) {
       box = document.createElement("div");
       box.id = BOX_ID;
-      box.style.cssText = "margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(255,193,7,0.06);border:1px solid rgba(255,193,7,0.18);";
+      box.style.cssText = "display:none;margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.08);";
       status = document.createElement("div");
       status.id = STATUS_ID;
-      status.style.cssText = "font-size:11px;line-height:1.4;color:#d8d8d8;word-break:break-word;";
+      status.style.cssText = "font-size:10px;line-height:1.4;color:#aaa;word-break:break-word;";
       status.textContent = "cityReward 객체 보유 기지만 GitHub 저장 · 서버 미입력 시 popular 전체";
       box.appendChild(status);
       actionGroup.insertAdjacentElement("afterend", box);
@@ -14303,9 +14417,11 @@ ${lastServerListError}`
       const reward = ensureRewardState();
       const current = reward.current || {};
 
+      box.style.display = reward.running ? "block" : "none";
+
       if (reward.running) {
-        button.textContent = reward.stopRequested ? "cityReward 중지중..." : "cityReward 스캔 OFF";
-        button.style.background = reward.stopRequested ? "#6d4c41" : "#b71c1c";
+        button.textContent = reward.stopRequested ? "중지중" : "도시보상 OFF";
+        button.style.background = reward.stopRequested ? "#66504b" : "#8a3f3f";
         button.style.color = "#fff";
 
         const serverProgress = current.totalServers
@@ -14319,9 +14435,9 @@ ${lastServerListError}`
 
         status.innerHTML = `${cycle}회차 실행중: 서버 ${current.serverId ?? "-"} (${serverProgress})${mapProgress}<br>발견 <b style="color:#ffe082">${current.found ?? reward.totalFound ?? 0}</b> / 누적 서버스캔 ${totalServerScans}회`;
       } else {
-        button.textContent = "cityReward 스캔";
-        button.style.background = "#5b4700";
-        button.style.color = "#ffe082";
+        button.textContent = "도시보상";
+        button.style.background = "#3b3b3b";
+        button.style.color = "#eee";
 
         const upload = reward.lastUpload;
         status.innerHTML = reward.lastResult
@@ -14376,4 +14492,8298 @@ ${lastServerListError}`
   // V2.11.0부터 기본 UI는 도둑+cityReward 통합 스캔 버튼 하나만 사용한다.
   // standalone Finder 함수와 installRewardFinderButton()은 호환/수동 사용을 위해 그대로 보존한다.
   console.log("%c[TopWar CityReward Finder V1.9] backend installed (standalone UI auto-install disabled)", "color:#ffd54f;font-weight:bold");
+})();
+
+(function () {"use strict";
+
+/*
+
+통합형 RealPower 조사 백엔드
+
+기존 RealPower 조사 로직/IndexedDB 큐는 독립적으로 유지
+GitHub Token은 TOPWAR_GITHUB_TOKEN 하나만 공유
+별도 RealPower 패널은 자동 생성하지 않고 TOPWAR 통합 패널에서 실행*/
+
+const API_NAME = "REALPOWER";const SETTINGS_KEY = "REALPOWER_STANDALONE_GITHUB_SETTINGS";const OLD_SETTINGS_KEY = "TOPWAR_GITHUB_JSON_UPLOAD_SETTINGS";const STATE_KEY = "REALPOWER_STANDALONE_STATE";const CALIBRATION_KEY = "REALPOWER_STANDALONE_CLICK_CALIBRATION";const QUEUE_KEY = "REALPOWER_STANDALONE_SERVER_QUEUE";const PENDING_DB_NAME = "REALPOWER_STANDALONE_PENDING_DB";const PENDING_DB_VERSION = 1;const PENDING_STORE = "pendingFiles";const STORAGE_SCHEMA_KEY = "REALPOWER_STANDALONE_STORAGE_SCHEMA";const STORAGE_SCHEMA_VERSION = 4;const UI_STATE_KEY = "REALPOWER_STANDALONE_UI_STATE";
+const SHARED_GITHUB_TOKEN_KEY = "TOPWAR_GITHUB_TOKEN";
+
+function sharedGithubToken() {
+  try {
+    const apiToken = window.TOPWAR?.getGithubToken?.();
+    if (apiToken) return String(apiToken).trim();
+    return String(localStorage.getItem(SHARED_GITHUB_TOKEN_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function migrateLegacyRealPowerToken() {
+  try {
+    const own = readLocal(SETTINGS_KEY, {});
+    const legacyToken = String(own?.token || "").trim();
+    if (legacyToken && !sharedGithubToken()) {
+      if (window.TOPWAR?.setGithubToken) window.TOPWAR.setGithubToken(legacyToken);
+      else localStorage.setItem(SHARED_GITHUB_TOKEN_KEY, legacyToken);
+    }
+    if (own && typeof own === "object" && Object.prototype.hasOwnProperty.call(own, "token")) {
+      delete own.token;
+      writeLocal(SETTINGS_KEY, own);
+    }
+  } catch (error) {
+    console.warn("[REALPOWER] legacy token migration failed:", error);
+  }
+}
+
+
+const loopRuntime = {stopRequested: false,runningPromise: null,abortController: null,mode: "idle",progress: {currentIndex: 0,total: 0,currentServerId: null,phase: "idle"}};
+
+const DEFAULT_SETTINGS = {owner: "hiphop5782",repo: "topwar-webutil-vite",branch: "main",
+
+powerBasePath: "src/assets/json/power",
+allianceDataPath: "src/assets/json/power/allianceData.json",
+playerDataPath: "src/assets/json/power/playerData.json",
+serverDataPath: "src/assets/json/power/serverData.json",
+movementBasePath: "src/assets/json/power/movement",
+nicknameHistoryBasePath: "src/assets/json/power/nickname",
+serverListBasePath: "src/assets/json/servers",
+serversLatestPath: "src/assets/json/servers/servers.json",
+serversPopularLatestPath: "src/assets/json/servers/servers-popular.json",
+
+// 조사 중에는 서버별 결과를 IndexedDB에 보관하고,
+// 전체 조사가 끝나면 통합 파일, 서버 이동현황, 닉네임 변경이력을 한 번에 GitHub에 커밋한다.
+uploadServerLatest: true,
+movementEnabled: true,
+nicknameHistoryEnabled: true,
+
+// Java Rectangle 내부 좌표의 기준 크기.
+// 기존 Java 코드의 최대 좌표가 약 480x720 화면 기준이므로 현재 canvas 크기에 맞게 비율 보정한다.
+coordinateBaseWidth: 480,
+coordinateBaseHeight: 720,
+
+// 자동 클릭/대기 설정
+clickDelayMs: 1200,
+moveDelayMs: 1800,
+moveTimeoutMs: 15000,
+movePollIntervalMs: 200,
+moveRetryCount: 2,
+moveRetryDelayMs: 1000,
+minimumMoveSettleMs: 1200,
+rankOpenTimeoutMs: 12000,
+rankDataTimeoutMs: 20000,
+// 시간 기준이 아니라 개인 100명 / 동맹 2개 수신 여부만 확인한다.
+rankPollIntervalMs: 100,
+betweenServerDelayMs: 1500,
+loopDelayMs: 3000,
+requiredPlayerCount: 100,
+requiredAllianceCount: 2,
+continueOnError: true,
+refreshAllServerListEachCycle: true,
+
+// 전체 조사가 끝난 뒤 GitHub 커밋을 한 번만 생성한다.
+commitAfterFullCycle: true,
+gitTreeChunkMaxEntries: 80,
+gitTreeChunkMaxBytes: 2500000,
+
+// Java 코드의 클릭 흐름을 canvas 좌표로 옮긴 기본값
+openPowerRankClicks: [
+  [243, 355],
+  [299, 657]
+],
+backClick: [83, 24],
+openAllianceRankClicks: [
+  [400, 657]
+]
+
+};
+
+function nowIso() {return new Date().toISOString();}
+
+function todayString() {const d = new Date();const y = d.getFullYear();const m = String(d.getMonth() + 1).padStart(2, "0");const day = String(d.getDate()).padStart(2, "0");return `${y}-${m}-${day}`;}
+
+// TopWar 서버 날짜는 UTC+8의 00:00에 변경된다.
+// 한국 시간(UTC+9) 기준으로는 매일 01:00이 날짜 경계다.
+function serverDateString(value = Date.now()) {
+  const source = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(source.getTime())) throw new Error(`잘못된 날짜 값: ${value}`);
+
+  const shifted = new Date(source.getTime() + 8 * 60 * 60 * 1000);
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(shifted.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+class RealPowerStoppedError extends Error {constructor(message = "사용자 중지") {super(message);this.name = "RealPowerStoppedError";this.code = "REALPOWER_STOPPED";}}
+
+function activeAbortSignal() {return loopRuntime.abortController?.signal || null;}
+
+function isStopError(error) {return error?.code === "REALPOWER_STOPPED" ||error?.name === "RealPowerStoppedError" ||error?.name === "AbortError";}
+
+function throwIfStopped() {const signal = activeAbortSignal();if (loopRuntime.stopRequested || signal?.aborted) {throw new RealPowerStoppedError();}}
+
+function sleep(ms) {const delay = Math.max(0, Number(ms) || 0);const signal = activeAbortSignal();
+
+if (!signal) {
+  return new Promise(resolve => setTimeout(resolve, delay));
+}
+
+if (signal.aborted || loopRuntime.stopRequested) {
+  return Promise.reject(new RealPowerStoppedError());
+}
+
+return new Promise((resolve, reject) => {
+  let settled = false;
+
+  const cleanup = () => signal.removeEventListener("abort", onAbort);
+
+  const finish = callback => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    cleanup();
+    callback();
+  };
+
+  const onAbort = () => finish(() => reject(new RealPowerStoppedError()));
+  const timer = setTimeout(() => finish(resolve), delay);
+
+  signal.addEventListener("abort", onAbort, { once: true });
+});
+
+}
+
+function updateProgress(patch = {}) {loopRuntime.progress = {...loopRuntime.progress,...patch};
+
+saveState({
+  progress: loopRuntime.progress,
+  running: loopRuntime.mode !== "idle"
+});
+
+renderPanelSafe();
+return loopRuntime.progress;
+
+}
+
+function safeJsonParse(text, fallback) {try {return JSON.parse(text);} catch {return fallback;}}
+
+function readLocal(key, fallback) {try {const text = localStorage.getItem(key);return text ? JSON.parse(text) : fallback;} catch {return fallback;}}
+
+function writeLocal(key, value) {localStorage.setItem(key, JSON.stringify(value));return value;}
+
+function openPendingDb() {return new Promise((resolve, reject) => {const request = indexedDB.open(PENDING_DB_NAME, PENDING_DB_VERSION);
+
+  request.onupgradeneeded = () => {
+    const db = request.result;
+
+    if (!db.objectStoreNames.contains(PENDING_STORE)) {
+      const store = db.createObjectStore(PENDING_STORE, {
+        keyPath: "path"
+      });
+      store.createIndex("type", "type", { unique: false });
+      store.createIndex("updatedAt", "updatedAt", { unique: false });
+    }
+  };
+
+  request.onsuccess = () => resolve(request.result);
+  request.onerror = () => reject(request.error || new Error("IndexedDB 열기 실패"));
+  request.onblocked = () => reject(new Error("IndexedDB가 다른 탭에 의해 차단되었습니다."));
+});
+
+}
+
+function idbRequest(request) {return new Promise((resolve, reject) => {request.onsuccess = () => resolve(request.result);request.onerror = () => reject(request.error || new Error("IndexedDB 요청 실패"));});}
+
+async function withPendingStore(mode, callback) {const db = await openPendingDb();
+
+try {
+  const tx = db.transaction(PENDING_STORE, mode);
+  const store = tx.objectStore(PENDING_STORE);
+  const result = await callback(store, tx);
+
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error || new Error("IndexedDB 트랜잭션 실패"));
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB 트랜잭션 중단"));
+  });
+
+  return result;
+} finally {
+  db.close();
+}
+
+}
+
+async function putPendingFile(path, data, metadata = {}) {const row = {path: String(path),data,type: metadata.type || "json",serverId: metadata.serverId == null ? null : String(metadata.serverId),date: metadata.date || null,runId: metadata.runId || loadServerQueue()?.runId || null,updatedAt: nowIso()};
+
+await withPendingStore("readwrite", async store => {
+  await idbRequest(store.put(row));
+});
+
+return row;
+
+}
+
+async function getPendingFile(path) {return withPendingStore("readonly", store => idbRequest(store.get(String(path))));}
+
+async function listPendingFiles() {
+  return withPendingStore("readonly", store => new Promise((resolve, reject) => {
+    const rows = [];
+    const request = store.openCursor();
+
+    request.onerror = () => reject(request.error || new Error("IndexedDB cursor 실패"));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        rows.sort((a, b) => String(a.path).localeCompare(String(b.path)));
+        resolve(rows);
+        return;
+      }
+
+      rows.push(cursor.value);
+      cursor.continue();
+    };
+  }));
+}
+
+async function countPendingFilesByType(type) {
+  return withPendingStore("readonly", store =>
+    idbRequest(store.index("type").count(String(type)))
+  );
+}
+
+async function inspectPendingFilesLightweight() {
+  return withPendingStore("readonly", store => new Promise((resolve, reject) => {
+    const stats = {
+      count: 0,
+      serverFiles: 0,
+      movementFiles: 0,
+      legacyWithoutRunId: 0,
+      totalCharsApprox: 0
+    };
+
+    const request = store.openCursor();
+    request.onerror = () => reject(request.error || new Error("IndexedDB cursor 실패"));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve(stats);
+        return;
+      }
+
+      const row = cursor.value || {};
+      stats.count++;
+      if (row.type === "server") stats.serverFiles++;
+      if (row.type === "movement") stats.movementFiles++;
+      if (!row.runId) stats.legacyWithoutRunId++;
+
+      // 상태표시를 위해 정확한 UTF-8 바이트 배열을 만들지 않는다.
+      // JSON 문자열 길이만 사용하여 대형 Uint8Array 생성을 피한다.
+      try { stats.totalCharsApprox += JSON.stringify(row.data)?.length || 0; } catch {}
+
+      cursor.continue();
+    };
+  }));
+}
+
+async function deletePendingFiles(paths = null) {return withPendingStore("readwrite", async store => {if (!Array.isArray(paths)) {await idbRequest(store.clear());return true;}
+
+  for (const path of paths) {
+    await idbRequest(store.delete(String(path)));
+  }
+
+  return true;
+});
+
+}
+
+async function pendingCacheStatus() {
+  const stats = await inspectPendingFilesLightweight();
+
+  const status = {
+    count: stats.count,
+    totalCharsApprox: stats.totalCharsApprox,
+    totalMBApprox: Math.round(stats.totalCharsApprox / 1024 / 1024 * 100) / 100,
+    serverFiles: stats.serverFiles,
+    movementFiles: stats.movementFiles,
+    legacyWithoutRunId: stats.legacyWithoutRunId
+  };
+
+  console.log("[REALPOWER] pending cache:", status);
+  return status;
+}
+
+function getSettings(options = {}) {
+  const legacySettings = { ...readLocal(OLD_SETTINGS_KEY, {}) };
+  const ownSettings = { ...readLocal(SETTINGS_KEY, {}) };
+  delete legacySettings.token;
+  delete ownSettings.token;
+
+  return {
+    ...DEFAULT_SETTINGS,
+    ...legacySettings,
+    ...ownSettings,
+    ...options,
+
+    // GitHub token은 통합 스크립트의 TOPWAR_GITHUB_TOKEN 하나만 사용한다.
+    token: String(options.token ?? sharedGithubToken() ?? "").trim(),
+
+    // GitHub 결과 경로는 프로젝트에서 사용하는 파일로 고정한다.
+    powerBasePath: "src/assets/json/power",
+    allianceDataPath: "src/assets/json/power/allianceData.json",
+    playerDataPath: "src/assets/json/power/playerData.json",
+    serverDataPath: "src/assets/json/power/serverData.json",
+    movementBasePath: "src/assets/json/power/movement",
+    nicknameHistoryBasePath: "src/assets/json/power/nickname",
+    serverListBasePath: "src/assets/json/servers",
+    serversLatestPath: "src/assets/json/servers/servers.json",
+    serversPopularLatestPath: "src/assets/json/servers/servers-popular.json",
+    movementEnabled: true,
+    nicknameHistoryEnabled: true,
+    requiredPlayerCount: Number(options.requiredPlayerCount ?? 100),
+    requiredAllianceCount: Number(options.requiredAllianceCount ?? 2)
+  };
+}
+
+function saveSettings(settings = {}) {
+  const clean = { ...settings };
+  delete clean.token;
+
+  const saved = {
+    ...readLocal(SETTINGS_KEY, {}),
+    ...clean,
+    powerBasePath: "src/assets/json/power",
+    allianceDataPath: "src/assets/json/power/allianceData.json",
+    playerDataPath: "src/assets/json/power/playerData.json",
+    serverDataPath: "src/assets/json/power/serverData.json",
+    movementBasePath: "src/assets/json/power/movement",
+    nicknameHistoryBasePath: "src/assets/json/power/nickname",
+    serverListBasePath: "src/assets/json/servers",
+    serversLatestPath: "src/assets/json/servers/servers.json",
+    serversPopularLatestPath: "src/assets/json/servers/servers-popular.json",
+    movementEnabled: true,
+    nicknameHistoryEnabled: true,
+    requiredPlayerCount: 100,
+    requiredAllianceCount: 2
+  };
+  delete saved.token;
+  writeLocal(SETTINGS_KEY, saved);
+  return getSettings();
+}
+
+function getState() {return readLocal(STATE_KEY, {version: 1,lastRunAt: null,lastServerId: null,running: false,logs: []});}
+
+function saveState(patch = {}) {const state = {...getState(),...patch,version: 1,updatedAt: nowIso()};writeLocal(STATE_KEY, state);return state;}
+
+function compactLogData(data) {
+  if (data == null || typeof data === "string" || typeof data === "number" || typeof data === "boolean") {
+    return data;
+  }
+
+  try {
+    const text = JSON.stringify(data);
+    if (text.length <= 3000) return data;
+    return {
+      truncated: true,
+      approxChars: text.length,
+      preview: text.slice(0, 1500)
+    };
+  } catch {
+    return String(data).slice(0, 1500);
+  }
+}
+
+function pushLog(message, data = null) {
+  const state = getState();
+  const row = { t: nowIso(), message, data: compactLogData(data) };
+  state.logs = Array.isArray(state.logs) ? state.logs : [];
+  state.logs.push(row);
+  if (state.logs.length > 40) state.logs = state.logs.slice(-40);
+  writeLocal(STATE_KEY, state);
+  console.log(`[REALPOWER] ${message}`, data ?? "");
+  renderPanelSafe();
+  return row;
+}
+
+function assertGithubSettings(settings) {if (!settings.owner) throw new Error("GitHub owner가 없습니다. REALPOWER.configure({ owner: '...' })로 설정하세요.");if (!settings.repo) throw new Error("GitHub repo가 없습니다.");if (!settings.branch) throw new Error("GitHub branch가 없습니다.");if (!settings.token) throw new Error("GitHub token이 없습니다.");}
+
+function renderPath(template, vars = {}) {return String(template).replaceAll("{serverId}", String(vars.serverId ?? "unknown")).replaceAll("{date}", String(vars.date ?? todayString())).replaceAll("{timestamp}", String(vars.timestamp ?? Date.now()));}
+
+function encodeGithubPath(path) {return String(path).split("/").map(encodeURIComponent).join("/");}
+
+function toBase64Utf8(text) {const bytes = new TextEncoder().encode(text);const chunkSize = 0x8000;const chunks = [];
+
+for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+  const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+  chunks.push(String.fromCharCode(...chunk));
+}
+
+return btoa(chunks.join(""));}
+
+function fromBase64Utf8(base64) {const binary = atob(String(base64 || "").replace(/\s/g, ""));const bytes = new Uint8Array([...binary].map(ch => ch.charCodeAt(0)));return new TextDecoder("utf-8").decode(bytes);}
+
+async function githubRequest(settings, method, path, body = null) {assertGithubSettings(settings);
+
+const baseUrl =
+  `https://api.github.com/repos/${encodeURIComponent(settings.owner)}` +
+  `/${encodeURIComponent(settings.repo)}/contents/${encodeGithubPath(path)}`;
+
+const url = method === "GET"
+  ? `${baseUrl}?ref=${encodeURIComponent(settings.branch)}`
+  : baseUrl;
+
+throwIfStopped();
+
+const res = await fetch(url, {
+  method,
+  signal: activeAbortSignal() || undefined,
+  headers: {
+    "Accept": "application/vnd.github+json",
+    "Authorization": `Bearer ${settings.token}`,
+    "X-GitHub-Api-Version": "2022-11-28"
+  },
+  body: body == null ? undefined : JSON.stringify(body)
+});
+
+throwIfStopped();
+const text = await res.text();
+const json = safeJsonParse(text, { raw: text });
+
+if (!res.ok) {
+  const err = new Error(`GitHub ${method} ${path} 실패: ${res.status} ${res.statusText}`);
+  err.status = res.status;
+  err.response = json;
+  throw err;
+}
+
+return json;
+
+}
+
+async function githubApiRequest(settings, method, apiPath, body = null) {assertGithubSettings(settings);throwIfStopped();
+
+const normalizedPath = String(apiPath || "")
+  .split("/")
+  .filter(Boolean)
+  .map(encodeURIComponent)
+  .join("/");
+
+const url =
+  `https://api.github.com/repos/${encodeURIComponent(settings.owner)}` +
+  `/${encodeURIComponent(settings.repo)}/${normalizedPath}`;
+
+const res = await fetch(url, {
+  method,
+  signal: activeAbortSignal() || undefined,
+  headers: {
+    "Accept": "application/vnd.github+json",
+    "Authorization": `Bearer ${settings.token}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json"
+  },
+  body: body == null ? undefined : JSON.stringify(body)
+});
+
+throwIfStopped();
+const responseText = await res.text();
+const json = safeJsonParse(responseText, { raw: responseText });
+
+if (!res.ok) {
+  const error = new Error(
+    `GitHub ${method} ${apiPath} 실패: ${res.status} ${res.statusText}`
+  );
+  error.status = res.status;
+  error.response = json;
+  throw error;
+}
+
+return json;
+
+}
+
+async function readGithubFile(settings, path) {try {return await githubRequest(settings, "GET", path);} catch (e) {if (e.status === 404) return null;throw e;}}
+
+async function readGithubJson(settings, path, fallback = null) {const file = await readGithubFile(settings, path);if (!file?.content) return fallback;try {return JSON.parse(fromBase64Utf8(file.content));} catch (e) {console.warn("[REALPOWER] GitHub JSON parse failed:", path, e);return fallback;}}
+
+
+// GitHub Contents API의 base64 응답은 대용량 파일에서 content가 생략될 수 있다.
+// playerData.json처럼 큰 기준 파일은 raw media type으로 직접 읽는다.
+async function readGithubRawText(settings, path) {
+  assertGithubSettings(settings);
+  throwIfStopped();
+
+  const baseUrl =
+    `https://api.github.com/repos/${encodeURIComponent(settings.owner)}` +
+    `/${encodeURIComponent(settings.repo)}/contents/${encodeGithubPath(path)}`;
+  const url = `${baseUrl}?ref=${encodeURIComponent(settings.branch)}`;
+
+  const res = await fetch(url, {
+    method: "GET",
+    signal: activeAbortSignal() || undefined,
+    headers: {
+      "Accept": "application/vnd.github.raw+json",
+      "Authorization": `Bearer ${settings.token}`,
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  });
+
+  throwIfStopped();
+
+  if (res.status === 404) return null;
+
+  const text = await res.text();
+
+  if (!res.ok) {
+    const error = new Error(
+      `GitHub raw GET ${path} 실패: ${res.status} ${res.statusText}`
+    );
+    error.status = res.status;
+    error.response = safeJsonParse(text, { raw: text });
+    throw error;
+  }
+
+  // 일부 환경에서 raw media type 대신 Contents JSON이 반환되는 경우도 처리한다.
+  const parsed = safeJsonParse(text, null);
+  if (
+    parsed &&
+    !Array.isArray(parsed) &&
+    typeof parsed === "object" &&
+    typeof parsed.content === "string"
+  ) {
+    return fromBase64Utf8(parsed.content);
+  }
+
+  return text;
+}
+
+async function readGithubJsonRaw(settings, path, fallback = null) {
+  const text = await readGithubRawText(settings, path);
+  if (text == null || text === "") return fallback;
+
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    console.warn("[REALPOWER] GitHub raw JSON parse failed:", path, error);
+    return fallback;
+  }
+}
+
+async function writeGithubJson(settings, path, data, message) {const existing = await readGithubFile(settings, path);
+
+const body = {
+  message: message || `Update ${path}`,
+  branch: settings.branch,
+  content: toBase64Utf8(JSON.stringify(data, null, 2))
+};
+
+if (existing?.sha) body.sha = existing.sha;
+
+const result = await githubRequest(settings, "PUT", path, body);
+
+return {
+  ok: true,
+  path,
+  sha: result?.content?.sha ?? null,
+  htmlUrl: result?.content?.html_url ?? null
+};
+
+}
+
+// ---------------------------------------------------------------------------// Cocos / TopWar 데이터 접근// ---------------------------------------------------------------------------
+
+function scene() {return window.cc?.director?.getScene?.() || null;}
+
+function findNodeByNameIncludes(root, namePart) {if (!root) return null;if (String(root.name || "").includes(namePart)) return root;
+
+for (const child of root.children || []) {
+  const found = findNodeByNameIncludes(child, namePart);
+  if (found) return found;
+}
+
+return null;
+
+}
+
+function getComponent(componentName) {const root = scene();if (!root) throw new Error("게임 scene을 찾지 못했습니다. 로딩 완료 후 실행하세요.");
+
+try {
+  const rows = root.getComponentsInChildren?.(componentName);
+  if (Array.isArray(rows) && rows.length) {
+    const active = rows.find(comp =>
+      comp &&
+      comp.node &&
+      comp.node.active !== false &&
+      comp.node.activeInHierarchy !== false
+    );
+    return active || rows[0];
+  }
+} catch {}
+
+const node = findNodeByNameIncludes(root, componentName);
+if (node) {
+  try {
+    const comp = node.getComponent?.(componentName);
+    if (comp) return comp;
+  } catch {}
+}
+
+return null;
+
+}
+
+function getComponentSafe(componentName) {try {return getComponent(componentName);} catch {return null;}}
+
+function deepCopy(value) {return JSON.parse(JSON.stringify(value ?? null));}
+
+function parseMaybeJson(value) {if (typeof value !== "string") return value;const s = value.trim();if (!s || (!s.startsWith("{") && !s.startsWith("["))) return value;try {return JSON.parse(s);} catch {return value;}}
+
+function pick(...values) {for (const v of values) {if (v !== undefined && v !== null && v !== "") return v;}return null;}
+
+function num(value) {const n = Number(value);return Number.isFinite(n) ? n : null;}
+
+function str(value) {if (value === undefined || value === null || value === "") return null;return String(value);}
+
+
+function objectValue(value) {
+  let current = value;
+
+  // playerInfo가 일반 JSON 문자열 또는 이중 인코딩된 JSON 문자열인 경우를 모두 처리한다.
+  for (let i = 0; i < 3; i++) {
+    if (current && typeof current === "object" && !Array.isArray(current)) {
+      return current;
+    }
+
+    if (typeof current !== "string") return null;
+
+    const source = current.trim();
+    if (!source) return null;
+
+    try {
+      current = JSON.parse(source);
+    } catch {
+      return null;
+    }
+  }
+
+  return current && typeof current === "object" && !Array.isArray(current)
+    ? current
+    : null;
+}
+
+function safeObjectProperty(object, key) {
+  if (!object) return undefined;
+
+  try {
+    return object[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function firstObjectValue(objects, keys) {
+  for (const object of objects || []) {
+    if (!object) continue;
+
+    for (const key of keys || []) {
+      const value = safeObjectProperty(object, key);
+
+      if (value !== undefined && value !== null && value !== "") {
+        return value;
+      }
+    }
+  }
+
+  return null;
+}
+
+function parsePlayerDetailFromSources(playerSources, row) {
+  const playerInfoValue = firstObjectValue(playerSources, ["playerInfo"]);
+  const parsedPlayerInfo = objectValue(playerInfoValue);
+
+  if (parsedPlayerInfo) return parsedPlayerInfo;
+
+  const directDetailCandidates = [
+    safeObjectProperty(row, "detail"),
+    safeObjectProperty(row, "playerDetail"),
+    safeObjectProperty(row, "userDetail"),
+    safeObjectProperty(row, "roleDetail"),
+    safeObjectProperty(row, "detailInfo")
+  ];
+
+  for (const candidate of directDetailCandidates) {
+    const parsed = objectValue(candidate);
+    if (parsed) return parsed;
+  }
+
+  return {};
+}
+
+// 기존 Java getServerInfo2()와 동일하게
+// _rankList의 각 행 자체를 Player로 보고 player.playerInfo를 PlayerDetail로 파싱한다.
+// Cocos 객체의 프로퍼티가 getter/비열거 속성이어도 JSON 복사 전에 필요한 값을 읽는다.
+function snapshotPlayerRankRow(rawRow) {
+  const row = objectValue(rawRow) || {};
+
+  const nestedPlayerCandidates = [
+    safeObjectProperty(row, "player"),
+    safeObjectProperty(row, "playerData"),
+    safeObjectProperty(row, "role"),
+    safeObjectProperty(row, "user"),
+    Array.isArray(rawRow) ? rawRow[0] : null
+  ]
+    .map(objectValue)
+    .filter(Boolean);
+
+  // Java 코드의 Player는 랭킹 행 자체이므로 row를 최우선으로 둔다.
+  const playerSources = [row, ...nestedPlayerCandidates];
+  const detail = parsePlayerDetailFromSources(playerSources, row);
+
+  const player = {
+    val: firstObjectValue(playerSources, ["val", "score", "value"]),
+    power: firstObjectValue(playerSources, ["power", "cp", "fightPower"]),
+    lv: firstObjectValue(playerSources, ["lv", "level"]),
+    serverId: firstObjectValue(playerSources, [
+      "serverId", "server", "serverNumber", "worldId"
+    ]),
+    allianceId: firstObjectValue(playerSources, [
+      "allianceId", "aid", "guildId"
+    ]),
+    allianceTag: firstObjectValue(playerSources, [
+      "allianceTag", "a_tag", "tag"
+    ]),
+    allianceName: firstObjectValue(playerSources, [
+      "allianceName", "guildName"
+    ]),
+    uid: firstObjectValue(playerSources, [
+      "uid", "pid", "userId", "playerId", "roleId", "id"
+    ]),
+    lang: firstObjectValue(playerSources, ["lang", "language"]),
+    lastLoginTime: firstObjectValue(playerSources, [
+      "lastLoginTime", "lastLogin", "last_login"
+    ]),
+    lastOnlineTime: firstObjectValue(playerSources, [
+      "lastOnlineTime", "lastRequest", "last_request"
+    ]),
+    isOnline: firstObjectValue(playerSources, ["isOnline", "online"]),
+    playerInfo: firstObjectValue(playerSources, ["playerInfo"])
+  };
+
+  const score = num(player.val);
+  const cp = num(player.power);
+  const onlineRaw = player.isOnline;
+  const online =
+    onlineRaw === true ||
+    Number(onlineRaw) === 1 ||
+    String(onlineRaw).toLowerCase() === "true";
+
+  // Java ServerPlayerInfo.create()의 정확한 PlayerDetail 매핑
+  const countryFlag = num(pick(
+    safeObjectProperty(detail, "nationalflag"),
+    safeObjectProperty(detail, "nationalFlag"),
+    safeObjectProperty(detail, "countryFlag")
+  ));
+
+  const gender = num(pick(
+    safeObjectProperty(detail, "gender"),
+    safeObjectProperty(detail, "usergender"),
+    safeObjectProperty(detail, "userGender")
+  ));
+
+  const profile = str(pick(
+    safeObjectProperty(detail, "avatarurl"),
+    safeObjectProperty(detail, "avatarUrl"),
+    safeObjectProperty(detail, "headimgurl"),
+    safeObjectProperty(detail, "headImgUrl")
+  ));
+
+  const nickname = str(pick(
+    safeObjectProperty(detail, "username"),
+    safeObjectProperty(detail, "userName"),
+    safeObjectProperty(detail, "nickname"),
+    safeObjectProperty(detail, "nickName")
+  ));
+
+  const rank = num(firstObjectValue(playerSources, ["rank", "ranking"]));
+
+  return {
+    __realpowerPlayerSnapshot: true,
+    rank,
+    score,
+    cp,
+    uid: str(player.uid),
+    serverId: num(player.serverId),
+    level: num(player.lv),
+    allianceId: str(player.allianceId),
+    allianceTag: str(player.allianceTag),
+    allianceName: str(player.allianceName),
+    lang: str(player.lang),
+    lastLogin: num(player.lastLoginTime),
+    lastRequest: num(player.lastOnlineTime),
+    online,
+    isOnline: online,
+    countryFlag,
+    gender,
+    profile,
+    nickname,
+    name: nickname,
+
+    // 최종 변환 단계에서도 Java 원본 구조를 그대로 참조할 수 있게 보관한다.
+    player,
+    detail,
+    playerDetail: detail,
+    playerInfo: detail
+  };
+}
+
+function inspectPlayerRankRow(index = 0) {
+  const component = getComponentSafe("WorldServerPowerRank");
+  const rows = component?._rankList;
+  const row = Array.isArray(rows) ? rows[Number(index) || 0] : null;
+
+  if (!row) {
+    throw new Error(`개인 랭킹 ${index}번 행을 찾지 못했습니다.`);
+  }
+
+  const playerInfoValue = safeObjectProperty(row, "playerInfo");
+  const detail = objectValue(playerInfoValue);
+  const snapshot = snapshotPlayerRankRow(row);
+
+  const result = {
+    index: Number(index) || 0,
+    rowKeys: (() => {
+      try {
+        return Object.keys(row);
+      } catch {
+        return [];
+      }
+    })(),
+    playerInfoType: typeof playerInfoValue,
+    playerInfoPreview: typeof playerInfoValue === "string"
+      ? playerInfoValue.slice(0, 300)
+      : playerInfoValue,
+    detailKeys: detail ? Object.keys(detail) : [],
+    snapshot
+  };
+
+  console.log("[REALPOWER] 개인 랭킹 원본 진단", result);
+  return result;
+}
+
+function copyRankRows(componentName, rows, requiredCount) {
+  const selected = Array.from(rows || []).slice(0, requiredCount);
+
+  if (componentName === "WorldServerPowerRank") {
+    return selected.map(snapshotPlayerRankRow);
+  }
+
+  return deepCopy(selected);
+}
+
+function normalizePlayer(serverId, rawRow, index = 0) {
+  const raw = rawRow?.__realpowerPlayerSnapshot === true
+    ? rawRow
+    : snapshotPlayerRankRow(rawRow);
+
+  const player = objectValue(raw.player) || {};
+  const detail = objectValue(raw.detail)
+    || objectValue(raw.playerDetail)
+    || objectValue(raw.playerInfo)
+    || {};
+
+  // Java ServerPlayerInfo.create(int server, Player player, PlayerDetail detail)와 동일한 매핑
+  const score = num(pick(raw.score, player.val));
+  const cp = num(pick(raw.cp, player.power));
+
+  const uid = str(pick(raw.uid, player.uid));
+  const nickname = str(pick(
+    raw.nickname,
+    safeObjectProperty(detail, "username"),
+    safeObjectProperty(detail, "nickname")
+  ));
+
+  const allianceId = str(pick(raw.allianceId, player.allianceId));
+  const onlineRaw = pick(raw.isOnline, raw.online, player.isOnline);
+  const online =
+    onlineRaw === true ||
+    Number(onlineRaw) === 1 ||
+    String(onlineRaw).toLowerCase() === "true";
+
+  return {
+    server: Number(serverId),
+    serverNumber: Number(serverId),
+    serverId: String(serverId),
+    rank: num(pick(raw.rank, index + 1)),
+    score,
+    cp,
+    power: cp,
+    uid,
+    level: num(pick(raw.level, player.lv)),
+    lang: str(pick(raw.lang, player.lang)),
+    lastLogin: num(pick(raw.lastLogin, player.lastLoginTime)),
+    lastRequest: num(pick(raw.lastRequest, player.lastOnlineTime)),
+    online,
+    isOnline: online,
+    countryFlag: num(pick(
+      raw.countryFlag,
+      safeObjectProperty(detail, "nationalflag")
+    )),
+    gender: num(pick(
+      raw.gender,
+      safeObjectProperty(detail, "gender"),
+      safeObjectProperty(detail, "usergender")
+    )),
+    profile: str(pick(
+      raw.profile,
+      safeObjectProperty(detail, "avatarurl"),
+      safeObjectProperty(detail, "headimgurl")
+    )),
+    nickname,
+    name: nickname,
+    allianceId,
+    allianceTag: str(pick(raw.allianceTag, player.allianceTag)),
+    allianceName: str(pick(raw.allianceName, player.allianceName))
+    // OOM 방지: 정규화가 끝난 100명 플레이어에 원본 Cocos/snapshot 객체를 다시 매달지 않는다.
+  };
+}
+
+
+function normalizeAlliance(serverId, rawRow, index = 0) {const raw = deepCopy(rawRow) || {};
+
+const aid = str(pick(raw.aid, raw.allianceId, raw.guildId, raw.id));
+const tag = str(pick(raw.tag, raw.allianceTag, raw.a_tag));
+const name = str(pick(raw.name, raw.allianceName, raw.guildName));
+const power = num(pick(raw.cp, raw.power, raw.fightPower, raw.score, raw.value));
+
+return {
+  server: Number(serverId),
+  serverNumber: Number(serverId),
+  serverId: String(serverId),
+  rank: num(pick(raw.rank, raw.ranking, index + 1)),
+  aid,
+  allianceId: aid,
+  tag,
+  allianceTag: tag,
+  name,
+  allianceName: name,
+  cp: power,
+  power,
+  memberCount: num(pick(raw.memberCount, raw.members, raw.num)),
+  raw
+};
+
+}
+
+function rankRowIdentity(row, index = 0) {if (!row || typeof row !== "object") {return `${index}:${String(row)}`;}
+
+return [
+  pick(
+    row.uid,
+    row.userId,
+    row.roleId,
+    row.playerId,
+    row.aid,
+    row.allianceId,
+    row.guildId,
+    row.id,
+    row.rank,
+    row.ranking,
+    index
+  ),
+  pick(
+    row.cp,
+    row.power,
+    row.fightPower,
+    row.score,
+    row.value,
+    ""
+  ),
+  pick(
+    row.name,
+    row.playerName,
+    row.roleName,
+    row.allianceName,
+    row.guildName,
+    row.tag,
+    ""
+  )
+].map(value => String(value ?? "")).join(":");
+
+}
+
+function rankListFingerprint(rows) {if (!Array.isArray(rows)) return "not-array";
+
+const sampleIndexes = [
+  0,
+  1,
+  2,
+  Math.floor(rows.length / 2),
+  rows.length - 3,
+  rows.length - 2,
+  rows.length - 1
+].filter(index => index >= 0 && index < rows.length);
+
+const samples = [...new Set(sampleIndexes)]
+  .map(index => rankRowIdentity(rows[index], index))
+  .join("|");
+
+return `${rows.length}#${samples}`;
+
+}
+
+function rankCaptureSnapshot(componentName) {const component = getComponentSafe(componentName);const rows = component?._rankList;
+
+return {
+  component,
+  componentName,
+  active: componentIsActive(componentName),
+  rowsReference: Array.isArray(rows) ? rows : null,
+  count: Array.isArray(rows) ? rows.length : 0,
+  fingerprint: rankListFingerprint(rows),
+  capturedAt: Date.now()
+};
+
+}
+
+function prepareRankCapture(componentName) {const snapshot = rankCaptureSnapshot(componentName);
+
+// 닫힌 패널에 이전 서버 데이터가 남아 있으면 새 조사와 구분하기 위해 비운다.
+// 화면이 열린 상태에서는 절대 건드리지 않는다.
+if (
+  snapshot.component &&
+  snapshot.active === false &&
+  Array.isArray(snapshot.component._rankList)
+) {
+  try {
+    snapshot.component._rankList = [];
+    snapshot.cacheCleared = true;
+  } catch {
+    try {
+      snapshot.component._rankList.length = 0;
+      snapshot.cacheCleared = true;
+    } catch {
+      snapshot.cacheCleared = false;
+    }
+  }
+}
+
+pushLog(`${componentName} 수집 준비`, {
+  previousCount: snapshot.count,
+  previousFingerprint: snapshot.fingerprint,
+  cacheCleared: snapshot.cacheCleared === true
+});
+
+return snapshot;
+
+}
+
+function expectedRankCount(componentName, options = {}) {if (componentName === "WorldServerPowerRank") {return Number(options.requiredPlayerCount ?? 100);}
+
+if (componentName === "WorldServerAlliancePowerRank") {
+  return Number(options.requiredAllianceCount ?? 2);
+}
+
+return 1;
+
+}
+
+function rankProgressPhase(componentName) {return componentName === "WorldServerPowerRank"? "collecting-personal": "collecting-alliance";}
+
+async function waitForRankList(componentName,options = {},baseline = null) {const timeoutMs = Number(options.rankDataTimeoutMs ??options.rankOpenTimeoutMs ??20000);const intervalMs = Number(options.rankPollIntervalMs ?? 100);const requiredCount = expectedRankCount(componentName,options);
+
+const startedAt = Date.now();
+let lastReportedCount = -1;
+
+while (Date.now() - startedAt < timeoutMs) {
+  throwIfStopped();
+
+  const component = getComponentSafe(componentName);
+  const rows = component?._rankList;
+  const active = componentIsActive(componentName);
+  const count = Array.isArray(rows) ? rows.length : 0;
+  const fingerprint = rankListFingerprint(rows);
+
+  if (count !== lastReportedCount) {
+    lastReportedCount = count;
+
+    updateProgress({
+      phase: rankProgressPhase(componentName),
+      rankComponentName: componentName,
+      rankCount: Math.min(count, requiredCount),
+      requiredRankCount: requiredCount
+    });
+
+    pushLog(
+      `${componentName} 데이터 수신: ${count}/${requiredCount}`,
+      {
+        active,
+        fingerprint
+      }
+    );
+  }
+
+  // 캐시는 패널을 열기 전에 비우므로 시간 대기는 필요 없다.
+  // 개인 100명 또는 동맹 2개가 실제로 들어온 순간 즉시 확정한다.
+  if (
+    active &&
+    Array.isArray(rows) &&
+    count >= requiredCount
+  ) {
+    const copiedRows = copyRankRows(
+      componentName,
+      rows,
+      requiredCount
+    );
+
+    if (
+      !Array.isArray(copiedRows) ||
+      copiedRows.length !== requiredCount
+    ) {
+      await sleep(intervalMs);
+      continue;
+    }
+
+    updateProgress({
+      phase: "rank-collected",
+      rankComponentName: componentName,
+      rankCount: requiredCount,
+      requiredRankCount: requiredCount
+    });
+
+    pushLog(
+      `${componentName} 수집 확정: ${requiredCount}개`,
+      {
+        receivedCount: count,
+        savedCount: copiedRows.length,
+        requiredCount,
+        fingerprint,
+        baselineFingerprint:
+          baseline?.fingerprint ?? null,
+        baselineCount: baseline?.count ?? 0,
+        completionRule: "required-count-only"
+      }
+    );
+
+    return {
+      component,
+      rows: copiedRows,
+      count: copiedRows.length,
+      receivedCount: count,
+      requiredCount,
+      fingerprint,
+      baselineFingerprint:
+        baseline?.fingerprint ?? null,
+      completionRule: "required-count-only",
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(intervalMs);
+}
+
+throw new Error(
+  `${componentName}._rankList 수집 시간 초과 ` +
+  `(현재 ${Math.max(lastReportedCount, 0)}/${requiredCount})`
+);
+
+}
+
+function getServerPowerRankRaw() {
+  const comp = getComponent("WorldServerPowerRank");
+  const rows = comp?._rankList;
+
+  if (!Array.isArray(rows)) {
+    throw new Error("WorldServerPowerRank._rankList 없음. 개인 전투력 랭킹 화면을 먼저 열어야 합니다.");
+  }
+
+  return Array.from(rows).map(snapshotPlayerRankRow);
+}
+
+function getServerAllianceRankRaw() {const comp = getComponent("WorldServerAlliancePowerRank");const rows = comp?._rankList;if (!Array.isArray(rows)) {throw new Error("WorldServerAlliancePowerRank._rankList 없음. 동맹 전투력 랭킹 화면을 먼저 열어야 합니다.");}return deepCopy(rows);}
+
+function getServerPowerRank(serverId) {return getServerPowerRankRaw().map((row, index) => normalizePlayer(serverId, row, index));}
+
+function getServerAllianceRank(serverId) {return getServerAllianceRankRaw().map((row, index) => normalizeAlliance(serverId, row, index));}
+
+function enrichPlayers(players, alliances) {const byAid = new Map();
+
+for (const a of alliances || []) {
+  if (a.aid != null) byAid.set(String(a.aid), a);
+  if (a.allianceId != null) byAid.set(String(a.allianceId), a);
+}
+
+for (const p of players || []) {
+  const a = byAid.get(String(p.allianceId ?? ""));
+  if (!a) continue;
+  p.allianceName = p.allianceName || a.name || a.allianceName || null;
+  p.allianceTag = p.allianceTag || a.tag || a.allianceTag || null;
+}
+
+return players;
+
+}
+
+function buildServerInfo(serverId, players, alliances) {const enrichedPlayers = enrichPlayers(players || [], alliances || []);const exportedAt = nowIso();
+
+return {
+  version: 1,
+  source: "realpower-standalone-userscript",
+  serverNumber: Number(serverId),
+  server: Number(serverId),
+  serverId: String(serverId),
+  researchTime: Date.now(),
+  exportedAt,
+  playerList: enrichedPlayers,
+  allianceList: alliances || [],
+  summary: {
+    players: enrichedPlayers.length,
+    alliances: (alliances || []).length,
+    totalPlayerPower: enrichedPlayers.reduce((sum, p) => sum + Number(p.cp ?? p.power ?? 0), 0),
+    totalAlliancePower: (alliances || []).reduce((sum, a) => sum + Number(a.cp ?? a.power ?? 0), 0)
+  }
+};
+
+}
+
+function getAllServersFromListPanel() {const comp = getComponent("WorldServerListPanel");const data = comp?.m_data || comp?._data || null;if (!data || typeof data !== "object") {throw new Error("WorldServerListPanel.m_data 없음. 서버 목록 창을 먼저 열어야 합니다.");}
+
+return Object.keys(data)
+  .map(Number)
+  .filter(Number.isFinite)
+  .sort((a, b) => a - b);
+
+}
+
+function getAllServerInfoFromListPanel() {const comp = getComponent("WorldServerListPanel");const data = comp?.m_data || comp?._data || null;if (!data || typeof data !== "object") {throw new Error("WorldServerListPanel.m_data 없음. 서버 목록 창을 먼저 열어야 합니다.");}
+
+return Object.entries(data)
+  .map(([serverNumber, row]) => ({
+    serverNumber: Number(serverNumber),
+    server: Number(serverNumber),
+    serverId: String(serverNumber),
+    kingUid: str(row?.throneUid || ""),
+    kingName: row?.throneName || "",
+    allianceTag: row?.allianceTag || "",
+    playerList: row?.throneUid
+      ? [{ uid: String(row.throneUid), nickname: row.throneName || "" }]
+      : [],
+    allianceList: row?.allianceTag
+      ? [{ tag: row.allianceTag }]
+      : []
+  }))
+  .filter(row => Number.isFinite(row.serverNumber))
+  .sort((a, b) => a.serverNumber - b.serverNumber);
+
+}
+
+// Java JavascriptUtil.getAllServers2()와 동일한 역할.
+// 서버 목록 패널의 m_data를 기준으로 전체 서버 목록과 왕/동맹 기본정보를 만든다.
+function getAllServers2() {const root = scene();if (!root) {throw new Error("게임 scene이 없습니다.");}
+
+const panelNode = findNodeByNameIncludes(root, "WorldServerListPanel");
+const panel = panelNode?.getComponent?.("WorldServerListPanel")
+  || getComponentSafe("WorldServerListPanel");
+
+const data = panel?.m_data;
+if (!data || typeof data !== "object") {
+  throw new Error(
+    "WorldServerListPanel.m_data를 찾지 못했습니다. " +
+    "월드맵에서 서버 목록 창을 한 번 열어 전체 서버 데이터가 로드되게 해주세요."
+  );
+}
+
+const servers = Object.keys(data)
+  .map(serverNumber => {
+    const row = data[serverNumber] || {};
+    const number = Number(serverNumber);
+
+    return {
+      serverNumber: number,
+      server: number,
+      serverId: String(number),
+      kingUid: String(row.throneUid || ""),
+      kingName: row.throneName || "",
+      allianceTag: row.allianceTag || "",
+      playerList: row.throneUid
+        ? [{
+            uid: String(row.throneUid),
+            nickname: row.throneName || ""
+          }]
+        : [],
+      allianceList: row.allianceTag
+        ? [{
+            tag: row.allianceTag || ""
+          }]
+        : []
+    };
+  })
+  .filter(server => Number.isFinite(server.serverNumber))
+  .sort((a, b) => a.serverNumber - b.serverNumber);
+
+pushLog(`전체 서버 목록 조회 완료: ${servers.length}개`);
+return servers;
+
+}
+
+function getRealPowerServerOrderMode(options = {}) {
+  const requested = String(
+    options.serverOrderMode ??
+    window.TOPWAR?.getAutomationServerOrderMode?.() ??
+    (() => {
+      try { return localStorage.getItem("TOPWAR_AUTOMATION_SERVER_ORDER"); }
+      catch { return null; }
+    })() ??
+    "popular"
+  ).trim().toLowerCase();
+
+  return ["sequential", "popular", "random"].includes(requested)
+    ? requested
+    : "popular";
+}
+
+function orderRealPowerServers(servers, options = {}) {
+  const mode = getRealPowerServerOrderMode(options);
+  const rows = Array.isArray(servers) ? servers.slice() : [];
+
+  if (mode === "sequential") {
+    return rows.sort((a, b) => Number(a?.serverNumber) - Number(b?.serverNumber));
+  }
+
+  if (mode === "random") {
+    for (let i = rows.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rows[i], rows[j]] = [rows[j], rows[i]];
+    }
+    return rows;
+  }
+
+  const popularIds = window.TOPWAR?.getCachedRemoteServerList?.()?.serverIds ?? [];
+  if (!popularIds.length) {
+    return rows.sort((a, b) => Number(a?.serverNumber) - Number(b?.serverNumber));
+  }
+
+  const rank = new Map(popularIds.map((id, index) => [String(id), index]));
+  return rows.sort((a, b) => {
+    const ar = rank.get(String(a?.serverNumber));
+    const br = rank.get(String(b?.serverNumber));
+    if (ar != null && br != null) return ar - br;
+    if (ar != null) return -1;
+    if (br != null) return 1;
+    return Number(a?.serverNumber) - Number(b?.serverNumber);
+  });
+}
+
+function initializeAllServerQueue(options = {}) {
+  const mode = getRealPowerServerOrderMode(options);
+  const servers = orderRealPowerServers(getAllServers2(), { ...options, serverOrderMode: mode });
+  const queue = saveServerQueue(servers, {
+    status: "ready",
+    source: `WorldServerListPanel.m_data:${mode}`,
+    allServers: true,
+    serverOrderMode: mode,
+    total: servers.length,
+    currentIndex: 0,
+    currentServerId: null,
+    lastError: null
+  });
+
+  pushLog(`전체 서버 조사 큐 생성: ${servers.length}개`, {
+    serverOrderMode: mode,
+    firstServers: servers.slice(0, 20).map(server => server.serverNumber)
+  });
+  return queue;
+}
+
+function findWorldMapController() {const directCandidates = [window.NWorldController,window.NWorldMapController,window.mapCtrl];
+
+for (const candidate of directCandidates) {
+  if (candidate && typeof candidate.getWorldMapDataInstance === "function") {
+    return candidate;
+  }
+}
+
+const root = scene();
+if (!root) return null;
+
+const visited = new Set();
+const stack = [root];
+
+while (stack.length) {
+  const node = stack.pop();
+  if (!node || visited.has(node)) continue;
+  visited.add(node);
+
+  for (const comp of node._components || []) {
+    if (comp && typeof comp.getWorldMapDataInstance === "function") {
+      return comp;
+    }
+  }
+
+  for (const child of node.children || []) stack.push(child);
+}
+
+return null;
+
+}
+
+function getCurrentServerId() {const ctrl = findWorldMapController();const range = ctrl?.getWorldMapDataInstance?.()?.status?.viewport?.range;
+
+const value = pick(
+  range?.k,
+  range?.serverId,
+  range?.worldId,
+  ctrl?.serverId,
+  ctrl?.worldId
+);
+
+const number = Number(value);
+return Number.isFinite(number) ? number : null;
+
+}
+
+function isServerListPanelActive() {const panel = getComponentSafe("WorldServerListPanel");if (!panel?.node) return false;return panel.node.active !== false && panel.node.activeInHierarchy !== false;}
+
+function collectActiveSceneTexts() {const root = scene();if (!root) return [];
+
+const texts = [];
+const stack = [root];
+const visited = new Set();
+
+while (stack.length) {
+  const node = stack.pop();
+  if (!node || visited.has(node)) continue;
+  visited.add(node);
+
+  if (node.active !== false && node.activeInHierarchy !== false) {
+    try {
+      const label = node.getComponent?.(cc.Label);
+      if (label?.string) texts.push(String(label.string));
+    } catch {}
+
+    try {
+      const rich = node.getComponent?.(cc.RichText);
+      if (rich?.string) texts.push(String(rich.string));
+    } catch {}
+
+    for (const child of node.children || []) stack.push(child);
+  }
+}
+
+return texts;
+
+}
+
+function isTargetBattleAreaVisible(serverId) {const target = String(Number(serverId));const texts = collectActiveSceneTexts();
+
+const patterns = [
+  new RegExp(`전투\\s*지역\\s*S?${target}\\b`, "i"),
+  new RegExp(`BATTLE\\s*AREA\\s*S?${target}\\b`, "i"),
+  new RegExp(`戦闘\\s*地域\\s*S?${target}\\b`, "i"),
+  new RegExp(`战斗\\s*区域\\s*S?${target}\\b`, "i")
+];
+
+return texts.some(text => patterns.some(pattern => pattern.test(String(text))));
+
+}
+
+function hasBattleAreaRankButtons() {try {return !!findRankButton("personal")?.match && !!findRankButton("alliance")?.match;} catch {return false;}}
+
+async function waitForServerSelection(serverId, options = {}) {const target = Number(serverId);const waitMs = Number(options.serverSelectionWaitMs ?? options.moveDelayMs ?? 1800);
+
+// gotoServerById()는 서버 목록에서 대상을 선택/표시하는 단계다.
+// 이 시점에는 아직 중앙 서버 카드를 클릭하지 않았으므로
+// 전투 지역 제목이나 랭킹 버튼이 나타나지 않는 것이 정상이다.
+await sleep(waitMs);
+
+return {
+  ok: true,
+  verification: "selection-delay",
+  targetServerId: target,
+  elapsedMs: waitMs,
+  panelActive: isServerListPanelActive()
+};
+
+}
+
+async function waitForBattleAreaEntry(serverId, options = {}) {const target = Number(serverId);const timeoutMs = Number(options.moveTimeoutMs ?? 15000);const intervalMs = Number(options.movePollIntervalMs ?? 200);const minimumSettleMs = Number(options.minimumMoveSettleMs ?? 700);const startedAt = Date.now();
+
+let titleMatched = false;
+let rankButtonsVisible = false;
+
+while (Date.now() - startedAt < timeoutMs) {
+  const elapsedMs = Date.now() - startedAt;
+
+  titleMatched = isTargetBattleAreaVisible(target);
+  rankButtonsVisible = hasBattleAreaRankButtons();
+
+  if (
+    elapsedMs >= minimumSettleMs &&
+    (titleMatched || rankButtonsVisible)
+  ) {
+    return {
+      ok: true,
+      verification: titleMatched
+        ? "battle-area-title"
+        : "battle-area-buttons",
+      targetServerId: target,
+      elapsedMs,
+      titleMatched,
+      rankButtonsVisible
+    };
+  }
+
+  await sleep(intervalMs);
+}
+
+return {
+  ok: false,
+  targetServerId: target,
+  elapsedMs: Date.now() - startedAt,
+  titleMatched,
+  rankButtonsVisible
+};
+
+}
+
+// 이전 API 호환용. 실제 전투 지역 진입 확인은 중앙 클릭 후 waitForBattleAreaEntry()에서 한다.
+async function waitForServerMove(serverId, options = {}) {return waitForServerSelection(serverId, options);}
+
+async function moveToServer(serverId, options = {}) {const settings = getSettings(options);const target = Number(serverId);
+
+if (!Number.isFinite(target)) {
+  throw new Error(`잘못된 서버번호: ${serverId}`);
+}
+
+const retryCount = Math.max(0, Number(settings.moveRetryCount ?? 2));
+let lastResult = null;
+
+for (let attempt = 1; attempt <= retryCount + 1; attempt++) {
+  const comp = getComponent("WorldServerListPanel");
+
+  if (!comp || typeof comp.gotoServerById !== "function") {
+    throw new Error(
+      "WorldServerListPanel.gotoServerById 없음. " +
+      "서버 목록 창을 연 상태에서 조사를 시작해야 합니다."
+    );
+  }
+
+  pushLog(`${target} 서버 선택 요청 (${attempt}/${retryCount + 1})`, {
+    panelActive: isServerListPanelActive()
+  });
+
+  try {
+    comp.gotoServerById(target);
+  } catch (error) {
+    lastResult = {
+      ok: false,
+      targetServerId: target,
+      attempt,
+      error: error?.message || String(error)
+    };
+
+    pushLog(`${target} gotoServerById 호출 실패`, lastResult);
+
+    if (attempt <= retryCount) {
+      await sleep(Number(settings.moveRetryDelayMs ?? 1000));
+      continue;
+    }
+
+    throw error;
+  }
+
+  lastResult = await waitForServerSelection(target, settings);
+
+  // 여기서는 전투 지역 화면 진입 여부를 검사하지 않는다.
+  // Java 원본처럼 다음 단계에서 중앙 서버 카드를 클릭해야 진입이 완료된다.
+  pushLog(`${target} 서버 선택 완료`, lastResult);
+  return lastResult;
+}
+
+throw new Error(
+  `${target} 서버 선택 실패: gotoServerById 호출을 완료하지 못했습니다.`
+);
+
+}
+
+// ---------------------------------------------------------------------------// Canvas click automation// ---------------------------------------------------------------------------
+
+function getCanvas() {return document.querySelector("canvas");}
+
+function toClientPoint(x, y, options = {}) {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
+
+const settings = getSettings(options);
+const rect = canvas.getBoundingClientRect();
+const baseWidth = Number(settings.coordinateBaseWidth ?? 480);
+const baseHeight = Number(settings.coordinateBaseHeight ?? 720);
+const coordinateMode = options.coordinateMode || "scaled";
+
+const scaleX = coordinateMode === "raw"
+  ? 1
+  : rect.width / baseWidth;
+
+const scaleY = coordinateMode === "raw"
+  ? 1
+  : rect.height / baseHeight;
+
+const localX = Number(x) * scaleX;
+const localY = Number(y) * scaleY;
+
+return {
+  sourceX: Number(x),
+  sourceY: Number(y),
+  coordinateMode,
+  localX,
+  localY,
+  clientX: rect.left + localX,
+  clientY: rect.top + localY,
+  canvasRect: {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
+  },
+  scaleX,
+  scaleY
+};
+
+}
+
+function readCalibration() {const saved = readLocal(CALIBRATION_KEY, null);
+
+if (!saved || typeof saved !== "object") {
+  return {
+    version: 1,
+    updatedAt: null,
+    points: {}
+  };
+}
+
+saved.points = saved.points && typeof saved.points === "object"
+  ? saved.points
+  : {};
+
+return saved;
+
+}
+
+function writeCalibration(calibration) {const value = {version: 1,updatedAt: nowIso(),points: calibration?.points || {}};
+
+writeLocal(CALIBRATION_KEY, value);
+return value;
+
+}
+
+function calibrationPoint(name) {return readCalibration().points?.[String(name)] || null;}
+
+function saveCalibrationPoint(name, event) {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
+
+const rect = canvas.getBoundingClientRect();
+const clientX = Number(event.clientX);
+const clientY = Number(event.clientY);
+
+const point = {
+  name: String(name),
+  capturedAt: nowIso(),
+  normalizedX: rect.width > 0
+    ? (clientX - rect.left) / rect.width
+    : 0,
+  normalizedY: rect.height > 0
+    ? (clientY - rect.top) / rect.height
+    : 0,
+  clientX,
+  clientY,
+  canvas: {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
+  }
+};
+
+const calibration = readCalibration();
+calibration.points[String(name)] = point;
+writeCalibration(calibration);
+
+pushLog(`클릭 좌표 보정 저장: ${name}`, point);
+return point;
+
+}
+
+function captureNextClick(name, timeoutMs = 30000) {const allowed = ["center", "personal", "alliance", "back"];const key = String(name);
+
+if (!allowed.includes(key)) {
+  throw new Error(
+    `보정 이름 오류: ${key}. center, personal, alliance, back 중 하나를 사용하세요.`
+  );
+}
+
+const canvas = getCanvas();
+if (!canvas) throw new Error("canvas 없음");
+
+pushLog(
+  `${key} 좌표 보정 대기 중 - 30초 안에 실제 게임 화면에서 원하는 위치를 직접 클릭하세요.`
+);
+
+return new Promise((resolve, reject) => {
+  let finished = false;
+
+  const cleanup = () => {
+    canvas.removeEventListener("pointerdown", handler, true);
+    clearTimeout(timer);
+  };
+
+  const handler = event => {
+    if (finished) return;
+
+    // 사용자가 직접 누른 실제 입력만 보정값으로 인정한다.
+    if (event.isTrusted === false) return;
+
+    finished = true;
+    cleanup();
+
+    try {
+      const point = saveCalibrationPoint(key, event);
+      resolve(point);
+    } catch (error) {
+      reject(error);
+    }
+  };
+
+  const timer = setTimeout(() => {
+    if (finished) return;
+    finished = true;
+    cleanup();
+    reject(new Error(`${key} 좌표 보정 시간 초과`));
+  }, Number(timeoutMs) || 30000);
+
+  // capture 단계에서 좌표만 기록하고 이벤트 전파는 막지 않는다.
+  // 따라서 사용자가 클릭한 원래 게임 동작도 그대로 실행된다.
+  canvas.addEventListener("pointerdown", handler, true);
+});
+
+}
+
+function calibratedClientPoint(name) {const saved = calibrationPoint(name);if (!saved) return null;
+
+const canvas = getCanvas();
+if (!canvas) return null;
+
+const rect = canvas.getBoundingClientRect();
+
+return {
+  name: String(name),
+  source: "calibration",
+  normalizedX: saved.normalizedX,
+  normalizedY: saved.normalizedY,
+  localX: Number(saved.normalizedX) * rect.width,
+  localY: Number(saved.normalizedY) * rect.height,
+  clientX: rect.left + Number(saved.normalizedX) * rect.width,
+  clientY: rect.top + Number(saved.normalizedY) * rect.height,
+  canvasRect: {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
+  }
+};
+
+}
+
+function clickSavedPoint(name, fallbackX, fallbackY, options = {}) {const point = calibratedClientPoint(name);
+
+if (point) {
+  dispatchDomClick(point);
+
+  const result = {
+    ...point,
+    clickMode: "calibrated-dom",
+    domDispatched: true
+  };
+
+  pushLog(`보정 좌표 클릭: ${name}`, result);
+  return result;
+}
+
+const result = clickCanvas(
+  fallbackX,
+  fallbackY,
+  {
+    ...options,
+    clickMode: "dom-only",
+    coordinateMode: "scaled"
+  }
+);
+
+pushLog(`보정값 없음 - 기존 좌표 사용: ${name}`, result);
+return result;
+
+}
+
+function calibrationStatus() {const status = readCalibration();console.log("[REALPOWER] calibration:", status);return status;}
+
+function clearCalibration(name = null) {if (name == null) {localStorage.removeItem(CALIBRATION_KEY);pushLog("전체 클릭 좌표 보정값 삭제");return true;}
+
+const calibration = readCalibration();
+delete calibration.points[String(name)];
+writeCalibration(calibration);
+pushLog(`클릭 좌표 보정값 삭제: ${name}`);
+return true;
+
+}
+
+function getCocosDesignSize() {try {const size = cc?.view?.getDesignResolutionSize?.();if (size?.width && size?.height) {return {width: Number(size.width),height: Number(size.height)};}} catch {}
+
+try {
+  const size = cc?.view?.getVisibleSize?.();
+  if (size?.width && size?.height) {
+    return {
+      width: Number(size.width),
+      height: Number(size.height)
+    };
+  }
+} catch {}
+
+return {
+  width: 480,
+  height: 720
+};
+
+}
+
+function canvasLocalToCocos(localX, localY) {const canvas = getCanvas();const rect = canvas?.getBoundingClientRect?.();if (!rect) return null;
+
+const design = getCocosDesignSize();
+
+return {
+  x: Number(localX) / rect.width * design.width,
+  y: design.height - Number(localY) / rect.height * design.height,
+  designWidth: design.width,
+  designHeight: design.height
+};
+
+}
+
+function nodeWorldRect(node) {if (!node) return null;
+
+try {
+  const box = node.getBoundingBoxToWorld?.();
+  if (box && Number.isFinite(box.x) && Number.isFinite(box.y)) {
+    return {
+      left: Number(box.x),
+      right: Number(box.x + box.width),
+      bottom: Number(box.y),
+      top: Number(box.y + box.height)
+    };
+  }
+} catch {}
+
+try {
+  const size = node.getContentSize?.();
+  const world = node.convertToWorldSpaceAR?.({ x: 0, y: 0 });
+  if (!size || !world) return null;
+
+  const ax = Number(node.anchorX ?? 0.5);
+  const ay = Number(node.anchorY ?? 0.5);
+  const sx = Math.abs(Number(node.scaleX ?? 1));
+  const sy = Math.abs(Number(node.scaleY ?? 1));
+
+  return {
+    left: world.x - size.width * sx * ax,
+    right: world.x + size.width * sx * (1 - ax),
+    bottom: world.y - size.height * sy * ay,
+    top: world.y + size.height * sy * (1 - ay)
+  };
+} catch {
+  return null;
+}
+
+}
+
+function findActiveButtonAtCanvasPoint(localX, localY) {const root = scene();if (!root || !window.cc?.Button) return null;
+
+const cocosPoint = canvasLocalToCocos(localX, localY);
+if (!cocosPoint) return null;
+
+const cocosX = cocosPoint.x;
+const cocosY = cocosPoint.y;
+
+const matches = [];
+const stack = [{ node: root, depth: 0 }];
+
+while (stack.length) {
+  const { node, depth } = stack.pop();
+  if (!node || node.active === false || node.activeInHierarchy === false) continue;
+
+  let button = null;
+  try { button = node.getComponent?.(cc.Button); } catch {}
+
+  if (button && button.interactable !== false && button.enabled !== false) {
+    const r = nodeWorldRect(node);
+    if (
+      r &&
+      cocosX >= r.left &&
+      cocosX <= r.right &&
+      cocosY >= r.bottom &&
+      cocosY <= r.top
+    ) {
+      const area = Math.abs((r.right - r.left) * (r.top - r.bottom));
+      matches.push({ node, button, rect: r, depth, area, cocosPoint });
+    }
+  }
+
+  for (const child of node.children || []) {
+    stack.push({ node: child, depth: depth + 1 });
+  }
+}
+
+// 가장 깊고, 같은 깊이면 면적이 작은 버튼을 우선한다.
+matches.sort((a, b) => b.depth - a.depth || a.area - b.area);
+return matches[0] || null;
+
+}
+
+function invokeButtonDirectly(match) {if (!match?.button) return false;
+
+const button = match.button;
+let invoked = false;
+
+try {
+  if (Array.isArray(button.clickEvents) && button.clickEvents.length) {
+    for (const handler of button.clickEvents) {
+      try {
+        handler?.emit?.([button]);
+        invoked = true;
+      } catch (error) {
+        console.warn("[REALPOWER] clickEvent emit 실패", error);
+      }
+    }
+  }
+} catch {}
+
+try {
+  match.node?.emit?.("click", button);
+  invoked = true;
+} catch {}
+
+try {
+  match.node?.emit?.("touchend", {
+    target: match.node,
+    currentTarget: match.node
+  });
+  invoked = true;
+} catch {}
+
+return invoked;
+
+}
+
+function dispatchDomClick(point) {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
+
+const base = {
+  bubbles: true,
+  cancelable: true,
+  composed: true,
+  clientX: point.clientX,
+  clientY: point.clientY,
+  screenX: point.clientX,
+  screenY: point.clientY,
+  button: 0,
+  buttons: 1,
+  pointerId: 1,
+  pointerType: "mouse",
+  isPrimary: true
+};
+
+try {
+  canvas.dispatchEvent(new PointerEvent("pointerdown", base));
+  canvas.dispatchEvent(new PointerEvent("pointerup", { ...base, buttons: 0 }));
+} catch {}
+
+canvas.dispatchEvent(new MouseEvent("mousedown", base));
+canvas.dispatchEvent(new MouseEvent("mouseup", { ...base, buttons: 0 }));
+canvas.dispatchEvent(new MouseEvent("click", { ...base, buttons: 0 }));
+
+}
+
+function getCanvasCenterPoint() {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
+
+const rect = canvas.getBoundingClientRect();
+
+return {
+  source: "canvas-center",
+  normalizedX: 0.5,
+  normalizedY: 0.5,
+  localX: rect.width / 2,
+  localY: rect.height / 2,
+  clientX: rect.left + rect.width / 2,
+  clientY: rect.top + rect.height / 2,
+  canvasRect: {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
+  }
+};
+
+}
+
+function clickCanvasCenter() {const point = getCanvasCenterPoint();
+
+// 처음 실제 동작이 확인됐던 DOM Canvas 이벤트만 정확히 한 번 보낸다.
+// Cocos 메서드 호출, 버튼 후보 탐색, 재클릭은 하지 않는다.
+dispatchDomClick(point);
+
+pushLog("Canvas 중앙 서버 카드 클릭", point);
+return point;
+
+}
+
+async function openSelectedServerByCanvasCenter(serverId, options = {}) {const settings = getSettings(options);
+
+throwIfStopped();
+
+const click = clickCanvasCenter();
+
+// UI 로딩만 기다리고 TheaterPanel 탐지 실패로 조사를 중단하지 않는다.
+// 실제 진입 여부는 다음 개인 랭킹 단계에서 자연스럽게 검증된다.
+await sleep(Number(settings.serverCardOpenDelayMs ?? 1600));
+
+throwIfStopped();
+
+return {
+  ok: true,
+  method: "canvas-center-dom-click",
+  serverId: Number(serverId),
+  click
+};
+
+}
+
+function clickCanvasNormalized(normalizedX, normalizedY) {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
+
+const rect = canvas.getBoundingClientRect();
+const nx = Math.max(0, Math.min(1, Number(normalizedX)));
+const ny = Math.max(0, Math.min(1, Number(normalizedY)));
+
+const point = {
+  source: "normalized",
+  normalizedX: nx,
+  normalizedY: ny,
+  localX: rect.width * nx,
+  localY: rect.height * ny,
+  clientX: rect.left + rect.width * nx,
+  clientY: rect.top + rect.height * ny,
+  canvasRect: {
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height
+  }
+};
+
+dispatchDomClick(point);
+pushLog("화면 비율 좌표 클릭", point);
+return point;
+
+}
+
+function clickCanvas(x, y, options = {}) {const point = toClientPoint(x, y, options);const mode = options.clickMode || "both";
+
+let buttonMatch = null;
+let directInvoked = false;
+let domDispatched = false;
+
+if (mode !== "dom-only") {
+  buttonMatch = findActiveButtonAtCanvasPoint(point.localX, point.localY);
+  directInvoked = invokeButtonDirectly(buttonMatch);
+}
+
+if (mode !== "direct-only") {
+  dispatchDomClick(point);
+  domDispatched = true;
+}
+
+const result = {
+  ...point,
+  clickMode: mode,
+  directButtonInvoked: directInvoked,
+  domDispatched,
+  buttonNodeName: buttonMatch?.node?.name || null,
+  cocosPoint: buttonMatch?.cocosPoint || canvasLocalToCocos(point.localX, point.localY)
+};
+
+pushLog(`게임 좌표 클릭 (${x}, ${y})`, result);
+return result;
+
+}
+
+async function clickSequence(points, delayMs, options = {}) {const results = [];
+
+for (const [x, y] of points || []) {
+  results.push(clickCanvas(x, y, options));
+  await sleep(delayMs);
+}
+
+return results;
+
+}
+
+async function collectOpenRanks(serverId) {const players = getServerPowerRank(serverId);const alliances = getServerAllianceRank(serverId);return buildServerInfo(serverId, players, alliances);}
+
+
+
+function componentClassName(component) {if (!component) return "";
+
+return String(
+  component.__classname__ ||
+  component.constructor?.name ||
+  component.name ||
+  ""
+);
+
+}
+
+function componentMethodNames(component) {if (!component) return [];
+
+const names = new Set();
+let current = component;
+let depth = 0;
+
+while (current && depth < 8) {
+  for (const name of Object.getOwnPropertyNames(current)) {
+    if (name === "constructor") continue;
+
+    try {
+      if (typeof component[name] === "function") names.add(name);
+    } catch {}
+  }
+
+  current = Object.getPrototypeOf(current);
+  depth++;
+}
+
+return [...names];
+
+}
+
+function nodePathText(node, maxDepth = 8) {const names = [];let current = node;let depth = 0;
+
+while (current && depth < maxDepth) {
+  if (current.name) names.push(String(current.name));
+  current = current.parent;
+  depth++;
+}
+
+return names.join(" > ");
+
+}
+
+function clickEventDescriptor(eventHandler) {if (!eventHandler) return "";
+
+const target = eventHandler.target || eventHandler._target || null;
+const fields = [
+  eventHandler.component,
+  eventHandler._componentName,
+  eventHandler.componentName,
+  eventHandler.handler,
+  eventHandler._handler,
+  eventHandler.customEventData,
+  eventHandler._customEventData,
+  target?.name,
+  target ? nodePathText(target, 5) : ""
+];
+
+return fields
+  .filter(value => value !== undefined && value !== null && value !== "")
+  .map(String)
+  .join(" ");
+
+}
+
+function buttonSemanticDescriptor(row) {const componentNames = [];
+
+for (const component of row?.node?._components || []) {
+  const name = componentClassName(component);
+  if (name) componentNames.push(name);
+}
+
+const eventText = (row?.button?.clickEvents || [])
+  .map(clickEventDescriptor)
+  .join(" ");
+
+return [
+  row?.name,
+  row?.text,
+  nodePathText(row?.node),
+  componentNames.join(" "),
+  eventText
+]
+  .filter(Boolean)
+  .join(" ")
+  .replace(/\s+/g, " ")
+  .trim();
+
+}
+
+function semanticRankScore(text, kind) {const value = String(text || "").replace(/\s+/g, "").toLowerCase();
+
+const allianceWords = [
+  "alliance",
+  "guild",
+  "union",
+  "alliancepower",
+  "alliancepowerrank",
+  "guildpowerrank",
+  "길드",
+  "동맹",
+  "연맹"
+];
+
+const personalWords = [
+  "personal",
+  "player",
+  "individual",
+  "user",
+  "role",
+  "person",
+  "개인",
+  "플레이어",
+  "유저"
+];
+
+const rankWords = [
+  "rank",
+  "ranking",
+  "power",
+  "fight",
+  "combat",
+  "force",
+  "전투력",
+  "랭킹",
+  "순위"
+];
+
+const hasAlliance = allianceWords.some(word => value.includes(word));
+const hasPersonal = personalWords.some(word => value.includes(word));
+const rankHits = rankWords.filter(word => value.includes(word)).length;
+
+let score = rankHits * 200;
+
+if (kind === "personal") {
+  if (hasPersonal) score += 2000;
+  if (hasAlliance) score -= 5000;
+
+  // WorldServerPowerRank / onClickPowerRank처럼 개인 표시가 생략된 경우.
+  if (
+    !hasAlliance &&
+    (
+      value.includes("worldserverpowerrank") ||
+      value.includes("openpowerrank") ||
+      value.includes("clickpowerrank") ||
+      value.includes("showpowerrank")
+    )
+  ) {
+    score += 1500;
+  }
+} else {
+  if (hasAlliance) score += 3000;
+  if (hasPersonal && !hasAlliance) score -= 3000;
+
+  if (
+    value.includes("worldserveralliancepowerrank") ||
+    value.includes("alliancepowerrank") ||
+    value.includes("guildpowerrank")
+  ) {
+    score += 2500;
+  }
+}
+
+return score;
+
+}
+
+function semanticCloseScore(text) {const value = String(text || "").replace(/\s+/g, "").toLowerCase();
+
+const words = [
+  "back",
+  "close",
+  "return",
+  "exit",
+  "dismiss",
+  "cancel",
+  "hide",
+  "previous",
+  "뒤로",
+  "닫기",
+  "돌아가기",
+  "返回",
+  "关闭"
+];
+
+let score = 0;
+
+for (const word of words) {
+  if (value.includes(word)) score += 1000;
+}
+
+return score;
+
+}
+
+function primitiveServerIdMatch(value, targetServerId) {if (value === undefined || value === null) return false;
+
+const target = String(Number(targetServerId));
+
+if (
+  typeof value === "string" ||
+  typeof value === "number" ||
+  typeof value === "bigint"
+) {
+  return String(value) === target;
+}
+
+return false;
+
+}
+
+function objectServerIdScore(value, targetServerId, depth = 0, visited = new Set()) {if (value === undefined || value === null || depth > 2) return 0;
+
+if (primitiveServerIdMatch(value, targetServerId)) return 50;
+
+if (typeof value !== "object" || visited.has(value)) return 0;
+visited.add(value);
+
+const preferredKeys = [
+  "serverId",
+  "_serverId",
+  "server",
+  "_server",
+  "sid",
+  "_sid",
+  "worldId",
+  "_worldId",
+  "id",
+  "_id",
+  "data",
+  "_data",
+  "info",
+  "_info",
+  "cfg",
+  "_cfg"
+];
+
+let score = 0;
+
+for (const key of preferredKeys) {
+  let child;
+
+  try {
+    child = value[key];
+  } catch {
+    continue;
+  }
+
+  if (primitiveServerIdMatch(child, targetServerId)) {
+    score += key.toLowerCase().includes("server") ||
+             key.toLowerCase().includes("world") ||
+             key.toLowerCase().includes("sid")
+      ? 1000
+      : 300;
+    continue;
+  }
+
+  if (
+    child &&
+    typeof child === "object" &&
+    depth < 2
+  ) {
+    score += objectServerIdScore(
+      child,
+      targetServerId,
+      depth + 1,
+      visited
+    );
+  }
+}
+
+return score;
+
+}
+
+function nearestButtonFromNode(node, maxAncestorDepth = 6) {let current = node;let depth = 0;
+
+while (current && depth <= maxAncestorDepth) {
+  try {
+    const button = current.getComponent?.(cc.Button);
+
+    if (
+      button &&
+      button.enabled !== false &&
+      button.interactable !== false
+    ) {
+      return {
+        node: current,
+        button,
+        ancestorDepth: depth,
+        name: String(current.name || ""),
+        text: collectNodeText(current),
+        rect: nodeWorldRect(current)
+      };
+    }
+  } catch {}
+
+  current = current.parent;
+  depth++;
+}
+
+const stack = [{ node, depth: 0 }];
+const visited = new Set();
+
+while (stack.length) {
+  const item = stack.shift();
+  if (!item?.node || visited.has(item.node) || item.depth > 4) continue;
+  visited.add(item.node);
+
+  try {
+    const button = item.node.getComponent?.(cc.Button);
+
+    if (
+      button &&
+      button.enabled !== false &&
+      button.interactable !== false
+    ) {
+      return {
+        node: item.node,
+        button,
+        descendantDepth: item.depth,
+        name: String(item.node.name || ""),
+        text: collectNodeText(item.node),
+        rect: nodeWorldRect(item.node)
+      };
+    }
+  } catch {}
+
+  for (const child of item.node.children || []) {
+    stack.push({
+      node: child,
+      depth: item.depth + 1
+    });
+  }
+}
+
+return null;
+
+}
+
+function findServerNodeCandidates(targetServerId) {const panel = getComponentSafe("WorldServerListPanel");const root = panel?.node;
+
+if (!root) return [];
+
+const candidates = [];
+const stack = [{ node: root, depth: 0 }];
+const visited = new Set();
+const targetText = String(Number(targetServerId));
+
+while (stack.length) {
+  const { node, depth } = stack.pop();
+
+  if (!node || visited.has(node)) continue;
+  visited.add(node);
+
+  if (node.active !== false && node.activeInHierarchy !== false) {
+    let score = 0;
+    const reasons = [];
+    const nodeName = String(node.name || "");
+
+    if (nodeName.includes(targetText)) {
+      score += 1200;
+      reasons.push("node-name");
+    }
+
+    for (const component of node._components || []) {
+      const componentScore = objectServerIdScore(
+        component,
+        targetServerId
+      );
+
+      if (componentScore > 0) {
+        score += componentScore;
+        reasons.push(
+          `component:${componentClassName(component)}`
+        );
+      }
+    }
+
+    if (score > 0) {
+      const button = nearestButtonFromNode(node);
+
+      candidates.push({
+        node,
+        depth,
+        score: score + (button ? 500 : 0),
+        reasons,
+        name: nodeName,
+        path: nodePathText(node, 10),
+        button
+      });
+    }
+
+    for (const child of node.children || []) {
+      stack.push({
+        node: child,
+        depth: depth + 1
+      });
+    }
+  }
+}
+
+candidates.sort((a, b) =>
+  b.score - a.score ||
+  b.depth - a.depth
+);
+
+return candidates;
+
+}
+
+function serverOpenSemanticScore(text, targetServerId) {const value = String(text || "").replace(/\s+/g, "").toLowerCase();
+
+const target = String(Number(targetServerId));
+
+const positiveWords = [
+  "worldservertheater",
+  "servertheater",
+  "theater",
+  "enterserver",
+  "openserver",
+  "showserver",
+  "serverdetail",
+  "serveritem",
+  "clickserver",
+  "selectserver",
+  "onserverclick",
+  "onserveritem",
+  "전투지역",
+  "서버진입",
+  "서버상세"
+];
+
+const negativeWords = [
+  "gotoServerById".toLowerCase(),
+  "rank",
+  "power",
+  "alliance",
+  "guild",
+  "back",
+  "close",
+  "return",
+  "refresh",
+  "filter",
+  "sort"
+];
+
+let score = 0;
+
+for (const word of positiveWords) {
+  if (value.includes(word.toLowerCase())) score += 1500;
+}
+
+for (const word of negativeWords) {
+  if (value.includes(word.toLowerCase())) score -= 3000;
+}
+
+if (value.includes(target)) score += 1000;
+if (value.includes("server")) score += 200;
+if (value.includes("click") || value.includes("open") || value.includes("enter")) {
+  score += 500;
+}
+
+return score;
+
+}
+
+async function waitForTheaterPanel(timeoutMs = 5000) {const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  const panel = getTheaterPanelComponent();
+
+  if (
+    panel?.node &&
+    panel.node.active !== false &&
+    panel.node.activeInHierarchy !== false
+  ) {
+    return {
+      ok: true,
+      component: panel,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(100);
+}
+
+return {
+  ok: false,
+  component: null,
+  elapsedMs: Date.now() - startedAt
+};
+
+}
+
+function theaterPanelSnapshot() {const rows = [];const root = scene();if (!root) return rows;
+
+const stack = [root];
+const visited = new Set();
+
+while (stack.length) {
+  const node = stack.pop();
+  if (!node || visited.has(node)) continue;
+  visited.add(node);
+
+  for (const component of node._components || []) {
+    if (componentClassName(component) === "WorldServerTheaterPanel") {
+      rows.push({
+        component,
+        node,
+        uuid: node.uuid || node._id || null,
+        active: node.active !== false,
+        activeInHierarchy: node.activeInHierarchy !== false,
+        siblingIndex: node.getSiblingIndex?.() ?? null
+      });
+    }
+  }
+
+  for (const child of node.children || []) stack.push(child);
+}
+
+return rows;
+
+}
+
+async function waitForFreshTheaterPanel(beforeSnapshot = [], timeoutMs = 5000) {const beforeComponents = new Set(beforeSnapshot.map(row => row.component));const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  const current = theaterPanelSnapshot();
+  const activeRows = current.filter(row => row.active && row.activeInHierarchy);
+  const fresh = activeRows.find(row => !beforeComponents.has(row.component));
+
+  if (fresh) {
+    return {
+      ok: true,
+      fresh: true,
+      row: fresh,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  // 같은 풀링 인스턴스를 재사용할 수 있으므로, 서버 목록 패널의 실제 표시 상태가
+  // 바뀌었고 Theater 패널이 활성화되어 있으면 새 진입으로 인정한다.
+  if (activeRows.length > 0 && !isServerListPanelActive()) {
+    return {
+      ok: true,
+      fresh: false,
+      row: activeRows[0],
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(100);
+}
+
+return {
+  ok: false,
+  fresh: false,
+  row: null,
+  elapsedMs: Date.now() - startedAt
+};
+
+}
+
+async function emitNodeOpenEvents(node) {if (!node) return false;
+
+let emitted = false;
+
+for (const eventName of [
+  "click",
+  "touchend",
+  "mouseup",
+  "pointerup"
+]) {
+  try {
+    node.emit?.(eventName, {
+      target: node,
+      currentTarget: node
+    });
+    emitted = true;
+  } catch {}
+}
+
+return emitted;
+
+}
+
+function nodeListenerDescriptor(node) {const keys = new Set();const visited = new Set();
+
+const scan = (value, depth = 0) => {
+  if (!value || typeof value !== "object" || visited.has(value) || depth > 2) return;
+  visited.add(value);
+
+  for (const key of Object.keys(value)) {
+    keys.add(String(key));
+    let child;
+    try { child = value[key]; } catch { continue; }
+    if (child && typeof child === "object") scan(child, depth + 1);
+  }
+};
+
+scan(node?._bubblingListeners);
+scan(node?._capturingListeners);
+scan(node?._eventProcessor);
+scan(node?._callbackTable);
+
+return [...keys].join(" ");
+
+}
+
+function serverControlNegativeScore(text) {const value = String(text || "").replace(/\s+/g, "").toLowerCase();const words = ["close", "back", "return", "exit", "cancel","left", "right", "previous", "next", "arrow","tab", "help", "info", "search", "filter", "sort","rank", "power", "alliance", "guild","닫기", "뒤로", "도움", "검색", "정렬", "랭킹"];
+
+return words.reduce((sum, word) =>
+  value.includes(word) ? sum + 5000 : sum,
+  0
+);
+
+}
+
+function serverCardPositiveScore(text) {const value = String(text || "").replace(/\s+/g, "").toLowerCase();const words = ["server", "worldserver", "item", "cell", "card", "theater","region", "area", "enter", "open", "select", "touch", "click","서버", "지역", "전투"];
+
+return words.reduce((sum, word) =>
+  value.includes(word) ? sum + 500 : sum,
+  0
+);
+
+}
+
+function ancestorServerDataScore(node, targetServerId, stopNode) {let current = node;let depth = 0;let score = 0;
+
+while (current && depth < 7 && current !== stopNode) {
+  for (const component of current._components || []) {
+    const className = componentClassName(component);
+    if (className === "WorldServerListPanel") continue;
+    score += objectServerIdScore(component, targetServerId, 0, new Set());
+  }
+  current = current.parent;
+  depth++;
+}
+
+return score;
+
+}
+
+function collectStructuralServerOpenCandidates(panel, targetServerId) {if (!panel?.node) return [];
+
+return buttonsInsideNode(panel.node)
+  .map(row => {
+    const rect = row.rect;
+    const width = rect ? Math.max(0, rect.right - rect.left) : 0;
+    const height = rect ? Math.max(0, rect.top - rect.bottom) : 0;
+    const area = width * height;
+    const descriptor = [
+      row.descriptor || buttonSemanticDescriptor(row),
+      nodeListenerDescriptor(row.node),
+      nodePathText(row.node, 12)
+    ].join(" ");
+
+    const targetDataScore = ancestorServerDataScore(
+      row.node,
+      targetServerId,
+      panel.node
+    );
+    const positive = serverCardPositiveScore(descriptor);
+    const negative = serverControlNegativeScore(descriptor);
+
+    // 고정 좌표는 쓰지 않는다. 서버 카드형 큰 인터랙션 노드와
+    // server/item/cell 관련 구조를 우선한다.
+    const score =
+      targetDataScore * 10 +
+      positive +
+      Math.min(area, 2000000) / 100 -
+      negative +
+      row.depth * 5;
+
+    return {
+      ...row,
+      descriptor,
+      targetDataScore,
+      positive,
+      negative,
+      width,
+      height,
+      area,
+      score
+    };
+  })
+  .filter(row =>
+    row.negative === 0 &&
+    (row.area >= 500 || row.targetDataScore > 0 || row.positive > 0)
+  )
+  .sort((a, b) =>
+    b.score - a.score ||
+    b.area - a.area ||
+    b.depth - a.depth
+  );
+
+}
+
+async function invokeStructuralServerCandidates(panel,targetServerId,theaterBefore,settings) {const candidates = collectStructuralServerOpenCandidates(panel,targetServerId);
+
+for (let index = 0; index < Math.min(candidates.length, 25); index++) {
+  throwIfStopped();
+  const candidate = candidates[index];
+
+  const invoked = invokeButtonDirectly(candidate);
+
+  pushLog(`${targetServerId} 구조 기반 서버 카드 시도 ${index + 1}`, {
+    nodeName: candidate.name,
+    path: nodePathText(candidate.node, 10),
+    score: Math.round(candidate.score),
+    area: Math.round(candidate.area),
+    targetDataScore: candidate.targetDataScore,
+    descriptor: candidate.descriptor,
+    invoked
+  });
+
+  if (!invoked) continue;
+
+  const opened = await waitForFreshTheaterPanel(
+    theaterBefore,
+    Number(settings.theaterOpenAttemptTimeoutMs ?? 2500)
+  );
+
+  if (opened.ok) {
+    return {
+      ok: true,
+      method: "structural-cocos-button",
+      serverId: Number(targetServerId),
+      candidateIndex: index + 1,
+      nodeName: candidate.name,
+      nodePath: nodePathText(candidate.node, 10),
+      descriptor: candidate.descriptor
+    };
+  }
+
+  // 잘못된 후보를 눌렀더라도 서버 선택 화면으로 다시 맞춘다.
+  try {
+    panel.gotoServerById?.(Number(targetServerId));
+    await sleep(350);
+  } catch {}
+}
+
+console.table(
+  candidates.slice(0, 30).map((row, index) => ({
+    index,
+    name: row.name,
+    score: Math.round(row.score),
+    area: Math.round(row.area),
+    targetDataScore: row.targetDataScore,
+    positive: row.positive,
+    descriptor: row.descriptor
+  }))
+);
+
+return {
+  ok: false,
+  method: "structural-cocos-button",
+  candidateCount: candidates.length
+};
+
+}
+
+async function openSelectedServerSemantic(serverId, options = {}) {const settings = getSettings(options);const target = Number(serverId);const panel = getComponentSafe("WorldServerListPanel");
+
+if (!panel?.node) {
+  throw new Error("WorldServerListPanel을 찾지 못했습니다.");
+}
+
+const alreadyOpen = await waitForTheaterPanel(150);
+
+if (alreadyOpen.ok) {
+  return {
+    ok: true,
+    method: "already-open",
+    serverId: target
+  };
+}
+
+// 1. target serverId를 실제 데이터로 가진 노드/컴포넌트를 찾아 실행한다.
+const serverNodes = findServerNodeCandidates(target);
+
+for (const candidate of serverNodes) {
+  let invoked = false;
+
+  if (candidate.button) {
+    invoked = invokeButtonDirectly(candidate.button);
+  }
+
+  if (!invoked) {
+    invoked = await emitNodeOpenEvents(candidate.node);
+  }
+
+  pushLog(`${target} 서버 노드 실행 시도`, {
+    name: candidate.name,
+    path: candidate.path,
+    score: candidate.score,
+    reasons: candidate.reasons,
+    buttonName: candidate.button?.name || null,
+    invoked
+  });
+
+  if (!invoked) continue;
+
+  const opened = await waitForTheaterPanel(
+    Number(settings.theaterOpenTimeoutMs ?? 5000)
+  );
+
+  if (opened.ok) {
+    pushLog(`${target} 전투 지역 패널 열기 성공`, {
+      method: "server-node",
+      nodeName: candidate.name,
+      path: candidate.path
+    });
+
+    return {
+      ok: true,
+      method: "server-node",
+      serverId: target,
+      nodeName: candidate.name,
+      nodePath: candidate.path
+    };
+  }
+
+  try {
+    panel.gotoServerById?.(target);
+    await sleep(300);
+  } catch {}
+}
+
+// 2. 서버 목록 패널 안의 버튼 clickEvents를 의미 기반으로 찾는다.
+const buttonCandidates = buttonsInsideNode(panel.node)
+  .map(row => ({
+    ...row,
+    descriptor: row.descriptor || buttonSemanticDescriptor(row),
+    score: serverOpenSemanticScore(
+      row.descriptor || buttonSemanticDescriptor(row),
+      target
+    )
+  }))
+  .filter(row => row.score > 0)
+  .sort((a, b) =>
+    b.score - a.score ||
+    b.depth - a.depth
+  );
+
+for (const candidate of buttonCandidates) {
+  const invoked = invokeButtonDirectly(candidate);
+
+  pushLog(`${target} 서버 열기 버튼 시도`, {
+    name: candidate.name,
+    descriptor: candidate.descriptor,
+    score: candidate.score,
+    invoked
+  });
+
+  if (!invoked) continue;
+
+  const opened = await waitForTheaterPanel(
+    Number(settings.theaterOpenTimeoutMs ?? 5000)
+  );
+
+  if (opened.ok) {
+    return {
+      ok: true,
+      method: "semantic-button",
+      serverId: target,
+      buttonName: candidate.name,
+      descriptor: candidate.descriptor
+    };
+  }
+
+  try {
+    panel.gotoServerById?.(target);
+    await sleep(300);
+  } catch {}
+}
+
+// 3. WorldServerListPanel 컴포넌트 메서드를 의미 기반으로 실행한다.
+const serverData = panel.m_data?.[target] ||
+  panel.m_data?.[String(target)] ||
+  null;
+
+const methodCandidates = componentMethodNames(panel)
+  .filter(methodName => methodName !== "gotoServerById")
+  .map(methodName => {
+    const descriptor =
+      `${componentClassName(panel)} ${methodName}`;
+
+    return {
+      methodName,
+      descriptor,
+      score: serverOpenSemanticScore(descriptor, target),
+      argCount: Number(panel[methodName]?.length ?? 0)
+    };
+  })
+  .filter(row => row.score > 0)
+  .sort((a, b) => b.score - a.score);
+
+for (const candidate of methodCandidates) {
+  const argumentSets = [];
+
+  if (candidate.argCount === 0) {
+    argumentSets.push([]);
+  }
+
+  argumentSets.push(
+    [target],
+    [String(target)]
+  );
+
+  if (serverData) {
+    argumentSets.push(
+      [serverData],
+      [target, serverData],
+      [serverData, target]
+    );
+  }
+
+  for (const args of argumentSets) {
+    try {
+      panel[candidate.methodName](...args);
+    } catch {
+      continue;
+    }
+
+    pushLog(`${target} 서버 열기 메서드 시도`, {
+      methodName: candidate.methodName,
+      descriptor: candidate.descriptor,
+      args: args.map(arg =>
+        typeof arg === "object"
+          ? "[object]"
+          : arg
+      )
+    });
+
+    const opened = await waitForTheaterPanel(
+      Number(settings.theaterOpenTimeoutMs ?? 5000)
+    );
+
+    if (opened.ok) {
+      return {
+        ok: true,
+        method: "panel-method",
+        serverId: target,
+        methodName: candidate.methodName
+      };
+    }
+
+    try {
+      panel.gotoServerById?.(target);
+      await sleep(300);
+    } catch {}
+  }
+}
+
+console.table(
+  serverNodes.slice(0, 30).map((row, index) => ({
+    index,
+    name: row.name,
+    path: row.path,
+    score: row.score,
+    buttonName: row.button?.name,
+    reasons: row.reasons.join(",")
+  }))
+);
+
+console.table(
+  buttonCandidates.slice(0, 30).map((row, index) => ({
+    index,
+    name: row.name,
+    score: row.score,
+    descriptor: row.descriptor
+  }))
+);
+
+console.table(
+  methodCandidates.slice(0, 30).map((row, index) => ({
+    index,
+    methodName: row.methodName,
+    score: row.score,
+    argCount: row.argCount,
+    descriptor: row.descriptor
+  }))
+);
+
+throw new Error(
+  `${target} 서버 전투 지역을 좌표 없이 열지 못했습니다.`
+);
+
+}
+
+function getTheaterPanelComponent() {return getComponentSafe("WorldServerTheaterPanel");}
+
+function componentsFromNodeAndAncestors(node, maxDepth = 8) {const rows = [];const seen = new Set();let current = node;let depth = 0;
+
+while (current && depth < maxDepth) {
+  for (const component of current._components || []) {
+    if (!component || seen.has(component)) continue;
+    seen.add(component);
+
+    rows.push({
+      component,
+      node: current,
+      depth,
+      className: componentClassName(component)
+    });
+  }
+
+  current = current.parent;
+  depth++;
+}
+
+return rows;
+
+}
+
+function buttonsInsideNode(root) {if (!root || !window.cc?.Button) return [];
+
+const rows = [];
+const stack = [{ node: root, depth: 0 }];
+const visited = new Set();
+
+while (stack.length) {
+  const { node, depth } = stack.pop();
+  if (!node || visited.has(node)) continue;
+  visited.add(node);
+
+  if (node.active !== false && node.activeInHierarchy !== false) {
+    let button = null;
+
+    try {
+      button = node.getComponent?.(cc.Button);
+    } catch {}
+
+    if (button && button.enabled !== false && button.interactable !== false) {
+      const row = {
+        node,
+        button,
+        depth,
+        name: String(node.name || ""),
+        text: collectNodeText(node),
+        rect: nodeWorldRect(node)
+      };
+
+      row.descriptor = buttonSemanticDescriptor(row);
+      rows.push(row);
+    }
+
+    for (const child of node.children || []) {
+      stack.push({ node: child, depth: depth + 1 });
+    }
+  }
+}
+
+return rows;
+
+}
+
+async function waitForRequestedRankPanel(kind, timeoutMs = 4000) {const targetName = kind === "personal"? "WorldServerPowerRank": "WorldServerAlliancePowerRank";
+
+const wrongName = kind === "personal"
+  ? "WorldServerAlliancePowerRank"
+  : "WorldServerPowerRank";
+
+const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  if (componentIsActive(targetName)) {
+    return {
+      ok: true,
+      targetOpened: true,
+      wrongOpened: false,
+      componentName: targetName,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  if (componentIsActive(wrongName)) {
+    return {
+      ok: false,
+      targetOpened: false,
+      wrongOpened: true,
+      componentName: wrongName,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(100);
+}
+
+return {
+  ok: false,
+  targetOpened: false,
+  wrongOpened: false,
+  componentName: null,
+  elapsedMs: Date.now() - startedAt
+};
+
+}
+
+async function invokeRankMethodCandidate(component, methodName, kind, settings) {try {component[methodName]();} catch (error) {return {ok: false,methodName,error: error?.message || String(error)};}
+
+const result = await waitForRequestedRankPanel(
+  kind,
+  Number(settings.rankOpenTimeoutMs ?? 12000)
+);
+
+return {
+  ...result,
+  methodName
+};
+
+}
+
+async function openRankPanelSemantic(kind, options = {}) {const settings = getSettings(options);const theater = getTheaterPanelComponent();
+
+if (!theater?.node) {
+  throw new Error("WorldServerTheaterPanel을 찾지 못했습니다.");
+}
+
+const methodCandidates = componentMethodNames(theater)
+  .map(name => ({
+    name,
+    descriptor: `${componentClassName(theater)} ${name}`,
+    score: semanticRankScore(`${componentClassName(theater)} ${name}`, kind)
+  }))
+  .filter(row => row.score > 0)
+  .sort((a, b) => b.score - a.score);
+
+for (const candidate of methodCandidates) {
+  const result = await invokeRankMethodCandidate(
+    theater,
+    candidate.name,
+    kind,
+    settings
+  );
+
+  pushLog(`${kind} 랭킹 메서드 시도`, {
+    method: candidate.name,
+    score: candidate.score,
+    result
+  });
+
+  if (result.targetOpened) {
+    return {
+      ok: true,
+      kind,
+      method: "component-method",
+      methodName: candidate.name
+    };
+  }
+
+  if (result.wrongOpened) {
+    await closeRankPanel(result.componentName, settings);
+    await sleep(300);
+  }
+}
+
+const buttonCandidates = buttonsInsideNode(theater.node)
+  .map(row => ({
+    ...row,
+    score: semanticRankScore(row.descriptor, kind)
+  }))
+  .filter(row => row.score > 0)
+  .sort((a, b) => b.score - a.score || b.depth - a.depth);
+
+for (const candidate of buttonCandidates) {
+  const invoked = invokeButtonDirectly(candidate);
+
+  pushLog(`${kind} 랭킹 버튼 시도`, {
+    nodeName: candidate.name,
+    descriptor: candidate.descriptor,
+    score: candidate.score,
+    invoked
+  });
+
+  if (!invoked) continue;
+
+  const result = await waitForRequestedRankPanel(
+    kind,
+    Number(settings.rankOpenTimeoutMs ?? 12000)
+  );
+
+  if (result.targetOpened) {
+    return {
+      ok: true,
+      kind,
+      method: "cocos-button-event",
+      buttonName: candidate.name,
+      descriptor: candidate.descriptor
+    };
+  }
+
+  if (result.wrongOpened) {
+    await closeRankPanel(result.componentName, settings);
+    await sleep(300);
+  }
+}
+
+console.table(
+  buttonCandidates.slice(0, 30).map((row, index) => ({
+    index,
+    name: row.name,
+    text: row.text,
+    score: row.score,
+    descriptor: row.descriptor
+  }))
+);
+
+console.table(
+  methodCandidates.slice(0, 30).map((row, index) => ({
+    index,
+    methodName: row.name,
+    score: row.score,
+    descriptor: row.descriptor
+  }))
+);
+
+throw new Error(
+  `${kind === "personal" ? "개인" : "길드"} 전투력 랭킹 실행 메서드/버튼을 찾지 못했습니다.`
+);
+
+}
+
+function normalizeCommandName(name) {return String(name || "").replace(/[^a-zA-Z0-9가-힣]/g, "").toLowerCase();}
+
+function closeCommandScore(methodName, className = "", path = "") {const name = normalizeCommandName(methodName);const context = normalizeCommandName(`${className} ${path}`);
+
+const blocked = [
+  "open",
+  "show",
+  "create",
+  "init",
+  "start",
+  "enable",
+  "disable",
+  "destroy",
+  "update",
+  "refresh",
+  "reset",
+  "load",
+  "schedule",
+  "unschedule",
+  "removeall",
+  "clearall"
+];
+
+if (blocked.some(word => name.includes(word))) return -100000;
+
+const exact = new Map([
+  ["onclickclose", 20000],
+  ["onbtnclose", 19800],
+  ["oncloseclick", 19600],
+  ["onclickbtnclose", 19400],
+  ["onclosebtnclick", 19200],
+  ["close", 19000],
+  ["closepanel", 18800],
+  ["closeview", 18600],
+  ["closewindow", 18400],
+  ["closeself", 18200],
+  ["onclose", 18000],
+
+  ["onclickback", 17500],
+  ["onbtnback", 17300],
+  ["onbackclick", 17100],
+  ["onclickbtnback", 16900],
+  ["goback", 16700],
+  ["back", 16500],
+  ["onback", 16300],
+  ["returnback", 16100],
+
+  ["dismiss", 15000],
+  ["hide", 14500],
+  ["hidepanel", 14300],
+  ["hideview", 14100],
+  ["removefromparent", 13000]
+]);
+
+if (exact.has(name)) return exact.get(name);
+
+let score = 0;
+
+if (/^(on)?(click|btn)?close/.test(name)) score += 17000;
+if (/close(click|handler|callback|panel|view|window|self)?$/.test(name)) score += 16000;
+if (/^(on)?(click|btn)?back/.test(name)) score += 15000;
+if (/(go|return)?back$/.test(name)) score += 14500;
+if (/dismiss|hidepanel|hideview/.test(name)) score += 13000;
+
+if (context.includes("worldserverpowerrank")) score += 500;
+if (context.includes("worldserveralliancepowerrank")) score += 500;
+if (context.includes("worldservertheaterpanel")) score += 500;
+if (context.includes("uiframescreen")) score += 300;
+
+return score;
+
+}
+
+function resolveEventHandlerTarget(handler) {const targetNode = handler?.target || handler?._target || null;const componentName = String(handler?.component ||handler?._componentName ||handler?.componentName ||"");const handlerName = String(handler?.handler ||handler?._handler ||"");const customEventData =handler?.customEventData ??handler?._customEventData ??null;
+
+let component = null;
+
+if (targetNode && componentName) {
+  try {
+    component = targetNode.getComponent?.(componentName) || null;
+  } catch {}
+
+  if (!component) {
+    component = (targetNode._components || []).find(row =>
+      componentClassName(row) === componentName ||
+      componentClassName(row).includes(componentName)
+    ) || null;
+  }
+}
+
+return {
+  targetNode,
+  componentName,
+  handlerName,
+  customEventData,
+  component
+};
+
+}
+
+function invokeCloseEventHandler(handler) {if (!handler) return {ok: false,reason: "handler missing"};
+
+const resolved = resolveEventHandlerTarget(handler);
+
+// Cocos EventHandler 자체가 있으면 연결된 컴포넌트 메서드를 직접 실행한다.
+try {
+  if (typeof handler.emit === "function") {
+    handler.emit([]);
+    return {
+      ok: true,
+      method: "event-handler-emit",
+      ...resolved
+    };
+  }
+} catch (error) {
+  // 아래 직접 호출로 계속 진행한다.
+}
+
+const fn = resolved.component?.[resolved.handlerName];
+
+if (typeof fn !== "function") {
+  return {
+    ok: false,
+    reason: "resolved handler function missing",
+    ...resolved
+  };
+}
+
+try {
+  if (fn.length <= 0) {
+    fn.call(resolved.component);
+  } else if (fn.length === 1) {
+    fn.call(
+      resolved.component,
+      resolved.customEventData
+    );
+  } else {
+    fn.call(
+      resolved.component,
+      null,
+      resolved.customEventData
+    );
+  }
+
+  return {
+    ok: true,
+    method: "event-handler-direct-call",
+    ...resolved
+  };
+} catch (error) {
+  return {
+    ok: false,
+    reason: error?.message || String(error),
+    ...resolved
+  };
+}
+
+}
+
+function collectPanelCloseCommands(componentName) {const target = getComponentSafe(componentName);
+
+if (!target?.node) {
+  return {
+    componentName,
+    target: null,
+    methods: [],
+    handlers: []
+  };
+}
+
+const componentRows = componentsFromNodeAndAncestors(
+  target.node,
+  12
+);
+
+const methods = [];
+
+for (const row of componentRows) {
+  for (const methodName of componentMethodNames(row.component)) {
+    const score = closeCommandScore(
+      methodName,
+      row.className,
+      nodePathText(row.node)
+    );
+
+    if (score <= 0) continue;
+
+    methods.push({
+      component: row.component,
+      componentClassName: row.className,
+      node: row.node,
+      depth: row.depth,
+      methodName,
+      argCount: Number(
+        row.component?.[methodName]?.length ?? 0
+      ),
+      score,
+      path: nodePathText(row.node, 12)
+    });
+  }
+}
+
+methods.sort((a, b) =>
+  b.score - a.score ||
+  a.depth - b.depth ||
+  a.argCount - b.argCount
+);
+
+let root = target.node;
+for (let i = 0; i < 6 && root?.parent; i++) {
+  root = root.parent;
+}
+
+const handlers = [];
+
+for (const buttonRow of buttonsInsideNode(root)) {
+  const buttonScore = semanticCloseScore(
+    buttonRow.descriptor
+  );
+
+  for (
+    const handler of buttonRow.button?.clickEvents || []
+  ) {
+    const resolved = resolveEventHandlerTarget(handler);
+    const methodScore = closeCommandScore(
+      resolved.handlerName,
+      resolved.componentName,
+      buttonRow.descriptor
+    );
+
+    const score = Math.max(
+      buttonScore,
+      methodScore
+    );
+
+    if (score <= 0) continue;
+
+    handlers.push({
+      handler,
+      buttonNode: buttonRow.node,
+      buttonName: buttonRow.name,
+      descriptor: buttonRow.descriptor,
+      resolved,
+      score,
+      depth: buttonRow.depth
+    });
+  }
+}
+
+handlers.sort((a, b) =>
+  b.score - a.score ||
+  b.depth - a.depth
+);
+
+return {
+  componentName,
+  target,
+  methods,
+  handlers
+};
+
+}
+
+function inspectPanelCloseCommands(componentName) {const result = collectPanelCloseCommands(componentName);
+
+console.table(
+  result.methods.slice(0, 50).map((row, index) => ({
+    index,
+    score: row.score,
+    component: row.componentClassName,
+    method: row.methodName,
+    args: row.argCount,
+    depth: row.depth,
+    path: row.path
+  }))
+);
+
+console.table(
+  result.handlers.slice(0, 50).map((row, index) => ({
+    index,
+    score: row.score,
+    button: row.buttonName,
+    component: row.resolved.componentName,
+    handler: row.resolved.handlerName,
+    descriptor: row.descriptor
+  }))
+);
+
+return result;
+
+}
+
+async function invokeCloseMethodCandidate(candidate,componentName,settings) {const fn = candidate.component?.[candidate.methodName];
+
+if (typeof fn !== "function") {
+  return {
+    ok: false,
+    reason: "method missing"
+  };
+}
+
+const argSets = candidate.argCount <= 0
+  ? [[]]
+  : [
+      [null],
+      [candidate.component],
+      [null, null]
+    ];
+
+let lastError = null;
+
+for (const args of argSets) {
+  try {
+    fn.apply(candidate.component, args);
+  } catch (error) {
+    lastError = error;
+    continue;
+  }
+
+  const closed = await waitForComponentInactive(
+    componentName,
+    Number(settings.commandCloseVerifyMs ?? 700)
+  );
+
+  if (closed.ok) {
+    return {
+      ok: true,
+      method: "component-command",
+      methodName: candidate.methodName,
+      componentClassName:
+        candidate.componentClassName,
+      argsUsed: args.length,
+      closed
+    };
+  }
+}
+
+return {
+  ok: false,
+  methodName: candidate.methodName,
+  error: lastError?.message || null
+};
+
+}
+
+async function closePanelByCommand(componentName, options = {}) {const settings = getSettings(options);
+
+throwIfStopped();
+
+if (!componentIsActive(componentName)) {
+  return {
+    ok: true,
+    alreadyClosed: true,
+    method: "already-closed"
+  };
+}
+
+const commands = collectPanelCloseCommands(componentName);
+
+// 1. close(), onClickClose(), onBack() 같은 컴포넌트 메서드 직접 호출
+for (const candidate of commands.methods) {
+  throwIfStopped();
+
+  const result = await invokeCloseMethodCandidate(
+    candidate,
+    componentName,
+    settings
+  );
+
+  pushLog(`${componentName} 닫기 명령 시도`, {
+    component: candidate.componentClassName,
+    methodName: candidate.methodName,
+    score: candidate.score,
+    result
+  });
+
+  if (result.ok) {
+    return result;
+  }
+}
+
+// 2. 닫기 버튼에 직렬화된 Cocos 핸들러 함수 직접 실행
+for (const candidate of commands.handlers) {
+  throwIfStopped();
+
+  const invoked = invokeCloseEventHandler(
+    candidate.handler
+  );
+
+  pushLog(`${componentName} 닫기 핸들러 시도`, {
+    buttonName: candidate.buttonName,
+    componentName:
+      candidate.resolved.componentName,
+    handlerName:
+      candidate.resolved.handlerName,
+    score: candidate.score,
+    invoked
+  });
+
+  if (!invoked.ok) continue;
+
+  const closed = await waitForComponentInactive(
+    componentName,
+    Number(settings.commandCloseVerifyMs ?? 700)
+  );
+
+  if (closed.ok) {
+    return {
+      ok: true,
+      method: invoked.method,
+      buttonName: candidate.buttonName,
+      componentName:
+        candidate.resolved.componentName,
+      handlerName:
+        candidate.resolved.handlerName,
+      closed
+    };
+  }
+}
+
+inspectPanelCloseCommands(componentName);
+
+throw new Error(
+  `${componentName}에서 실행 가능한 close/back 명령을 찾지 못했습니다.`
+);
+
+}
+
+async function closePanelSemantic(componentName, options = {}) {
+// 기존 API 호환. 이제 마우스·키보드 입력을 전혀 사용하지 않는다.
+return closePanelByCommand(componentName, options);
+}
+
+function nodeOwnText(node) {const texts = [];
+
+try {
+  const label = node?.getComponent?.(cc.Label);
+  if (label?.string) texts.push(String(label.string));
+} catch {}
+
+try {
+  const richText = node?.getComponent?.(cc.RichText);
+  if (richText?.string) texts.push(String(richText.string));
+} catch {}
+
+return texts.join(" ").replace(/\s+/g, " ").trim();
+
+}
+
+function collectNodeText(root, maxDepth = 8) {if (!root) return "";
+
+const texts = [];
+const stack = [{ node: root, depth: 0 }];
+const visited = new Set();
+
+while (stack.length) {
+  const { node, depth } = stack.pop();
+  if (!node || visited.has(node) || depth > maxDepth) continue;
+  visited.add(node);
+
+  const ownText = nodeOwnText(node);
+  if (ownText) texts.push(ownText);
+
+  for (const child of node.children || []) {
+    stack.push({ node: child, depth: depth + 1 });
+  }
+}
+
+return texts.join(" ").replace(/\s+/g, " ").trim();
+
+}
+
+function listActiveButtons() {const root = scene();if (!root || !window.cc?.Button) return [];
+
+const rows = [];
+const stack = [{ node: root, depth: 0 }];
+const visited = new Set();
+
+while (stack.length) {
+  const { node, depth } = stack.pop();
+  if (!node || visited.has(node)) continue;
+  visited.add(node);
+
+  if (node.active !== false && node.activeInHierarchy !== false) {
+    let button = null;
+    try { button = node.getComponent?.(cc.Button); } catch {}
+
+    if (button && button.enabled !== false && button.interactable !== false) {
+      const rect = nodeWorldRect(node);
+      rows.push({
+        node,
+        button,
+        depth,
+        name: String(node.name || ""),
+        text: collectNodeText(node),
+        rect
+      });
+    }
+
+    for (const child of node.children || []) {
+      stack.push({ node: child, depth: depth + 1 });
+    }
+  }
+}
+
+rows.sort((a, b) => {
+  const ay = a.rect?.bottom ?? -999999;
+  const by = b.rect?.bottom ?? -999999;
+  return by - ay || b.depth - a.depth;
+});
+
+return rows;
+
+}
+
+function buttonTextScore(row, includeWords, excludeWords = []) {const haystack = `${row?.name || ""} ${row?.text || ""}`.replace(/\s+/g, "").toLowerCase();
+
+let score = 0;
+
+for (const word of includeWords || []) {
+  const normalized = String(word).replace(/\s+/g, "").toLowerCase();
+  if (!normalized) continue;
+
+  if (haystack.includes(normalized)) {
+    score += normalized.length >= 5 ? 1000 : 200;
+  }
+}
+
+for (const word of excludeWords || []) {
+  const normalized = String(word).replace(/\s+/g, "").toLowerCase();
+  if (normalized && haystack.includes(normalized)) {
+    score -= 2000;
+  }
+}
+
+if (row?.rect) {
+  // 화면 하단 버튼 우선
+  score += Math.max(0, Number(row.rect.bottom || 0)) / 100;
+}
+
+return score;
+
+}
+
+function findRankButton(kind) {const buttons = listActiveButtons();
+
+const config = kind === "personal"
+  ? {
+      include: [
+        "개인 전투력 랭킹",
+        "개인전투력랭킹",
+        "개인 전투력",
+        "개인",
+        "personal",
+        "player power",
+        "worldserverpowerrank"
+      ],
+      exclude: [
+        "길드",
+        "동맹",
+        "alliance",
+        "guild"
+      ]
+    }
+  : {
+      include: [
+        "길드 전투력 랭킹",
+        "동맹 전투력 랭킹",
+        "길드전투력랭킹",
+        "길드 전투력",
+        "동맹 전투력",
+        "길드",
+        "동맹",
+        "alliance",
+        "guild",
+        "worldserveralliancepowerrank"
+      ],
+      exclude: [
+        "개인",
+        "personal"
+      ]
+    };
+
+const ranked = buttons
+  .map(row => ({
+    ...row,
+    score: buttonTextScore(row, config.include, config.exclude)
+  }))
+  .filter(row => row.score > 0)
+  .sort((a, b) => b.score - a.score || b.depth - a.depth);
+
+return {
+  match: ranked[0] || null,
+  candidates: ranked
+};
+
+}
+
+function pointToRectDistance(point, rect) {if (!point || !rect) return Number.POSITIVE_INFINITY;
+
+const dx =
+  point.x < rect.left ? rect.left - point.x :
+  point.x > rect.right ? point.x - rect.right :
+  0;
+
+const dy =
+  point.y < rect.bottom ? rect.bottom - point.y :
+  point.y > rect.top ? point.y - rect.top :
+  0;
+
+return Math.hypot(dx, dy);
+
+}
+
+function findButtonNearSourceCoordinate(sourceX, sourceY, options = {}) {const point = toClientPoint(sourceX, sourceY, options);const cocosPoint = canvasLocalToCocos(point.localX, point.localY);const buttons = listActiveButtons();
+
+const candidates = buttons
+  .filter(row => row.rect)
+  .map(row => {
+    const centerX = (row.rect.left + row.rect.right) / 2;
+    const centerY = (row.rect.bottom + row.rect.top) / 2;
+    const centerDistance = Math.hypot(
+      centerX - cocosPoint.x,
+      centerY - cocosPoint.y
+    );
+    const rectDistance = pointToRectDistance(cocosPoint, row.rect);
+    const contains = rectDistance === 0;
+
+    return {
+      ...row,
+      sourceX,
+      sourceY,
+      cocosPoint,
+      centerX,
+      centerY,
+      centerDistance,
+      rectDistance,
+      contains,
+      geometryScore:
+        (contains ? 100000 : 0) -
+        rectDistance * 100 -
+        centerDistance
+    };
+  })
+  .sort((a, b) =>
+    b.geometryScore - a.geometryScore ||
+    b.depth - a.depth
+  );
+
+return {
+  point,
+  cocosPoint,
+  match: candidates[0] || null,
+  candidates
+};
+
+}
+
+function getRankPanelState() {return {personal: componentIsActive("WorldServerPowerRank"),alliance: componentIsActive("WorldServerAlliancePowerRank")};}
+
+async function waitForAnyRankPanel(timeoutMs = 2500) {const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  const state = getRankPanelState();
+
+  if (state.personal || state.alliance) {
+    return {
+      ...state,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(100);
+}
+
+return {
+  ...getRankPanelState(),
+  elapsedMs: Date.now() - startedAt
+};
+
+}
+
+async function closeAnyRankPanel(options = {}) {const results = [];
+
+if (componentIsActive("WorldServerPowerRank")) {
+  try {
+    results.push(await closeRankPanel("WorldServerPowerRank", options));
+  } catch (error) {
+    results.push({
+      ok: false,
+      componentName: "WorldServerPowerRank",
+      error: error?.message || String(error)
+    });
+  }
+}
+
+if (componentIsActive("WorldServerAlliancePowerRank")) {
+  try {
+    results.push(await closeRankPanel("WorldServerAlliancePowerRank", options));
+  } catch (error) {
+    results.push({
+      ok: false,
+      componentName: "WorldServerAlliancePowerRank",
+      error: error?.message || String(error)
+    });
+  }
+}
+
+return results;
+
+}
+
+function rankCoordinateAttempts(kind) {if (kind === "personal") {return [// Java 원본 좌표{ x: 299, y: 657, coordinateMode: "scaled" },{ x: 299, y: 657, coordinateMode: "raw" },
+
+    // 개인 버튼 방향인 왼쪽으로 보정
+    { x: 280, y: 657, coordinateMode: "scaled" },
+    { x: 260, y: 657, coordinateMode: "scaled" },
+    { x: 280, y: 657, coordinateMode: "raw" },
+    { x: 260, y: 657, coordinateMode: "raw" },
+
+    // 세로 위치 보정
+    { x: 299, y: 675, coordinateMode: "scaled" },
+    { x: 280, y: 675, coordinateMode: "scaled" }
+  ];
+}
+
+return [
+  // Java 원본 좌표
+  { x: 400, y: 657, coordinateMode: "scaled" },
+  { x: 400, y: 657, coordinateMode: "raw" },
+
+  // 길드 버튼 방향인 오른쪽으로 보정
+  { x: 420, y: 657, coordinateMode: "scaled" },
+  { x: 440, y: 657, coordinateMode: "scaled" },
+  { x: 420, y: 657, coordinateMode: "raw" },
+  { x: 440, y: 657, coordinateMode: "raw" },
+
+  // 세로 위치 보정
+  { x: 400, y: 675, coordinateMode: "scaled" },
+  { x: 420, y: 675, coordinateMode: "scaled" }
+];
+
+}
+
+async function clickRankButtonByCoordinate(kind, options = {}) {
+// 하위 호환용 이름만 유지한다.
+// 실제 구현은 좌표를 전혀 사용하지 않는다.
+return openRankPanelSemantic(kind, options);
+}
+
+async function clickRankButton(kind, options = {}) {return openRankPanelSemantic(kind, options);}
+
+function componentIsActive(componentName) {const comp = getComponentSafe(componentName);if (!comp?.node) return false;return comp.node.active !== false && comp.node.activeInHierarchy !== false;}
+
+async function waitForComponentActive(componentName, timeoutMs = 2500) {const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  if (componentIsActive(componentName)) return true;
+  await sleep(100);
+}
+
+return false;
+
+}
+
+async function openRankPanelByCoordinate(componentName, x, y, options = {}) {const settings = getSettings(options);const attempts = [{ clickMode: "dom-only", label: "DOM 이벤트" },{ clickMode: "both", label: "DOM + Cocos 직접 호출" },{ clickMode: "direct-only", label: "Cocos 직접 호출" }];
+
+for (const attempt of attempts) {
+  const result = clickCanvas(x, y, {
+    ...settings,
+    clickMode: attempt.clickMode
+  });
+
+  const opened = await waitForComponentActive(
+    componentName,
+    Number(settings.clickDelayMs ?? 1200) + 1000
+  );
+
+  pushLog(`${componentName} 열기 시도: ${attempt.label}`, {
+    opened,
+    click: result
+  });
+
+  if (opened) {
+    return {
+      ok: true,
+      componentName,
+      attempt: attempt.label,
+      click: result
+    };
+  }
+
+  await sleep(300);
+}
+
+throw new Error(`${componentName} 화면을 열지 못했습니다.`);
+
+}
+
+function findLikelyCloseButton(componentName) {const comp = getComponentSafe(componentName);const root = comp?.node;if (!root) return null;
+
+const namePattern = /(back|close|return|exit|cancel|btn.?back|btn.?close|返回|关闭|닫기|뒤로)/i;
+const candidates = [];
+const stack = [{ node: root, depth: 0 }];
+
+while (stack.length) {
+  const { node, depth } = stack.pop();
+  if (!node || node.active === false || node.activeInHierarchy === false) continue;
+
+  let button = null;
+  try { button = node.getComponent?.(cc.Button); } catch {}
+
+  if (button && button.enabled !== false && button.interactable !== false) {
+    const rect = nodeWorldRect(node);
+    const name = String(node.name || "");
+    const score =
+      (namePattern.test(name) ? 1000 : 0) +
+      (rect ? Math.max(0, 500 - rect.left) : 0) +
+      depth;
+
+    candidates.push({ node, button, rect, depth, score, name });
+  }
+
+  for (const child of node.children || []) {
+    stack.push({ node: child, depth: depth + 1 });
+  }
+}
+
+candidates.sort((a, b) => b.score - a.score);
+return candidates[0] || null;
+
+}
+
+async function closeRankPanel(componentName, options = {}) {return closePanelSemantic(componentName, options);}
+
+
+
+function dispatchDomMousePress(point) {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
+
+const down = {
+  bubbles: true,
+  cancelable: true,
+  composed: true,
+  clientX: point.clientX,
+  clientY: point.clientY,
+  screenX: point.clientX,
+  screenY: point.clientY,
+  button: 0,
+  buttons: 1
+};
+
+const up = {
+  ...down,
+  buttons: 0
+};
+
+// Cocos가 실제 마우스 입력으로 처리하는 한 쌍만 전송한다.
+// pointer/click 이벤트를 추가로 보내지 않아 새로 열린 화면에 재입력되는 것을 방지한다.
+canvas.dispatchEvent(new MouseEvent("mousedown", down));
+canvas.dispatchEvent(new MouseEvent("mouseup", up));
+
+}
+
+function clickJavaPointMouseOnly(x, y, options = {}) {const point = toClientPoint(x, y, {...getSettings(options),coordinateMode: "scaled"});
+
+dispatchDomMousePress(point);
+
+const result = {
+  ...point,
+  clickMode: "mouse-down-up-only",
+  domDispatched: true
+};
+
+pushLog(`게임 단일 마우스 클릭 (${x}, ${y})`, result);
+return result;
+
+}
+
+async function waitForEitherRankPanel(timeoutMs = 3000) {const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  throwIfStopped();
+
+  const personal = componentIsActive("WorldServerPowerRank");
+  const alliance = componentIsActive("WorldServerAlliancePowerRank");
+
+  if (personal || alliance) {
+    return {
+      opened: true,
+      personal,
+      alliance,
+      componentName: personal
+        ? "WorldServerPowerRank"
+        : "WorldServerAlliancePowerRank",
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(80);
+}
+
+return {
+  opened: false,
+  personal: false,
+  alliance: false,
+  componentName: null,
+  elapsedMs: Date.now() - startedAt
+};
+
+}
+
+function rankPointAttempts(kind) {if (kind === "personal") {
+// 299가 동맹 버튼으로 판정되는 화면을 고려해 왼쪽부터 시작한다.
+return [{ x: 260, y: 657 },{ x: 280, y: 657 },{ x: 299, y: 657 },{ x: 250, y: 675 },{ x: 275, y: 675 }];}
+
+return [
+  { x: 400, y: 657 },
+  { x: 420, y: 657 },
+  { x: 440, y: 657 },
+  { x: 400, y: 675 },
+  { x: 425, y: 675 }
+];
+
+}
+
+function clickJavaPointDomOnly(x, y, options = {}) {return clickJavaPointMouseOnly(x, y, options);}
+
+async function waitForComponentInactive(componentName, timeoutMs = 5000) {const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  throwIfStopped();
+
+  if (!componentIsActive(componentName)) {
+    return {
+      ok: true,
+      componentName,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(100);
+}
+
+return {
+  ok: false,
+  componentName,
+  elapsedMs: Date.now() - startedAt
+};
+
+}
+
+function rankOpenCommandScore(kind, methodName, context = "") {const name = normalizeCommandName(methodName);const haystack = normalizeCommandName(`${methodName} ${context}`);
+
+const personalWords = [
+  "personal",
+  "player",
+  "power",
+  "person",
+  "role",
+  "user",
+  "worldserverpowerrank",
+  "개인",
+  "유저",
+  "전투력"
+];
+
+const allianceWords = [
+  "alliance",
+  "guild",
+  "league",
+  "clan",
+  "union",
+  "worldserveralliancepowerrank",
+  "동맹",
+  "길드",
+  "연맹"
+];
+
+const targetWords = kind === "personal"
+  ? personalWords
+  : allianceWords;
+
+const oppositeWords = kind === "personal"
+  ? allianceWords
+  : personalWords;
+
+const openWords = [
+  "open",
+  "show",
+  "enter",
+  "click",
+  "select",
+  "rank",
+  "power",
+  "list",
+  "panel",
+  "view"
+];
+
+const blocked = [
+  "close",
+  "back",
+  "hide",
+  "dismiss",
+  "destroy",
+  "remove",
+  "refresh",
+  "update",
+  "init",
+  "start"
+];
+
+if (blocked.some(word => name.includes(word))) {
+  return -100000;
+}
+
+let score = 0;
+
+for (const word of targetWords) {
+  if (haystack.includes(normalizeCommandName(word))) {
+    score += 6000;
+  }
+}
+
+for (const word of oppositeWords) {
+  if (haystack.includes(normalizeCommandName(word))) {
+    score -= 9000;
+  }
+}
+
+for (const word of openWords) {
+  if (haystack.includes(word)) {
+    score += 1000;
+  }
+}
+
+if (kind === "alliance") {
+  if (/alliance|guild|league|clan|union/.test(name)) {
+    score += 8000;
+  }
+  if (/rank|power/.test(name)) {
+    score += 2000;
+  }
+} else {
+  if (/personal|player|role|user/.test(name)) {
+    score += 8000;
+  }
+  if (/rank|power/.test(name)) {
+    score += 2000;
+  }
+}
+
+return score;
+
+}
+
+function collectRankOpenCommands(kind) {const theater = getComponentSafe("WorldServerTheaterPanel");
+
+if (!theater?.node) {
+  return {
+    kind,
+    theater: null,
+    methods: [],
+    handlers: []
+  };
+}
+
+const componentRows = componentsFromNodeAndAncestors(
+  theater.node,
+  8
+);
+
+const methods = [];
+
+for (const row of componentRows) {
+  for (const methodName of componentMethodNames(row.component)) {
+    const context = [
+      row.className,
+      nodePathText(row.node, 12)
+    ].join(" ");
+
+    const score = rankOpenCommandScore(
+      kind,
+      methodName,
+      context
+    );
+
+    if (score <= 0) continue;
+
+    methods.push({
+      component: row.component,
+      componentClassName: row.className,
+      node: row.node,
+      methodName,
+      argCount: Number(
+        row.component?.[methodName]?.length ?? 0
+      ),
+      score,
+      path: nodePathText(row.node, 12)
+    });
+  }
+}
+
+methods.sort((a, b) =>
+  b.score - a.score ||
+  a.argCount - b.argCount
+);
+
+const handlers = [];
+
+for (const buttonRow of buttonsInsideNode(theater.node)) {
+  for (
+    const handler of buttonRow.button?.clickEvents || []
+  ) {
+    const resolved = resolveEventHandlerTarget(handler);
+
+    const context = [
+      buttonRow.descriptor,
+      resolved.componentName,
+      resolved.handlerName
+    ].join(" ");
+
+    const score = rankOpenCommandScore(
+      kind,
+      resolved.handlerName,
+      context
+    );
+
+    if (score <= 0) continue;
+
+    handlers.push({
+      handler,
+      buttonNode: buttonRow.node,
+      buttonName: buttonRow.name,
+      descriptor: buttonRow.descriptor,
+      resolved,
+      score,
+      depth: buttonRow.depth
+    });
+  }
+}
+
+handlers.sort((a, b) =>
+  b.score - a.score ||
+  b.depth - a.depth
+);
+
+return {
+  kind,
+  theater,
+  methods,
+  handlers
+};
+
+}
+
+function inspectRankOpenCommands(kind = "alliance") {const result = collectRankOpenCommands(kind);
+
+console.table(
+  result.methods.slice(0, 50).map((row, index) => ({
+    index,
+    score: row.score,
+    component: row.componentClassName,
+    method: row.methodName,
+    args: row.argCount,
+    path: row.path
+  }))
+);
+
+console.table(
+  result.handlers.slice(0, 50).map((row, index) => ({
+    index,
+    score: row.score,
+    button: row.buttonName,
+    component: row.resolved.componentName,
+    handler: row.resolved.handlerName,
+    descriptor: row.descriptor
+  }))
+);
+
+return result;
+
+}
+
+async function invokeRankOpenMethodCandidate(candidate,expectedComponent,wrongComponent,settings) {const fn = candidate.component?.[candidate.methodName];
+
+if (typeof fn !== "function") {
+  return {
+    ok: false,
+    reason: "method missing"
+  };
+}
+
+const argSets = candidate.argCount <= 0
+  ? [[]]
+  : [
+      [null],
+      [candidate.component],
+      [0],
+      [1],
+      [null, null]
+    ];
+
+for (const args of argSets) {
+  try {
+    fn.apply(candidate.component, args);
+  } catch {
+    continue;
+  }
+
+  const detected = await waitForEitherRankPanel(
+    Number(settings.rankCommandVerifyMs ?? 1000)
+  );
+
+  if (detected.componentName === expectedComponent) {
+    return {
+      ok: true,
+      method: "rank-component-command",
+      methodName: candidate.methodName,
+      componentClassName:
+        candidate.componentClassName,
+      argsUsed: args,
+      detected
+    };
+  }
+
+  if (detected.componentName === wrongComponent) {
+    await closePanelByCommand(
+      wrongComponent,
+      settings
+    );
+    await sleep(
+      Number(settings.wrongRankRetryDelayMs ?? 250)
+    );
+  }
+}
+
+return {
+  ok: false,
+  methodName: candidate.methodName
+};
+
+}
+
+async function openRankPanelByCommand(kind, options = {}) {const settings = getSettings(options);const expectedComponent = kind === "personal"? "WorldServerPowerRank": "WorldServerAlliancePowerRank";const wrongComponent = kind === "personal"? "WorldServerAlliancePowerRank": "WorldServerPowerRank";
+
+throwIfStopped();
+
+if (componentIsActive(expectedComponent)) {
+  return {
+    ok: true,
+    alreadyOpen: true,
+    method: "already-open",
+    componentName: expectedComponent
+  };
+}
+
+if (componentIsActive(wrongComponent)) {
+  await closePanelByCommand(
+    wrongComponent,
+    settings
+  );
+}
+
+const commands = collectRankOpenCommands(kind);
+
+// 1. WorldServerTheaterPanel 및 부모 컴포넌트의 메서드 직접 호출
+for (const candidate of commands.methods) {
+  throwIfStopped();
+
+  const result = await invokeRankOpenMethodCandidate(
+    candidate,
+    expectedComponent,
+    wrongComponent,
+    settings
+  );
+
+  pushLog(
+    `${kind === "personal" ? "개인" : "길드"} 랭킹 열기 명령 시도`,
+    {
+      component:
+        candidate.componentClassName,
+      methodName: candidate.methodName,
+      score: candidate.score,
+      result
+    }
+  );
+
+  if (result.ok) {
+    return {
+      ...result,
+      kind,
+      componentName: expectedComponent
+    };
+  }
+}
+
+// 2. 버튼에 직렬화된 Cocos EventHandler 직접 실행
+for (const candidate of commands.handlers) {
+  throwIfStopped();
+
+  const invoked = invokeCloseEventHandler(
+    candidate.handler
+  );
+
+  pushLog(
+    `${kind === "personal" ? "개인" : "길드"} 랭킹 버튼 핸들러 시도`,
+    {
+      buttonName: candidate.buttonName,
+      componentName:
+        candidate.resolved.componentName,
+      handlerName:
+        candidate.resolved.handlerName,
+      score: candidate.score,
+      invoked
+    }
+  );
+
+  if (!invoked.ok) continue;
+
+  const detected = await waitForEitherRankPanel(
+    Number(settings.rankCommandVerifyMs ?? 1000)
+  );
+
+  if (detected.componentName === expectedComponent) {
+    return {
+      ok: true,
+      kind,
+      method: invoked.method,
+      componentName: expectedComponent,
+      buttonName: candidate.buttonName,
+      handlerName:
+        candidate.resolved.handlerName,
+      detected
+    };
+  }
+
+  if (detected.componentName === wrongComponent) {
+    await closePanelByCommand(
+      wrongComponent,
+      settings
+    );
+    await sleep(
+      Number(settings.wrongRankRetryDelayMs ?? 250)
+    );
+  }
+}
+
+inspectRankOpenCommands(kind);
+
+return {
+  ok: false,
+  kind,
+  reason: "rank open command not found"
+};
+
+}
+
+async function openRankPanelByJavaPoint(kind, options = {}) {const settings = getSettings(options);const personal = kind === "personal";const expectedComponent = personal? "WorldServerPowerRank": "WorldServerAlliancePowerRank";const wrongComponent = personal? "WorldServerAlliancePowerRank": "WorldServerPowerRank";
+
+// 길드 랭킹은 화면 크기 영향을 받지 않도록 명령 기반을 우선한다.
+if (!personal) {
+  const commandResult = await openRankPanelByCommand(
+    kind,
+    settings
+  );
+
+  if (commandResult.ok) {
+    return commandResult;
+  }
+
+  pushLog(
+    "길드 랭킹 명령 기반 열기 실패 - 좌표 fallback",
+    commandResult
+  );
+}
+
+const attempts = rankPointAttempts(kind);
+
+if (componentIsActive("WorldServerPowerRank")) {
+  await closePanelByCommand(
+    "WorldServerPowerRank",
+    settings
+  );
+}
+
+if (componentIsActive("WorldServerAlliancePowerRank")) {
+  await closePanelByCommand(
+    "WorldServerAlliancePowerRank",
+    settings
+  );
+}
+
+for (let index = 0; index < attempts.length; index++) {
+  throwIfStopped();
+
+  const point = attempts[index];
+  const click = clickJavaPointMouseOnly(
+    point.x,
+    point.y,
+    settings
+  );
+
+  pushLog(
+    `${personal ? "개인" : "길드"} 랭킹 클릭 시도 ${index + 1}`,
+    {
+      expectedComponent,
+      point,
+      click
+    }
+  );
+
+  const detected = await waitForEitherRankPanel(
+    Number(
+      settings.rankChoiceDetectTimeoutMs ?? 2500
+    )
+  );
+
+  if (detected.componentName === expectedComponent) {
+    return {
+      ok: true,
+      kind,
+      method: "verified-mouse-coordinate",
+      componentName: expectedComponent,
+      selected: point,
+      attempt: index + 1,
+      click,
+      detected
+    };
+  }
+
+  if (detected.componentName === wrongComponent) {
+    await closePanelByCommand(
+      wrongComponent,
+      settings
+    );
+    await sleep(
+      Number(settings.wrongRankRetryDelayMs ?? 350)
+    );
+    continue;
+  }
+
+  await sleep(
+    Number(settings.rankRetryDelayMs ?? 250)
+  );
+}
+
+throw new Error(
+  `${personal ? "개인" : "길드"} 랭킹 화면을 정확히 열지 못했습니다.`
+);
+
+}
+
+function backPointAttempts() {return [// Java 원본 좌표{ x: 83, y: 24 },
+
+  // 브라우저/Canvas 상단 여백 차이를 고려한 좌측 상단 후보
+  { x: 55, y: 35 },
+  { x: 40, y: 40 },
+  { x: 70, y: 45 },
+  { x: 95, y: 45 },
+  { x: 35, y: 60 },
+  { x: 60, y: 65 },
+  { x: 85, y: 65 },
+  { x: 110, y: 65 }
+];
+
+}
+
+async function trySemanticPanelClose(componentName, options = {}) {if (!componentIsActive(componentName)) {return {ok: true,alreadyClosed: true,method: "already-closed"};}
+
+try {
+  const result = await closePanelSemantic(componentName, options);
+
+  if (!componentIsActive(componentName)) {
+    return {
+      ok: true,
+      method: result?.method || "semantic-close",
+      result
+    };
+  }
+} catch (error) {
+  pushLog(`${componentName} 의미 기반 닫기 실패 - 좌표 재시도`, {
+    error: error?.message || String(error)
+  });
+}
+
+return {
+  ok: false,
+  method: "semantic-close-failed"
+};
+
+}
+
+async function closeByJavaBackPoint(componentName, options = {}) {
+// 기존 함수명은 호환을 위해 유지하지만 좌표 클릭은 사용하지 않는다.
+const result = await closePanelByCommand(componentName,options);
+
+await sleep(
+  Number(
+    getSettings(options).afterRankCloseDelayMs ?? 500
+  )
+);
+
+return {
+  ...result,
+  compatibilityName: "closeByJavaBackPoint",
+  coordinateUsed: false
+};
+
+}
+
+async function exitTheaterByJavaBackPoint(options = {}) {
+// WorldServerTheaterPanel 역시 close/back 명령만 사용한다.
+const result = await closePanelByCommand("WorldServerTheaterPanel",options);
+
+await sleep(
+  Number(getSettings(options).clickDelayMs ?? 1200)
+);
+
+return {
+  ...result,
+  theaterExit: true,
+  coordinateUsed: false
+};
+
+}
+
+async function collectByClick(serverId, options = {}) {const settings = getSettings(options);
+
+// 1. 서버 선택
+const moveResult = await moveToServer(serverId, settings);
+
+// 2. Canvas 정중앙의 서버 카드 진입
+const theaterOpen = await openSelectedServerByCanvasCenter(
+  serverId,
+  settings
+);
+
+pushLog(`${serverId} 중앙 서버 카드 클릭 완료`, {
+  theaterOpen
+});
+
+// 3. 개인 랭킹의 이전 캐시를 정리하고 새 데이터가 안정될 때까지 기다린다.
+const personalBaseline = prepareRankCapture(
+  "WorldServerPowerRank"
+);
+
+const personalOpen = await openRankPanelByJavaPoint(
+  "personal",
+  settings
+);
+
+const powerRank = await waitForRankList(
+  "WorldServerPowerRank",
+  settings,
+  personalBaseline
+);
+
+const players = powerRank.rows.map((row, index) =>
+  normalizePlayer(serverId, row, index)
+);
+
+if (
+  players.length <
+  Number(settings.requiredPlayerCount ?? 100)
+) {
+  throw new Error(
+    `${serverId} 개인 랭킹 부족: ` +
+    `${players.length}/${settings.requiredPlayerCount ?? 100}`
+  );
+}
+
+pushLog(`${serverId} 개인 랭킹 수집 확정: ${players.length}명`, {
+  moveElapsedMs: moveResult.elapsedMs,
+  theaterOpen,
+  personalOpen,
+  rankElapsedMs: powerRank.elapsedMs,
+  fingerprint: powerRank.fingerprint
+});
+
+// 4. 개인 랭킹 닫기
+const personalClose = await closeByJavaBackPoint(
+  "WorldServerPowerRank",
+  settings
+);
+
+// 5. 길드 랭킹도 이전 캐시를 정리하고 2개가 수신될 때까지 기다린다.
+const allianceBaseline = prepareRankCapture(
+  "WorldServerAlliancePowerRank"
+);
+
+const allianceOpen = await openRankPanelByJavaPoint(
+  "alliance",
+  settings
+);
+
+const allianceRank = await waitForRankList(
+  "WorldServerAlliancePowerRank",
+  settings,
+  allianceBaseline
+);
+
+const alliances = allianceRank.rows.map((row, index) =>
+  normalizeAlliance(serverId, row, index)
+);
+
+if (
+  alliances.length <
+  Number(settings.requiredAllianceCount ?? 2)
+) {
+  throw new Error(
+    `${serverId} 길드 랭킹 부족: ` +
+    `${alliances.length}/${settings.requiredAllianceCount ?? 2}`
+  );
+}
+
+pushLog(`${serverId} 길드 랭킹 수집 확정: ${alliances.length}개`, {
+  allianceOpen,
+  rankElapsedMs: allianceRank.elapsedMs,
+  fingerprint: allianceRank.fingerprint
+});
+
+// 6. 길드 랭킹 닫기
+const allianceClose = await closeByJavaBackPoint(
+  "WorldServerAlliancePowerRank",
+  settings
+);
+
+// 7. Java 원본처럼 한 번 더 뒤로가서 서버 목록으로 복귀
+const theaterClose = await exitTheaterByJavaBackPoint(settings);
+
+pushLog(`${serverId} 조사 화면 종료`, {
+  personalClose,
+  allianceClose,
+  theaterClose
+});
+
+return buildServerInfo(serverId, players, alliances);
+
+}
+
+async function testJavaClickFlow(serverId, options = {}) {const settings = getSettings(options);const steps = [];
+
+pushLog(`${serverId} Java 클릭 흐름 단독 테스트 시작`);
+
+steps.push({
+  name: "서버 선택",
+  result: await moveToServer(serverId, settings)
+});
+
+steps.push({
+  name: "Canvas 중앙 서버 카드",
+  result: await openSelectedServerByCanvasCenter(serverId, settings)
+});
+
+steps.push({
+  name: "개인 랭킹 열기",
+  result: await openRankPanelByJavaPoint("personal", settings)
+});
+
+steps.push({
+  name: "개인 랭킹 닫기",
+  result: await closeByJavaBackPoint(
+    "WorldServerPowerRank",
+    settings
+  )
+});
+
+steps.push({
+  name: "길드 랭킹 열기",
+  result: await openRankPanelByJavaPoint("alliance", settings)
+});
+
+steps.push({
+  name: "길드 랭킹 닫기",
+  result: await closeByJavaBackPoint(
+    "WorldServerAlliancePowerRank",
+    settings
+  )
+});
+
+steps.push({
+  name: "전투 지역 닫기",
+  result: await exitTheaterByJavaBackPoint(settings)
+});
+
+console.table(
+  steps.map((step, index) => ({
+    index,
+    name: step.name,
+    ok: step.result?.ok !== false,
+    method: step.result?.method || null,
+    clientX: step.result?.click?.clientX ?? null,
+    clientY: step.result?.click?.clientY ?? null
+  }))
+);
+
+return {
+  ok: true,
+  serverId: Number(serverId),
+  steps
+};
+
+}
+
+// ---------------------------------------------------------------------------
+// GitHub power JSON output format
+// ---------------------------------------------------------------------------
+
+function firstDefined(...values) {
+  for (const value of values) {
+    if (value !== undefined) return value;
+  }
+  return null;
+}
+
+function numberValue(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    const converted = Number(value);
+    if (Number.isFinite(converted)) return converted;
+  }
+  return null;
+}
+
+function numericId(value, fallback = 0) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const converted = Number(value);
+  return Number.isFinite(converted) ? converted : fallback;
+}
+
+function textOrNull(value) {
+  return value === undefined || value === null ? null : String(value);
+}
+
+function sourceRow(row) {
+  return row?.raw && typeof row.raw === "object" && !Array.isArray(row.raw)
+    ? row.raw
+    : (row || {});
+}
+
+function sourceDetail(row) {
+  const raw = sourceRow(row);
+  return objectValue(raw.detail)
+    || objectValue(raw.playerDetail)
+    || objectValue(raw.userDetail)
+    || objectValue(raw.roleDetail)
+    || objectValue(raw.playerInfo)
+    || {};
+}
+
+function sourcePlayer(row) {
+  const raw = sourceRow(row);
+  return objectValue(raw.player)
+    || objectValue(raw.playerData)
+    || objectValue(raw.role)
+    || objectValue(raw.user)
+    || {};
+}
+
+function booleanValue(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === "") continue;
+    if (value === true || value === false) return value;
+    if (Number(value) === 1) return true;
+    if (Number(value) === 0) return false;
+    const text = String(value).toLowerCase();
+    if (text === "true") return true;
+    if (text === "false") return false;
+  }
+  return false;
+}
+
+function formatPowerPlayer(player, fallbackServerId) {
+  const raw = sourceRow(player);
+  const detail = sourceDetail(player);
+  const nestedPlayer = sourcePlayer(player);
+
+  const server = numberValue(
+    player?.server,
+    player?.serverNumber,
+    player?.serverId,
+    nestedPlayer.serverId,
+    nestedPlayer.server,
+    raw.server,
+    raw.serverNumber,
+    raw.serverId,
+    fallbackServerId
+  );
+
+  // Java 매핑: player.val -> score, player.power -> cp
+  const score = numberValue(
+    nestedPlayer.val,
+    nestedPlayer.score,
+    raw.score,
+    player?.score
+  ) ?? 0;
+
+  const cp = numberValue(
+    nestedPlayer.power,
+    nestedPlayer.cp,
+    nestedPlayer.fightPower,
+    raw.cp,
+    raw.power,
+    player?.cp,
+    player?.power,
+    score
+  ) ?? 0;
+
+  // Java 매핑: detail.avatarurl 우선, 없으면 detail.headimgurl
+  const profile = pick(
+    detail.avatarurl,
+    detail.avatarUrl,
+    detail.headimgurl,
+    detail.headImgUrl,
+    raw.profile,
+    player?.profile
+  );
+
+  const online = booleanValue(
+    nestedPlayer.isOnline,
+    nestedPlayer.online,
+    raw.isOnline,
+    raw.online,
+    player?.isOnline,
+    player?.online
+  );
+
+  // Java 매핑: detail.username 우선, 없으면 detail.nickname
+  const nickname = textOrNull(pick(
+    detail.username,
+    detail.userName,
+    detail.user_name,
+    detail.nickname,
+    detail.nickName,
+    detail.nick_name,
+    raw.nickname,
+    nestedPlayer.nickname,
+    player?.nickname
+  ));
+
+  return {
+    score,
+    cp,
+    uid: String(pick(
+      nestedPlayer.uid,
+      nestedPlayer.pid,
+      nestedPlayer.userId,
+      nestedPlayer.playerId,
+      nestedPlayer.roleId,
+      nestedPlayer.id,
+      raw.uid,
+      player?.uid,
+      ""
+    )),
+    server: Number(server ?? fallbackServerId),
+    level: numberValue(
+      nestedPlayer.lv,
+      nestedPlayer.level,
+      raw.level,
+      raw.lv,
+      player?.level
+    ),
+    lang: textOrNull(pick(
+      nestedPlayer.lang,
+      nestedPlayer.language,
+      raw.lang,
+      raw.language,
+      player?.lang
+    )),
+    lastLogin: numberValue(
+      nestedPlayer.lastLoginTime,
+      nestedPlayer.lastLogin,
+      nestedPlayer.last_login,
+      raw.lastLogin,
+      player?.lastLogin
+    ),
+    lastRequest: numberValue(
+      nestedPlayer.lastOnlineTime,
+      nestedPlayer.lastRequest,
+      nestedPlayer.last_request,
+      raw.lastRequest,
+      player?.lastRequest
+    ),
+    countryFlag: numberValue(
+      detail.nationalflag,
+      detail.nationalFlag,
+      detail.countryFlag,
+      raw.countryFlag,
+      player?.countryFlag
+    ),
+    gender: numberValue(
+      detail.gender,
+      detail.usergender,
+      detail.userGender,
+      raw.gender,
+      player?.gender
+    ),
+    profile: profile === undefined ? null : profile,
+    nickname,
+    allianceId: numericId(pick(
+      nestedPlayer.allianceId,
+      nestedPlayer.aid,
+      nestedPlayer.guildId,
+      raw.allianceId,
+      player?.allianceId,
+      0
+    )),
+    allianceTag: textOrNull(pick(
+      player?.allianceTag,
+      nestedPlayer.allianceTag,
+      nestedPlayer.a_tag,
+      nestedPlayer.tag,
+      raw.allianceTag,
+      raw.a_tag,
+      raw.tag
+    )),
+    allianceName: textOrNull(pick(
+      player?.allianceName,
+      nestedPlayer.allianceName,
+      nestedPlayer.guildName,
+      raw.allianceName,
+      raw.guildName
+    )),
+    online,
+    isOnline: online
+  };
+}
+
+function formatPowerAlliance(alliance, fallbackServerId) {
+  const raw = sourceRow(alliance);
+  const server = numberValue(
+    alliance?.server,
+    alliance?.serverNumber,
+    alliance?.serverId,
+    raw.server,
+    raw.serverNumber,
+    raw.serverId,
+    fallbackServerId
+  );
+  const score = numberValue(
+    raw.score,
+    raw.cp,
+    raw.power,
+    raw.fightPower,
+    alliance?.score,
+    alliance?.cp,
+    alliance?.power
+  ) ?? 0;
+
+  return {
+    score,
+    leader_name: textOrNull(firstDefined(
+      raw.leader_name,
+      raw.leaderName,
+      raw.leader,
+      raw.chiefName,
+      alliance?.leader_name,
+      alliance?.leaderName,
+      ""
+    )),
+    name: textOrNull(firstDefined(
+      raw.name,
+      raw.allianceName,
+      raw.guildName,
+      alliance?.name,
+      alliance?.allianceName,
+      ""
+    )),
+    icon: numberValue(raw.icon, raw.iconId, raw.avatar, alliance?.icon),
+    rank: numberValue(raw.rank, raw.ranking, alliance?.rank),
+    tag: textOrNull(firstDefined(
+      raw.tag,
+      raw.allianceTag,
+      raw.a_tag,
+      alliance?.tag,
+      alliance?.allianceTag,
+      ""
+    )),
+    aid: numericId(firstDefined(
+      raw.aid,
+      raw.allianceId,
+      raw.guildId,
+      raw.id,
+      alliance?.aid,
+      alliance?.allianceId,
+      0
+    )),
+    server: Number(server ?? fallbackServerId)
+  };
+}
+
+function findServerQueueMetadata(serverId) {
+  const target = Number(serverId);
+  const queue = loadServerQueue();
+  return queue?.servers?.find(row => serverNumberOf(row) === target) || null;
+}
+
+function formatPowerServer(serverData) {
+  const serverNumber = Number(
+    serverData?.serverNumber ?? serverData?.server ?? serverData?.serverId
+  );
+  const metadata = findServerQueueMetadata(serverNumber) || {};
+  const players = (Array.isArray(serverData?.playerList) ? serverData.playerList : [])
+    .map(player => formatPowerPlayer(player, serverNumber))
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  const alliances = (Array.isArray(serverData?.allianceList) ? serverData.allianceList : [])
+    .map(alliance => formatPowerAlliance(alliance, serverNumber))
+    .sort((a, b) => Number(a.rank || 0) - Number(b.rank || 0));
+
+  return {
+    serverNumber,
+    kingUid: String(firstDefined(
+      serverData?.kingUid,
+      metadata.kingUid,
+      ""
+    )),
+    kingName: String(firstDefined(
+      serverData?.kingName,
+      metadata.kingName,
+      ""
+    )),
+    allianceTag: String(firstDefined(
+      serverData?.allianceTag,
+      metadata.allianceTag,
+      ""
+    )),
+    researchTime: null,
+    playerList: players,
+    allianceList: alliances
+  };
+}
+
+function toEpochSeconds(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return 0;
+  return number >= 1000000000000 ? Math.floor(number / 1000) : Math.floor(number);
+}
+
+function latestPlayerActivitySeconds(player) {
+  return Math.max(
+    toEpochSeconds(player?.lastRequest),
+    toEpochSeconds(player?.lastLogin)
+  );
+}
+
+function active7dPlayerCpSum(serverData, nowSeconds = Math.floor(Date.now() / 1000)) {
+  const players = Array.isArray(serverData?.playerList) ? serverData.playerList : [];
+  const activeSince = nowSeconds - 7 * 24 * 60 * 60;
+
+  return players.reduce((sum, player) => {
+    const activityAt = latestPlayerActivitySeconds(player);
+    const activeWithin7Days = player?.online === true || activityAt >= activeSince;
+
+    if (!activeWithin7Days) return sum;
+
+    const cp = Number(player?.score ?? player?.cp ?? 0);
+    return sum + (Number.isFinite(cp) && cp > 0 ? cp : 0);
+  }, 0);
+}
+
+function buildServerListOutputFiles(serverData, settings) {
+  const date = todayString();
+  const basePath = String(
+    settings.serverListBasePath || "src/assets/json/servers"
+  ).replace(/\/+$/, "");
+
+  // 전체 서버 목록은 서버번호만 담은 정수 배열이다.
+  const servers = [...new Set(
+    serverData
+      .map(row => Number(row?.serverNumber))
+      .filter(Number.isFinite)
+  )].sort((a, b) => a - b);
+
+  // 인기 서버 목록도 서버번호 정수 배열만 저장한다.
+  // 최근 7일 이내 활동한 상위 100명 플레이어의 CP 합계가 큰 서버부터 정렬한다.
+  const popularServers = serverData
+    .map(row => ({
+      serverNumber: Number(row?.serverNumber),
+      active7dCpSum: active7dPlayerCpSum(row)
+    }))
+    .filter(row => Number.isFinite(row.serverNumber))
+    .sort((a, b) =>
+      Number(b.active7dCpSum || 0) - Number(a.active7dCpSum || 0) ||
+      a.serverNumber - b.serverNumber
+    )
+    .map(row => row.serverNumber);
+
+  return [
+    {
+      path: `${basePath}/servers-${date}.json`,
+      data: servers,
+      type: "servers-dated"
+    },
+    {
+      path: settings.serversLatestPath || `${basePath}/servers.json`,
+      data: servers,
+      type: "servers-latest"
+    },
+    {
+      path: `${basePath}/servers-${date}-popular.json`,
+      data: popularServers,
+      type: "servers-popular-dated"
+    },
+    {
+      path: settings.serversPopularLatestPath || `${basePath}/servers-popular.json`,
+      data: popularServers,
+      type: "servers-popular-latest"
+    }
+  ];
+}
+
+function usableNickname(value) {
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text ? text : null;
+}
+
+function playerNicknameValue(player) {
+  return usableNickname(firstDefined(
+    player?.nickname,
+    player?.nickName,
+    player?.nick_name,
+    player?.userName,
+    player?.username,
+    player?.user_name,
+    player?.playerName,
+    player?.roleName,
+    player?.displayName,
+    player?.name,
+    null
+  ));
+}
+
+function restoreMissingPlayerNicknames(stagedServerRows, previousPlayerData) {
+  const previousByUid = new Map();
+
+  for (const player of movementPlayerList(previousPlayerData)) {
+    const uid = movementUidOf(player);
+    const nickname = playerNicknameValue(player);
+    if (uid && nickname && !previousByUid.has(uid)) {
+      previousByUid.set(uid, nickname);
+    }
+  }
+
+  let restoredCount = 0;
+  const restoredUids = [];
+
+  const rows = (stagedServerRows || []).map(row => {
+    const data = row?.data;
+    if (!data || !Array.isArray(data.playerList)) return row;
+
+    const playerList = data.playerList.map(player => {
+      if (playerNicknameValue(player)) return player;
+
+      const uid = movementUidOf(player);
+      const previousNickname = uid ? previousByUid.get(uid) : null;
+      if (!previousNickname) return player;
+
+      restoredCount++;
+      if (restoredUids.length < 20) restoredUids.push(uid);
+
+      return {
+        ...player,
+        nickname: previousNickname,
+        name: usableNickname(player?.name) || previousNickname
+      };
+    });
+
+    return {
+      ...row,
+      data: {
+        ...data,
+        playerList
+      }
+    };
+  });
+
+  return {
+    rows,
+    restoredCount,
+    previousNicknameCount: previousByUid.size,
+    sampleUids: restoredUids
+  };
+}
+
+
+function serverNumberFromData(serverData) {
+  return numberValue(
+    serverData?.serverNumber,
+    serverData?.server,
+    serverData?.serverId,
+    serverData?.worldId
+  );
+}
+
+function serverDataList(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.serverList)) return data.serverList;
+  if (Array.isArray(data?.servers)) return data.servers;
+  return [];
+}
+
+// 일부 서버 조사에 실패하더라도 성공한 서버 데이터는 업로드할 수 있도록
+// GitHub의 직전 serverData.json을 기준으로 이번 성공분만 덮어쓴다.
+// 실패 서버는 직전 데이터가 그대로 유지되므로 부분 커밋으로 인한 데이터 유실을 막는다.
+function mergeStagedServersWithPrevious(stagedServerRows, previousServerData) {
+  const byServer = new Map();
+  let previousCount = 0;
+  let stagedCount = 0;
+
+  for (const serverData of serverDataList(previousServerData)) {
+    const serverNumber = serverNumberFromData(serverData);
+    if (!Number.isFinite(serverNumber)) continue;
+
+    previousCount++;
+    byServer.set(Number(serverNumber), serverData);
+  }
+
+  for (const row of stagedServerRows || []) {
+    const serverData = row?.data;
+    const serverNumber = serverNumberFromData(serverData);
+    if (!serverData || !Number.isFinite(serverNumber)) continue;
+
+    stagedCount++;
+    byServer.set(Number(serverNumber), serverData);
+  }
+
+  const rows = [...byServer.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([serverNumber, data]) => ({
+      path: `__power_server__/${serverNumber}.json`,
+      type: "server",
+      serverId: String(serverNumber),
+      data
+    }));
+
+  return {
+    rows,
+    previousCount,
+    stagedCount,
+    mergedCount: rows.length
+  };
+}
+
+async function mergePendingServersWithPrevious(previousServerData) {
+  const byServer = new Map();
+  let previousCount = 0;
+  let stagedCount = 0;
+
+  for (const serverData of serverDataList(previousServerData)) {
+    const serverNumber = serverNumberFromData(serverData);
+    if (!Number.isFinite(serverNumber)) continue;
+    previousCount++;
+    byServer.set(Number(serverNumber), serverData);
+  }
+
+  // OOM 방지: pending server 전체를 getAll()로 복사하지 않고 cursor로 한 행씩 덮어쓴다.
+  await withPendingStore("readonly", store => new Promise((resolve, reject) => {
+    const index = store.index("type");
+    const request = index.openCursor(IDBKeyRange.only("server"));
+
+    request.onerror = () => reject(request.error || new Error("IndexedDB server cursor 실패"));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) {
+        resolve();
+        return;
+      }
+
+      const row = cursor.value || {};
+      const serverData = row.data;
+      const serverNumber = serverNumberFromData(serverData);
+
+      if (serverData && Number.isFinite(serverNumber)) {
+        stagedCount++;
+        byServer.set(Number(serverNumber), serverData);
+      }
+
+      cursor.continue();
+    };
+  }));
+
+  const rows = [...byServer.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([serverNumber, data]) => ({
+      path: `__power_server__/${serverNumber}.json`,
+      type: "server",
+      serverId: String(serverNumber),
+      data
+    }));
+
+  return {
+    rows,
+    previousCount,
+    stagedCount,
+    mergedCount: rows.length
+  };
+}
+
+function buildPowerOutputFiles(stagedServerRows, settings) {
+  const serverData = stagedServerRows
+    .map(row => row?.data)
+    .filter(row => row && Number.isFinite(Number(row.serverNumber)))
+    .sort((a, b) => Number(a.serverNumber) - Number(b.serverNumber));
+
+  const playerData = serverData.flatMap(row => row.playerList || []);
+  const allianceData = serverData.flatMap(row => row.allianceList || []);
+
+  const powerFiles = [
+    {
+      path: settings.allianceDataPath,
+      data: allianceData,
+      type: "allianceData"
+    },
+    {
+      path: settings.playerDataPath,
+      data: playerData,
+      type: "playerData"
+    },
+    {
+      path: settings.serverDataPath,
+      data: serverData,
+      type: "serverData"
+    }
+  ];
+
+  return [
+    ...powerFiles,
+    ...buildServerListOutputFiles(serverData, settings)
+  ];
+}
+
+// ---------------------------------------------------------------------------// Cross-server movement history// ---------------------------------------------------------------------------
+
+function movementUidOf(player) {
+  return str(pick(
+    player?.uid,
+    player?.pid,
+    player?.playerId,
+    player?.roleId,
+    player?.id
+  ));
+}
+
+function movementServerOf(player) {
+  return numberValue(
+    player?.server,
+    player?.serverNumber,
+    player?.serverId,
+    player?.worldId
+  );
+}
+
+function compactMovementPlayer(player) {
+  return {
+    uid: movementUidOf(player),
+    nickname: str(pick(
+      player?.nickname,
+      player?.nickName,
+      player?.nick_name,
+      player?.userName,
+      player?.username,
+      player?.user_name,
+      player?.playerName,
+      player?.roleName,
+      player?.displayName,
+      player?.name
+    )),
+    server: movementServerOf(player),
+    rank: numberValue(player?.rank),
+    score: numberValue(player?.score, player?.cp, player?.power),
+    level: numberValue(player?.level, player?.lv),
+    allianceId: str(pick(player?.allianceId, player?.aid, player?.guildId)),
+    allianceTag: str(pick(player?.allianceTag, player?.tag, player?.a_tag)),
+    allianceName: str(pick(player?.allianceName, player?.guildName))
+  };
+}
+
+function movementPlayerList(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.playerList)) return data.playerList;
+  if (Array.isArray(data?.players)) return data.players;
+  return [];
+}
+
+function buildUniqueMovementIndex(data) {
+  const rows = movementPlayerList(data);
+  const byUid = new Map();
+  const conflictingUids = new Set();
+  let invalidRows = 0;
+
+  for (const raw of rows) {
+    const player = compactMovementPlayer(raw);
+    const uid = player.uid;
+    const server = player.server;
+
+    if (!uid || !Number.isFinite(server)) {
+      invalidRows++;
+      continue;
+    }
+
+    const previous = byUid.get(uid);
+
+    if (!previous) {
+      byUid.set(uid, player);
+      continue;
+    }
+
+    // 같은 조사 데이터 안에서 같은 UID가 서로 다른 서버에 동시에 존재하면
+    // 랭킹 반영 지연일 수 있으므로 이동 판정에서 제외한다.
+    if (Number(previous.server) !== Number(server)) {
+      conflictingUids.add(uid);
+      continue;
+    }
+
+    // 같은 서버의 중복 행은 더 높은 전투력 행을 대표값으로 사용한다.
+    if (Number(player.score || 0) > Number(previous.score || 0)) {
+      byUid.set(uid, player);
+    }
+  }
+
+  for (const uid of conflictingUids) {
+    byUid.delete(uid);
+  }
+
+  return {
+    byUid,
+    sourceCount: rows.length,
+    validUidCount: byUid.size,
+    conflictingUidCount: conflictingUids.size,
+    invalidRows
+  };
+}
+
+function movementRecordKey(row) {
+  return [
+    String(row?.uid || ""),
+    String(row?.fromServer ?? ""),
+    String(row?.toServer ?? "")
+  ].join("|");
+}
+
+function buildCrossServerMovementRows(previousPlayerData, currentPlayerData) {
+  const previousIndex = buildUniqueMovementIndex(previousPlayerData);
+  const currentIndex = buildUniqueMovementIndex(currentPlayerData);
+  const detectedAt = nowIso();
+  const rows = [];
+
+  for (const [uid, current] of currentIndex.byUid.entries()) {
+    const previous = previousIndex.byUid.get(uid);
+    if (!previous) continue;
+
+    const fromServer = Number(previous.server);
+    const toServer = Number(current.server);
+
+    if (
+      !Number.isFinite(fromServer) ||
+      !Number.isFinite(toServer) ||
+      fromServer === toServer
+    ) {
+      continue;
+    }
+
+    rows.push({
+      detectedAt,
+      uid,
+      nickname: current.nickname || previous.nickname || null,
+      fromServer,
+      toServer,
+      from: previous,
+      to: current
+    });
+  }
+
+  rows.sort((a, b) =>
+    Number(a.fromServer) - Number(b.fromServer) ||
+    Number(a.toServer) - Number(b.toServer) ||
+    String(a.nickname || "").localeCompare(String(b.nickname || "")) ||
+    String(a.uid).localeCompare(String(b.uid))
+  );
+
+  return {
+    rows,
+    previous: {
+      sourceCount: previousIndex.sourceCount,
+      validUidCount: previousIndex.validUidCount,
+      conflictingUidCount: previousIndex.conflictingUidCount,
+      invalidRows: previousIndex.invalidRows
+    },
+    current: {
+      sourceCount: currentIndex.sourceCount,
+      validUidCount: currentIndex.validUidCount,
+      conflictingUidCount: currentIndex.conflictingUidCount,
+      invalidRows: currentIndex.invalidRows
+    }
+  };
+}
+
+async function buildDailyMovementOutput(
+  settings,
+  previousPlayerData,
+  currentPlayerData
+) {
+  if (settings.movementEnabled === false) {
+    return {
+      output: null,
+      skipped: true,
+      reason: "movementEnabled=false",
+      detectedCount: 0,
+      addedCount: 0
+    };
+  }
+
+  throwIfStopped();
+
+  // 이동현황 파일의 날짜는 TopWar 서버 시간(UTC+8)을 기준으로 한다.
+  // 한국 시간 00:00~00:59에는 아직 서버 기준 전날이다.
+  const date = serverDateString();
+  const basePath = String(
+    settings.movementBasePath || "src/assets/json/power/movement"
+  ).replace(/\/+$/, "");
+  const path = `${basePath}/${date}.json`;
+  const comparison = buildCrossServerMovementRows(
+    previousPlayerData,
+    currentPlayerData
+  );
+
+  if (!comparison.rows.length) {
+    return {
+      output: null,
+      skipped: true,
+      reason: "no-server-change",
+      path,
+      detectedCount: 0,
+      addedCount: 0,
+      comparison
+    };
+  }
+
+  const existingData = await readGithubJsonRaw(settings, path, null);
+  const history = Array.isArray(existingData)
+    ? { version: 1, date, rows: existingData }
+    : (
+      existingData &&
+      typeof existingData === "object"
+        ? { ...existingData }
+        : { version: 1, date, rows: [] }
+    );
+
+  history.version = 1;
+  history.date = history.date || date;
+  history.serverTimezone = "UTC+8";
+  history.serverResetAt = "00:00 UTC+8 (01:00 Asia/Seoul)";
+  history.rows = Array.isArray(history.rows) ? history.rows : [];
+
+  const keys = new Set(history.rows.map(movementRecordKey));
+  let addedCount = 0;
+
+  for (const row of comparison.rows) {
+    const key = movementRecordKey(row);
+    if (keys.has(key)) continue;
+
+    history.rows.push(row);
+    keys.add(key);
+    addedCount++;
+  }
+
+  if (addedCount === 0) {
+    return {
+      output: null,
+      skipped: true,
+      reason: "already-recorded",
+      path,
+      detectedCount: comparison.rows.length,
+      addedCount: 0,
+      comparison
+    };
+  }
+
+  history.updatedAt = nowIso();
+  history.rows.sort((a, b) =>
+    String(a?.detectedAt || "").localeCompare(String(b?.detectedAt || "")) ||
+    Number(a?.fromServer || 0) - Number(b?.fromServer || 0) ||
+    Number(a?.toServer || 0) - Number(b?.toServer || 0) ||
+    String(a?.uid || "").localeCompare(String(b?.uid || ""))
+  );
+
+  return {
+    output: {
+      path,
+      data: history,
+      type: "movement-daily"
+    },
+    skipped: false,
+    path,
+    detectedCount: comparison.rows.length,
+    addedCount,
+    totalCount: history.rows.length,
+    comparison
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Nickname change history (separate from server movement history)
+// ---------------------------------------------------------------------------
+
+function nicknameChangeRecordKey(row) {
+  return [
+    String(row?.uid || ""),
+    String(row?.fromNickname || ""),
+    String(row?.toNickname || ""),
+    String(row?.fromServer ?? ""),
+    String(row?.toServer ?? "")
+  ].join("|");
+}
+
+function buildNicknameChangeRows(previousPlayerData, currentPlayerData) {
+  const previousIndex = buildUniqueMovementIndex(previousPlayerData);
+  const currentIndex = buildUniqueMovementIndex(currentPlayerData);
+  const detectedAt = nowIso();
+  const rows = [];
+
+  for (const [uid, current] of currentIndex.byUid.entries()) {
+    const previous = previousIndex.byUid.get(uid);
+    if (!previous) continue;
+
+    // 빈 닉네임은 변경으로 판정하지 않는다.
+    // commitPendingBatch()에서 현재 데이터의 누락 닉네임을 먼저 복원하므로
+    // 수집 누락이 닉네임 변경으로 잘못 기록되는 것도 방지된다.
+    const fromNickname = usableNickname(previous.nickname);
+    const toNickname = usableNickname(current.nickname);
+
+    if (!fromNickname || !toNickname || fromNickname === toNickname) {
+      continue;
+    }
+
+    const fromServer = Number(previous.server);
+    const toServer = Number(current.server);
+
+    rows.push({
+      detectedAt,
+      uid,
+      fromNickname,
+      toNickname,
+      server: Number.isFinite(toServer) ? toServer : null,
+      fromServer: Number.isFinite(fromServer) ? fromServer : null,
+      toServer: Number.isFinite(toServer) ? toServer : null,
+      serverChanged:
+        Number.isFinite(fromServer) &&
+        Number.isFinite(toServer) &&
+        fromServer !== toServer,
+      from: previous,
+      to: current
+    });
+  }
+
+  rows.sort((a, b) =>
+    Number(a.toServer ?? a.server ?? 0) - Number(b.toServer ?? b.server ?? 0) ||
+    String(a.fromNickname || "").localeCompare(String(b.fromNickname || "")) ||
+    String(a.toNickname || "").localeCompare(String(b.toNickname || "")) ||
+    String(a.uid || "").localeCompare(String(b.uid || ""))
+  );
+
+  return {
+    rows,
+    previous: {
+      sourceCount: previousIndex.sourceCount,
+      validUidCount: previousIndex.validUidCount,
+      conflictingUidCount: previousIndex.conflictingUidCount,
+      invalidRows: previousIndex.invalidRows
+    },
+    current: {
+      sourceCount: currentIndex.sourceCount,
+      validUidCount: currentIndex.validUidCount,
+      conflictingUidCount: currentIndex.conflictingUidCount,
+      invalidRows: currentIndex.invalidRows
+    }
+  };
+}
+
+async function buildDailyNicknameHistoryOutput(
+  settings,
+  previousPlayerData,
+  currentPlayerData
+) {
+  if (settings.nicknameHistoryEnabled === false) {
+    return {
+      output: null,
+      skipped: true,
+      reason: "nicknameHistoryEnabled=false",
+      detectedCount: 0,
+      addedCount: 0
+    };
+  }
+
+  throwIfStopped();
+
+  // 이동현황과 동일하게 TopWar 서버 날짜(UTC+8)를 기준으로 일자별 분리한다.
+  const date = serverDateString();
+  const basePath = String(
+    settings.nicknameHistoryBasePath || "src/assets/json/power/nickname"
+  ).replace(/\/+$/, "");
+  const path = `${basePath}/${date}.json`;
+  const comparison = buildNicknameChangeRows(
+    previousPlayerData,
+    currentPlayerData
+  );
+
+  if (!comparison.rows.length) {
+    return {
+      output: null,
+      skipped: true,
+      reason: "no-nickname-change",
+      path,
+      detectedCount: 0,
+      addedCount: 0,
+      comparison
+    };
+  }
+
+  const existingData = await readGithubJsonRaw(settings, path, null);
+  const history = Array.isArray(existingData)
+    ? { version: 1, date, rows: existingData }
+    : (
+      existingData && typeof existingData === "object"
+        ? { ...existingData }
+        : { version: 1, date, rows: [] }
+    );
+
+  history.version = 1;
+  history.date = history.date || date;
+  history.serverTimezone = "UTC+8";
+  history.serverResetAt = "00:00 UTC+8 (01:00 Asia/Seoul)";
+  history.rows = Array.isArray(history.rows) ? history.rows : [];
+
+  const keys = new Set(history.rows.map(nicknameChangeRecordKey));
+  let addedCount = 0;
+
+  for (const row of comparison.rows) {
+    const key = nicknameChangeRecordKey(row);
+    if (keys.has(key)) continue;
+
+    history.rows.push(row);
+    keys.add(key);
+    addedCount++;
+  }
+
+  if (addedCount === 0) {
+    return {
+      output: null,
+      skipped: true,
+      reason: "already-recorded",
+      path,
+      detectedCount: comparison.rows.length,
+      addedCount: 0,
+      comparison
+    };
+  }
+
+  history.updatedAt = nowIso();
+  history.rows.sort((a, b) =>
+    String(a?.detectedAt || "").localeCompare(String(b?.detectedAt || "")) ||
+    Number(a?.toServer ?? a?.server ?? 0) - Number(b?.toServer ?? b?.server ?? 0) ||
+    String(a?.uid || "").localeCompare(String(b?.uid || "")) ||
+    String(a?.fromNickname || "").localeCompare(String(b?.fromNickname || "")) ||
+    String(a?.toNickname || "").localeCompare(String(b?.toNickname || ""))
+  );
+
+  return {
+    output: {
+      path,
+      data: history,
+      type: "nickname-daily"
+    },
+    skipped: false,
+    path,
+    detectedCount: comparison.rows.length,
+    addedCount,
+    totalCount: history.rows.length,
+    comparison
+  };
+}
+
+async function stageServerData(serverData, options = {}) {
+  const settings = getSettings(options);
+  assertGithubSettings(settings);
+  throwIfStopped();
+
+  const formatted = formatPowerServer(serverData);
+  const serverId = String(formatted.serverNumber);
+  const internalPath = `__power_server__/${serverId}.json`;
+
+  await putPendingFile(internalPath, formatted, {
+    type: "server",
+    serverId
+  });
+
+  saveState({
+    lastRunAt: nowIso(),
+    lastServerId: serverId,
+    pendingCommit: true
+  });
+
+  const serverListBasePath = String(
+    settings.serverListBasePath || "src/assets/json/servers"
+  ).replace(/\/+$/, "");
+  const date = todayString();
+  const targetPaths = [
+    settings.allianceDataPath,
+    settings.playerDataPath,
+    settings.serverDataPath,
+    `${serverListBasePath}/servers-${date}.json`,
+    settings.serversLatestPath || `${serverListBasePath}/servers.json`,
+    `${serverListBasePath}/servers-${date}-popular.json`,
+    settings.serversPopularLatestPath || `${serverListBasePath}/servers-popular.json`
+  ];
+
+  pushLog(`${serverId} 통합 JSON용 임시 저장 완료`, targetPaths);
+
+  return {
+    ok: true,
+    staged: true,
+    serverId,
+    stagedAt: nowIso(),
+    files: targetPaths.map(path => ({ ok: true, staged: true, path })),
+    internalPath,
+    targetPaths
+  };
+}
+
+// 이전 API 이름 호환. 이제 즉시 업로드하지 않고 IndexedDB에만 저장한다.
+async function uploadServerData(serverData, options = {}) {return stageServerData(serverData, options);}
+
+function createGitTreeChunks(rows, settings) {
+  const maxEntries = Math.max(1, Number(settings.gitTreeChunkMaxEntries ?? 80));
+  const maxChars = Math.max(100000, Number(settings.gitTreeChunkMaxBytes ?? 2500000));
+  const chunks = [];
+  let current = [];
+  let currentChars = 0;
+
+  for (const row of rows) {
+    const content = JSON.stringify(row.data);
+    const chars = content.length;
+    const entry = {
+      path: row.path,
+      mode: "100644",
+      type: "blob",
+      content
+    };
+
+    if (
+      current.length > 0 &&
+      (current.length >= maxEntries || currentChars + chars > maxChars)
+    ) {
+      chunks.push(current);
+      current = [];
+      currentChars = 0;
+    }
+
+    current.push(entry);
+    currentChars += chars;
+  }
+
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+async function commitPendingBatch(options = {}) {
+  const settings = getSettings(options);
+  assertGithubSettings(settings);
+  throwIfStopped();
+
+  const stagedServerCount = Number(await countPendingFilesByType("server")) || 0;
+
+  if (!stagedServerCount) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: "pending server cache empty",
+      fileCount: 0,
+      serverCount: 0
+    };
+  }
+
+  // OOM 방지: 큰 playerData/serverData를 Promise.all로 동시에 받아 피크 메모리를 높이지 않는다.
+  // 먼저 serverData를 읽고 IndexedDB server cursor를 한 행씩 병합한 뒤 참조를 해제한다.
+  let previousServerData = await readGithubJsonRaw(
+    settings,
+    settings.serverDataPath,
+    []
+  );
+
+  const mergedServers = await mergePendingServersWithPrevious(
+    previousServerData
+  );
+
+  previousServerData = null;
+
+  let previousPlayerData = await readGithubJsonRaw(
+    settings,
+    settings.playerDataPath,
+    []
+  );
+
+  // 장기 미접속 유저처럼 이번 랭킹 응답에 닉네임이 생략된 경우,
+  // 동일 UID의 기존 닉네임을 승계한 뒤 전체 출력 파일을 생성한다.
+  const nicknameRestore = restoreMissingPlayerNicknames(
+    mergedServers.rows,
+    previousPlayerData
+  );
+  const baseOutputFiles = buildPowerOutputFiles(
+    nicknameRestore.rows,
+    settings
+  );
+
+  // 출력 배열이 생성된 뒤에는 중간 server-row wrapper 그래프를 유지할 필요가 없다.
+  mergedServers.rows = null;
+  nicknameRestore.rows = null;
+
+  let currentPlayerData = baseOutputFiles.find(
+    row => row.type === "playerData"
+  )?.data || [];
+
+  pushLog("기존 GitHub 데이터 병합 완료", {
+    previousServerCount: mergedServers.previousCount,
+    stagedServerCount: mergedServers.stagedCount,
+    mergedServerCount: mergedServers.mergedCount
+  });
+
+  pushLog("누락 닉네임 복원 완료", {
+    restoredCount: nicknameRestore.restoredCount,
+    previousNicknameCount: nicknameRestore.previousNicknameCount,
+    sampleUids: nicknameRestore.sampleUids
+  });
+
+  // 동일 UID의 서버번호가 바뀐 경우만 날짜별 이동현황으로 추가한다.
+  const movementResult = await buildDailyMovementOutput(
+    settings,
+    previousPlayerData,
+    currentPlayerData
+  );
+  const nicknameHistoryResult = await buildDailyNicknameHistoryOutput(
+    settings,
+    previousPlayerData,
+    currentPlayerData
+  );
+
+  // 비교가 끝난 이전/현재 playerData의 별도 로컬 참조는 더 이상 필요하지 않다.
+  // 실제 업로드 데이터는 baseOutputFiles가 보유한다.
+  previousPlayerData = null;
+  currentPlayerData = null;
+
+  const outputFiles = [
+    ...baseOutputFiles,
+    ...(movementResult.output ? [movementResult.output] : []),
+    ...(nicknameHistoryResult.output ? [nicknameHistoryResult.output] : [])
+  ];
+
+  pushLog("서버 이동현황 비교 완료", {
+    path: movementResult.path || null,
+    detectedCount: movementResult.detectedCount || 0,
+    addedCount: movementResult.addedCount || 0,
+    reason: movementResult.reason || null,
+    previousUsers: movementResult.comparison?.previous?.validUidCount ?? 0,
+    currentUsers: movementResult.comparison?.current?.validUidCount ?? 0,
+    previousConflicts:
+      movementResult.comparison?.previous?.conflictingUidCount ?? 0,
+    currentConflicts:
+      movementResult.comparison?.current?.conflictingUidCount ?? 0
+  });
+
+  pushLog("닉네임 변경이력 비교 완료", {
+    path: nicknameHistoryResult.path || null,
+    detectedCount: nicknameHistoryResult.detectedCount || 0,
+    addedCount: nicknameHistoryResult.addedCount || 0,
+    reason: nicknameHistoryResult.reason || null,
+    previousUsers:
+      nicknameHistoryResult.comparison?.previous?.validUidCount ?? 0,
+    currentUsers:
+      nicknameHistoryResult.comparison?.current?.validUidCount ?? 0,
+    previousConflicts:
+      nicknameHistoryResult.comparison?.previous?.conflictingUidCount ?? 0,
+    currentConflicts:
+      nicknameHistoryResult.comparison?.current?.conflictingUidCount ?? 0
+  });
+
+  updateProgress({ phase: "committing" });
+  pushLog(
+    `GitHub 통합 커밋 준비: 신규 ${stagedServerCount}개 / 통합 ${mergedServers.mergedCount}개 서버 → ${outputFiles.length}개 파일`,
+    outputFiles.map(row => row.path)
+  );
+
+  const branchPath = String(settings.branch)
+    .split("/")
+    .map(encodeURIComponent)
+    .join("/");
+
+  const ref = await githubApiRequest(
+    settings,
+    "GET",
+    `git/ref/heads/${branchPath}`
+  );
+
+  const headSha = ref?.object?.sha;
+  if (!headSha) throw new Error("GitHub 브랜치 HEAD SHA를 찾지 못했습니다.");
+
+  const headCommit = await githubApiRequest(
+    settings,
+    "GET",
+    `git/commits/${headSha}`
+  );
+
+  const baseTreeSha = headCommit?.tree?.sha;
+  if (!baseTreeSha) throw new Error("GitHub 기준 Tree SHA를 찾지 못했습니다.");
+
+  // 대용량 JSON을 tree 요청에 직접 넣지 않고 각각 Blob으로 먼저 생성한다.
+  // playerData/serverData가 수 MB를 넘어도 tree 요청 크기 제한에 걸리지 않는다.
+  const treeEntries = [];
+  const outputStats = [];
+
+  for (let index = 0; index < outputFiles.length; index++) {
+    throwIfStopped();
+    const output = outputFiles[index];
+    const rows = Array.isArray(output.data) ? output.data.length : null;
+    const content = JSON.stringify(output.data);
+    const charLength = content.length;
+
+    updateProgress({
+      phase: "committing",
+      commitChunkIndex: index + 1,
+      commitChunkTotal: outputFiles.length,
+      currentOutputPath: output.path
+    });
+
+    pushLog(`GitHub Blob 생성: ${output.path}`, {
+      chars: charLength,
+      rows
+    });
+
+    // Git Data API는 utf-8 blob을 직접 지원한다.
+    // TextEncoder -> Uint8Array -> binary chunks -> base64의 대형 중간 복사를 제거한다.
+    const blob = await githubApiRequest(
+      settings,
+      "POST",
+      "git/blobs",
+      {
+        content,
+        encoding: "utf-8"
+      }
+    );
+
+    if (!blob?.sha) {
+      throw new Error(`GitHub Blob 생성 실패: ${output.path}`);
+    }
+
+    treeEntries.push({
+      path: output.path,
+      mode: "100644",
+      type: "blob",
+      sha: blob.sha
+    });
+
+    outputStats.push({
+      path: output.path,
+      chars: charLength,
+      rows,
+      sha: blob.sha
+    });
+
+    // 업로드가 끝난 출력 데이터는 다음 Blob 처리 전에 참조를 끊는다.
+    output.data = null;
+  }
+
+  const tree = await githubApiRequest(
+    settings,
+    "POST",
+    "git/trees",
+    {
+      base_tree: baseTreeSha,
+      tree: treeEntries
+    }
+  );
+
+  if (!tree?.sha) throw new Error("GitHub 통합 Tree 생성 실패");
+
+  const movementCount = Number(movementResult.addedCount || 0);
+  const nicknameChangeCount = Number(nicknameHistoryResult.addedCount || 0);
+  const message =
+    `Update power data ${todayString()} (${mergedServers.mergedCount} servers, ${stagedServerCount} refreshed` +
+    `${movementCount > 0 ? `, ${movementCount} movements` : ""}` +
+    `${nicknameChangeCount > 0 ? `, ${nicknameChangeCount} nickname changes` : ""})`;
+
+  const commit = await githubApiRequest(
+    settings,
+    "POST",
+    "git/commits",
+    {
+      message,
+      tree: tree.sha,
+      parents: [headSha]
+    }
+  );
+
+  if (!commit?.sha) throw new Error("GitHub 커밋 생성 결과에 SHA가 없습니다.");
+
+  await githubApiRequest(
+    settings,
+    "PATCH",
+    `git/refs/heads/${branchPath}`,
+    {
+      sha: commit.sha,
+      force: false
+    }
+  );
+
+  await deletePendingFiles();
+  saveState({
+    pendingCommit: false,
+    lastCommitAt: nowIso(),
+    lastCommitSha: commit.sha,
+    lastCommitErrorAt: null,
+    lastCommitError: null,
+    lastCommitFileCount: outputFiles.length,
+    lastCommitServerCount: mergedServers.mergedCount,
+    lastCommitRefreshedServerCount: stagedServerCount,
+    lastMovementPath: movementResult.path || null,
+    lastMovementDetectedCount: movementResult.detectedCount || 0,
+    lastMovementAddedCount: movementResult.addedCount || 0,
+    lastNicknameHistoryPath: nicknameHistoryResult.path || null,
+    lastNicknameHistoryDetectedCount: nicknameHistoryResult.detectedCount || 0,
+    lastNicknameHistoryAddedCount: nicknameHistoryResult.addedCount || 0
+  });
+
+  pushLog(`GitHub 통합 커밋 완료: ${outputFiles.length}개 파일`, {
+    sha: commit.sha,
+    servers: mergedServers.mergedCount,
+    refreshedServers: stagedServerCount,
+    files: outputStats
+  });
+
+  return {
+    ok: true,
+    commitSha: commit.sha,
+    fileCount: outputFiles.length,
+    serverCount: mergedServers.mergedCount,
+    refreshedServerCount: stagedServerCount,
+    movement: {
+      path: movementResult.path || null,
+      detectedCount: movementResult.detectedCount || 0,
+      addedCount: movementResult.addedCount || 0,
+      totalCount: movementResult.totalCount || 0,
+      reason: movementResult.reason || null
+    },
+    nicknameHistory: {
+      path: nicknameHistoryResult.path || null,
+      detectedCount: nicknameHistoryResult.detectedCount || 0,
+      addedCount: nicknameHistoryResult.addedCount || 0,
+      totalCount: nicknameHistoryResult.totalCount || 0,
+      reason: nicknameHistoryResult.reason || null
+    },
+    files: outputStats,
+    message
+  };
+}
+
+async function uploadOpenRanks(serverId, options = {}) {const data = await collectOpenRanks(serverId);const result = await uploadServerData(data, options);return { data, result };}
+
+async function surveyServer(serverId, options = {}) {const ownsController = !loopRuntime.abortController;
+
+if (ownsController) {
+  loopRuntime.stopRequested = false;
+  loopRuntime.abortController = new AbortController();
+  loopRuntime.mode = "single";
+  updateProgress({
+    currentIndex: 1,
+    total: 1,
+    currentServerId: Number(serverId),
+    phase: "surveying"
+  });
+}
+
+try {
+  throwIfStopped();
+  const data = await collectByClick(serverId, options);
+  throwIfStopped();
+  const result = await uploadServerData(data, options);
+  throwIfStopped();
+  return { data, result };
+} finally {
+  if (ownsController) {
+    loopRuntime.abortController = null;
+    loopRuntime.stopRequested = false;
+    loopRuntime.mode = "idle";
+    updateProgress({ phase: "idle" });
+  }
+}
+
+}
+
+async function surveyServers(serverIds, options = {}) {const settings = getSettings(options);const ids = Array.isArray(serverIds)? serverIds: String(serverIds || "").split(/[,\s]+/).map(Number).filter(Number.isFinite);
+
+saveState({ running: true });
+const results = [];
+
+try {
+  for (const serverId of ids) {
+    try {
+      pushLog(`${serverId} 조사 시작`);
+      const row = await surveyServer(serverId, settings);
+      results.push({ serverId, ok: true, ...row.result });
+    } catch (error) {
+      console.error(`[REALPOWER] ${serverId} 조사 실패:`, error);
+      results.push({ serverId, ok: false, error: error?.message || String(error) });
+      pushLog(`${serverId} 조사 실패`, error?.message || String(error));
+    }
+
+    await sleep(settings.betweenServerDelayMs);
+  }
+} finally {
+  saveState({ running: false });
+}
+
+return results;
+
+}
+
+// ---------------------------------------------------------------------------// Java Test34 무한반복 프로그램 대응 루프// ---------------------------------------------------------------------------
+
+function serverNumberOf(server) {return Number(pick(server?.serverNumber, server?.server, server?.serverId));}
+
+function createRunId() {try {return crypto.randomUUID();} catch {return `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;}}
+
+async function resetSurveyProgress(options = {}) {const preserveSchema = options.preserveSchema !== false;
+
+if (loopRuntime.abortController || loopRuntime.runningPromise) {
+  stopInfiniteLoop();
+  await new Promise(resolve => setTimeout(resolve, 50));
+}
+
+localStorage.removeItem(QUEUE_KEY);
+localStorage.removeItem(STATE_KEY);
+await deletePendingFiles();
+
+if (preserveSchema) {
+  localStorage.setItem(
+    STORAGE_SCHEMA_KEY,
+    String(STORAGE_SCHEMA_VERSION)
+  );
+} else {
+  localStorage.removeItem(STORAGE_SCHEMA_KEY);
+}
+
+loopRuntime.stopRequested = false;
+loopRuntime.mode = "idle";
+loopRuntime.progress = {
+  currentIndex: 0,
+  total: 0,
+  currentServerId: null,
+  phase: "idle"
+};
+
+renderPanelSafe();
+pushLog("조사 진행상태와 임시 데이터 초기화 완료");
+
+return {
+  ok: true,
+  githubSettingsPreserved: true,
+  queueCleared: true,
+  stateCleared: true,
+  pendingCleared: true
+};
+
+}
+
+async function repairInvalidCompletedQueue() {const queue = loadServerQueue();const settings = getSettings();
+
+if (!queue?.servers?.length) {
+  return {
+    ok: true,
+    repaired: false,
+    reason: "queue empty"
+  };
+}
+
+const invalidCompleted = queue.servers.filter(server =>
+  server?.completed === true &&
+  (
+    !server?.lastSuccessAt ||
+    Number(server?.playerCount || 0) < Number(settings.requiredPlayerCount ?? 100) ||
+    Number(server?.allianceCount || 0) < Number(settings.requiredAllianceCount ?? 2)
+  )
+);
+
+if (!invalidCompleted.length) {
+  return {
+    ok: true,
+    repaired: false,
+    invalidCount: 0
+  };
+}
+
+localStorage.removeItem(QUEUE_KEY);
+localStorage.removeItem(STATE_KEY);
+await deletePendingFiles();
+
+pushLog("잘못된 완료 큐 자동 정리", {
+  invalidCount: invalidCompleted.length
+});
+
+return {
+  ok: true,
+  repaired: true,
+  invalidCount: invalidCompleted.length
+};
+
+}
+
+async function migrateLegacyPracticeData() {const currentSchema = Number(localStorage.getItem(STORAGE_SCHEMA_KEY) || 0);
+
+if (currentSchema >= STORAGE_SCHEMA_VERSION) {
+  return {
+    ok: true,
+    migrated: false,
+    schemaVersion: currentSchema
+  };
+}
+
+const queue = readLocal(QUEUE_KEY, null);
+const pendingStats = await inspectPendingFilesLightweight();
+
+const legacyQueue =
+  !!queue &&
+  (
+    Number(queue.version || 0) < 3 ||
+    (queue.servers || []).some(server =>
+      server?.completed === true &&
+      (
+        !server?.lastSuccessAt ||
+        Number(server?.playerCount || 0) < 100 ||
+        Number(server?.allianceCount || 0) < 10
+      )
+    )
+  );
+
+const legacyPending = pendingStats.legacyWithoutRunId > 0;
+const legacyState = !!readLocal(STATE_KEY, null);
+
+if (legacyQueue || legacyPending || legacyState) {
+  localStorage.removeItem(QUEUE_KEY);
+  localStorage.removeItem(STATE_KEY);
+  await deletePendingFiles();
+
+  pushLog("V2.8 이전 연습/임시 데이터 자동 정리", {
+    legacyQueue,
+    legacyPending,
+    legacyState,
+    pendingCount: pendingStats.count
+  });
+}
+
+localStorage.setItem(
+  STORAGE_SCHEMA_KEY,
+  String(STORAGE_SCHEMA_VERSION)
+);
+
+return {
+  ok: true,
+  migrated: legacyQueue || legacyPending || legacyState,
+  schemaVersion: STORAGE_SCHEMA_VERSION,
+  removedPendingCount: legacyPending ? pendingStats.count : 0
+};
+
+}
+
+function normalizeServerQueueItem(server) {const serverNumber = serverNumberOf(server);const playerCount = Number(server?.playerCount ??(Array.isArray(server?.playerList) ? server.playerList.length : 0));const allianceCount = Number(server?.allianceCount ??(Array.isArray(server?.allianceList) ? server.allianceList.length : 0));
+
+// 완료 여부는 단순히 데이터가 조금 존재하는지만으로 판단하지 않는다.
+// 실제 조사 성공 시각이 있고, 개인 100명/길드 10개 기준을 모두 충족해야 한다.
+const completed =
+  !!server?.lastSuccessAt &&
+  playerCount >= 100 &&
+  allianceCount >= 10;
+
+return {
+  ...server,
+  serverNumber,
+  server: serverNumber,
+  serverId: String(serverNumber),
+  playerCount,
+  allianceCount,
+  completed,
+  playerList: [],
+  allianceList: []
+};
+
+}
+
+function compactServerQueueItem(server) {const normalized = normalizeServerQueueItem(server);const {playerList,allianceList,lastUpload,...rest} = normalized;
+
+return {
+  ...rest,
+  playerCount: Number(normalized.playerCount || 0),
+  allianceCount: Number(normalized.allianceCount || 0),
+  completed:
+    !!normalized.lastSuccessAt &&
+    Number(normalized.playerCount || 0) >= 100 &&
+    Number(normalized.allianceCount || 0) >= 10
+};
+
+}
+
+function isServerComplete(server, options = {}) {const settings = getSettings(options);const players = Number(server?.playerCount ??(Array.isArray(server?.playerList) ? server.playerList.length : 0));const alliances = Number(server?.allianceCount ??(Array.isArray(server?.allianceList) ? server.allianceList.length : 0));
+
+// 실제 조사 성공 기록이 없는 서버는 완료로 취급하지 않는다.
+return (
+  !!server?.lastSuccessAt &&
+  players >= Number(settings.requiredPlayerCount ?? 100) &&
+  alliances >= Number(settings.requiredAllianceCount ?? 2)
+);
+
+}
+
+function loadServerQueue() {const queue = readLocal(QUEUE_KEY, null);if (!queue || typeof queue !== "object") return null;queue.servers = Array.isArray(queue.servers)? queue.servers.map(normalizeServerQueueItem).filter(row => Number.isFinite(row.serverNumber)): [];return queue;}
+
+function saveServerQueue(servers, patch = {}) {const previous = loadServerQueue();
+
+const compactServers = (servers || [])
+  .map(compactServerQueueItem)
+  .filter(row => Number.isFinite(row.serverNumber));
+
+const queue = {
+  // allServers/source/total/currentIndex 등 기존 메타데이터를 보존한다.
+  ...(previous || {}),
+  version: 4,
+  runId: patch.runId || previous?.runId || createRunId(),
+  createdAt: patch.createdAt || previous?.createdAt || nowIso(),
+  updatedAt: nowIso(),
+  servers: compactServers,
+  total: Number(
+    patch.total ??
+    previous?.total ??
+    compactServers.length
+  ),
+  ...patch
+};
+
+// patch에 servers가 실수로 포함돼도 항상 정규화된 배열을 사용한다.
+queue.servers = compactServers;
+
+writeLocal(QUEUE_KEY, queue);
+renderPanelSafe();
+return queue;
+
+}
+
+function clearServerQueue() {localStorage.removeItem(QUEUE_KEY);renderPanelSafe();return true;}
+
+function createQueueFromServerIds(serverIds) {const ids = Array.isArray(serverIds)? serverIds: String(serverIds || "").split(/[,\s]+/).map(Number).filter(Number.isFinite);
+
+return ids.map(serverNumber => ({
+  serverNumber,
+  server: serverNumber,
+  serverId: String(serverNumber),
+  playerList: [],
+  allianceList: []
+}));
+
+}
+
+function isReusableAllServerQueue(queue) {if (!queue?.servers?.length) return false;
+
+// V4.1 이후 정상 큐
+if (queue.allServers === true) return true;
+
+// 이전 버전에서 allServers 메타데이터가 유실된 큐 복구.
+// 전체 서버 큐는 통상 여러 서버를 포함하므로 10개 이상이면 전체 큐로 간주한다.
+return queue.servers.length >= 10;
+
+}
+
+function loadLastTempDataLikeJava(options = {}) {const queue = loadServerQueue();
+
+if (options.allServers === true) {
+  const requestedOrderMode = getRealPowerServerOrderMode(options);
+
+  if (
+    isReusableAllServerQueue(queue) &&
+    options.forceRefreshAllServers !== true
+  ) {
+    let reusableServers = queue.servers;
+
+    // 라디오 선택 기준이 기존 큐와 달라졌으면 완료/실패 정보는 유지한 채 순서만 다시 배치한다.
+    if (queue.serverOrderMode !== requestedOrderMode) {
+      reusableServers = orderRealPowerServers(queue.servers, {
+        ...options,
+        serverOrderMode: requestedOrderMode
+      });
+
+      saveServerQueue(reusableServers, {
+        allServers: true,
+        serverOrderMode: requestedOrderMode,
+        source: `WorldServerListPanel.m_data:${requestedOrderMode}`,
+        total: reusableServers.length,
+        status: queue.status || "partial"
+      });
+
+      pushLog("전체 서버 임시 큐 순서 변경", {
+        from: queue.serverOrderMode || "unknown",
+        to: requestedOrderMode,
+        firstServers: reusableServers.slice(0, 20).map(server => server.serverNumber)
+      });
+    } else if (queue.allServers !== true) {
+      // 이전 버전에서 allServers가 유실됐다면 즉시 복구해서 저장한다.
+      saveServerQueue(reusableServers, {
+        allServers: true,
+        serverOrderMode: requestedOrderMode,
+        source: queue.source || `recovered-all-server-queue:${requestedOrderMode}`,
+        total: reusableServers.length,
+        status: queue.status || "partial"
+      });
+    }
+
+    pushLog(
+      `전체 서버 임시 큐 재개: ${reusableServers.length}개 서버`,
+      { serverOrderMode: requestedOrderMode }
+    );
+    return reusableServers;
+  }
+
+  if (queue?.servers?.length) {
+    pushLog(
+      `단일/테스트 큐 ${queue.servers.length}개를 전체 서버 조사에 사용하지 않음`
+    );
+  }
+
+  // 전체 서버 조사에서는 WorldServerListPanel.m_data를 기준으로 선택 순서를 적용한다.
+  const servers = orderRealPowerServers(getAllServers2(), {
+    ...options,
+    serverOrderMode: requestedOrderMode
+  });
+
+  saveServerQueue(servers, {
+    status: "ready",
+    source: `WorldServerListPanel.m_data:${requestedOrderMode}`,
+    allServers: true,
+    serverOrderMode: requestedOrderMode,
+    total: servers.length,
+    currentIndex: 0,
+    currentServerId: null,
+    lastError: null
+  });
+
+  pushLog(`전체 서버 큐 새로 생성: ${servers.length}개 서버`, {
+    serverOrderMode: requestedOrderMode
+  });
+  return servers;
+}
+
+if (
+  queue?.servers?.length &&
+  options.forceRefreshAllServers !== true
+) {
+  pushLog(`이전 임시 큐 로드: ${queue.servers.length}개 서버`);
+  return queue.servers;
+}
+
+if (options.serverIds) {
+  const servers = createQueueFromServerIds(options.serverIds);
+
+  saveServerQueue(servers, {
+    status: "ready",
+    source: "manual-server-ids",
+    allServers: false,
+    total: servers.length,
+    currentIndex: 0,
+    currentServerId: null
+  });
+
+  pushLog(`입력 서버 큐 생성: ${servers.length}개 서버`);
+  return servers;
+}
+
+const servers = getAllServers2();
+
+saveServerQueue(servers, {
+  status: "ready",
+  source: "WorldServerListPanel.m_data",
+  allServers: true,
+  total: servers.length,
+  currentIndex: 0,
+  currentServerId: null
+});
+
+pushLog(`전체 서버 목록으로 큐 생성: ${servers.length}개 서버`);
+return servers;
+
+}
+
+async function runOneCycle(options = {}) {const settings = getSettings(options);assertGithubSettings(settings);const startedAt = Date.now();
+
+let servers = loadLastTempDataLikeJava(settings);
+saveServerQueue(servers, {
+  status: "running",
+  startedAt: nowIso(),
+  lastError: null,
+  allServers: settings.allServers === true,
+  source: settings.allServers === true
+    ? "WorldServerListPanel.m_data"
+    : "manual-server-ids",
+  total: servers.length
+});
+
+const results = [];
+pushLog(`서버 개수: ${servers.length}`);
+
+try {
+  const completedBeforeLoop = servers.filter(server =>
+    isServerComplete(server, settings)
+  ).length;
+
+  if (
+    servers.length > 0 &&
+    completedBeforeLoop >= servers.length &&
+    settings.commitAfterFullCycle !== false
+  ) {
+    updateProgress({
+      currentIndex: servers.length,
+      total: servers.length,
+      phase: "committing"
+    });
+
+    const commitResult = await commitPendingBatch(settings);
+    clearServerQueue();
+
+    return {
+      ok: true,
+      elapsedSec: Math.round((Date.now() - startedAt) / 1000),
+      completed: servers.length,
+      total: servers.length,
+      results,
+      commitResult
+    };
+  }
+
+  for (let i = 0; i < servers.length; i++) {
+    if (loopRuntime.stopRequested) {
+      pushLog("중지 요청 감지 - 현재 사이클 중단");
+      break;
+    }
+
+    const server = normalizeServerQueueItem(servers[i]);
+    const serverNumber = server.serverNumber;
+
+    if (!Number.isFinite(serverNumber)) continue;
+
+    updateProgress({
+      currentIndex: i + 1,
+      total: servers.length,
+      currentServerId: serverNumber,
+      phase: "surveying"
+    });
+
+    if (isServerComplete(server, settings)) {
+      pushLog(`${serverNumber} 건너뜀: 이미 완료 (${server.playerCount}/${server.allianceCount})`);
+      results.push({ serverId: serverNumber, ok: true, skipped: true, reason: "already complete" });
+      continue;
+    }
+
+    try {
+      pushLog(`${serverNumber} 서버 조사 시작`);
+      const { data, result } = await surveyServer(serverNumber, settings);
+
+      servers[i] = {
+        ...server,
+        serverNumber,
+        server: serverNumber,
+        serverId: String(serverNumber),
+        playerCount: Array.isArray(data.playerList) ? data.playerList.length : 0,
+        allianceCount: Array.isArray(data.allianceList) ? data.allianceList.length : 0,
+        completed: true,
+        lastSuccessAt: nowIso(),
+        lastStagedAt: result?.stagedAt || nowIso(),
+        lastError: null
+      };
+
+      saveServerQueue(servers, {
+        status: "running",
+        allServers: settings.allServers === true,
+        total: servers.length,
+        currentIndex: i + 1,
+        currentServerId: serverNumber,
+        nextIndex: i + 1
+      });
+
+      results.push({ serverId: serverNumber, ok: true, result });
+      pushLog(`${serverNumber} 서버 조사 완료`);
+    } catch (error) {
+      if (isStopError(error)) {
+        pushLog(`${serverNumber} 서버 조사 즉시 중지`);
+        break;
+      }
+
+      servers[i] = {
+        ...server,
+        lastErrorAt: nowIso(),
+        lastError: error?.message || String(error)
+      };
+
+      saveServerQueue(servers, {
+        status: "failed",
+        allServers: settings.allServers === true,
+        total: servers.length,
+        currentIndex: i + 1,
+        currentServerId: serverNumber,
+        nextIndex: i + 1,
+        lastError: error?.message || String(error)
+      });
+
+      results.push({
+        serverId: serverNumber,
+        ok: false,
+        error: error?.message || String(error)
+      });
+
+      pushLog(`${serverNumber} 서버 조사 오류 - 임시 큐 저장`, error?.message || String(error));
+
+      if (settings.continueOnError !== true) {
+        throw error;
+      }
+    }
+
+    const nextServer = servers[i + 1];
+    if (nextServer && !loopRuntime.stopRequested) {
+      pushLog(
+        `${serverNumber} 처리 종료 → 다음 서버 ${serverNumberOf(nextServer)} 이동 예정`,
+        {
+          currentIndex: i + 1,
+          total: servers.length
+        }
+      );
+    }
+
+    await sleep(settings.betweenServerDelayMs);
+  }
+
+  const completed = servers.filter(server => isServerComplete(server, settings)).length;
+  const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+
+  let commitResult = null;
+  // 개수 확인을 위해 IndexedDB 전체 데이터를 메모리로 가져오지 않는다.
+  const stagedServerCount = Number(await countPendingFilesByType("server")) || 0;
+  const fullyCompleted = servers.length > 0 && completed >= servers.length;
+
+  // 마지막 서버까지 순회했다면 일부 서버가 실패했어도 성공분은 커밋한다.
+  // commitPendingBatch()가 기존 serverData.json과 병합하므로 실패 서버 데이터는 보존된다.
+  if (
+    servers.length > 0 &&
+    !loopRuntime.stopRequested &&
+    stagedServerCount > 0 &&
+    settings.commitAfterFullCycle !== false
+  ) {
+    saveServerQueue(servers, {
+      status: fullyCompleted ? "commit-pending" : "partial-commit-pending",
+      completed,
+      total: servers.length,
+      stagedServerCount,
+      elapsedSec
+    });
+
+    try {
+      commitResult = await commitPendingBatch(settings);
+
+      if (fullyCompleted) {
+        clearServerQueue();
+        pushLog(
+          `[알림] 모든 조회 및 일괄 커밋 완료 (${elapsedSec}s)`
+        );
+      } else {
+        // 성공한 서버의 임시 데이터는 커밋 과정에서 삭제된다.
+        // 큐는 유지하여 다음 사이클에서 실패한 서버만 다시 시도한다.
+        saveServerQueue(servers, {
+          status: "partial-committed",
+          completed,
+          total: servers.length,
+          stagedServerCount,
+          elapsedSec,
+          lastCommitAt: nowIso(),
+          lastCommitSha: commitResult?.commitSha || null,
+          lastError: null
+        });
+
+        pushLog(
+          `[알림] 부분 조사 결과 GitHub 업로드 완료: ` +
+          `${completed}/${servers.length}, 신규 ${stagedServerCount}개 서버 (${elapsedSec}s)`
+        );
+      }
+    } catch (error) {
+      saveServerQueue(servers, {
+        status: "commit-failed",
+        completed,
+        total: servers.length,
+        stagedServerCount,
+        elapsedSec,
+        lastError: error?.message || String(error)
+      });
+
+      saveState({
+        pendingCommit: true,
+        lastCommitErrorAt: nowIso(),
+        lastCommitError: error?.message || String(error)
+      });
+
+      pushLog(
+        "일괄 커밋 실패 - IndexedDB와 진행상태 유지",
+        {
+          message: error?.message || String(error),
+          status: error?.status ?? null,
+          response: error?.response ?? null
+        }
+      );
+      throw error;
+    }
+  } else if (loopRuntime.stopRequested) {
+    saveServerQueue(servers, {
+      status: "stopped",
+      completed,
+      total: servers.length,
+      stagedServerCount,
+      elapsedSec
+    });
+  } else if (stagedServerCount === 0) {
+    saveServerQueue(servers, {
+      status: fullyCompleted ? "complete-no-pending" : "partial-no-pending",
+      completed,
+      total: servers.length,
+      stagedServerCount,
+      elapsedSec
+    });
+    pushLog(
+      `GitHub 업로드할 신규 임시 데이터가 없음: ${completed}/${servers.length}`
+    );
+  } else {
+    saveServerQueue(servers, {
+      status: fullyCompleted ? "commit-disabled" : "partial",
+      completed,
+      total: servers.length,
+      stagedServerCount,
+      elapsedSec
+    });
+    pushLog(
+      `자동 커밋 비활성화: ${completed}/${servers.length}, 임시 서버 ${stagedServerCount}개`
+    );
+  }
+
+  return {
+    ok: true,
+    elapsedSec,
+    completed,
+    total: servers.length,
+    results,
+    commitResult
+  };
+} catch (error) {
+  const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+
+  if (isStopError(error)) {
+    pushLog(`사이클 즉시 중지 (${elapsedSec}s)`);
+    return {
+      ok: true,
+      stopped: true,
+      elapsedSec,
+      results
+    };
+  }
+
+  pushLog(`사이클 오류 (${elapsedSec}s)`, error?.message || String(error));
+  return {
+    ok: false,
+    elapsedSec,
+    error: error?.message || String(error),
+    results
+  };
+}
+
+}
+
+async function startInfiniteLoop(options = {}) {await repairInvalidCompletedQueue();await migrateLegacyPracticeData();
+
+if (loopRuntime.runningPromise) {
+  pushLog("이미 무한반복 실행 중");
+  return loopRuntime.runningPromise;
+}
+
+if (loopRuntime.abortController) {
+  throw new Error("다른 조사가 실행 중입니다. 먼저 중지하세요.");
+}
+
+const settings = getSettings({
+  allServers: true,
+  ...options
+});
+
+loopRuntime.stopRequested = false;
+loopRuntime.abortController = new AbortController();
+loopRuntime.mode = "infinite";
+
+const controller = loopRuntime.abortController;
+
+const promise = (async () => {
+  saveState({ running: true, mode: "infinite-all-servers" });
+  updateProgress({
+    currentIndex: 0,
+    total: loadServerQueue()?.servers?.length || 0,
+    currentServerId: null,
+    phase: "starting"
+  });
+  pushLog("전체 서버 무한반복 시작");
+
+  let cycleNumber = 0;
+
+  try {
+    while (!loopRuntime.stopRequested && !controller.signal.aborted) {
+      throwIfStopped();
+      cycleNumber++;
+
+      const queue = loadServerQueue();
+
+      if (!isReusableAllServerQueue(queue)) {
+        if (queue?.servers?.length) {
+          pushLog(
+            `전체 서버 모드에서 ${queue.servers.length}개짜리 단일/테스트 큐 감지 - 전체 목록으로 교체`
+          );
+        }
+
+        initializeAllServerQueue(settings);
+      } else if (queue.allServers !== true) {
+        saveServerQueue(queue.servers, {
+          allServers: true,
+          source: queue.source || "recovered-all-server-queue",
+          total: queue.servers.length
+        });
+      }
+
+      const cycleResult = await runOneCycle({
+        ...settings,
+        allServers: true
+      });
+
+      if (
+        loopRuntime.stopRequested ||
+        controller.signal.aborted ||
+        cycleResult?.stopped
+      ) {
+        break;
+      }
+
+      if (
+        cycleResult?.completed >= cycleResult?.total &&
+        settings.refreshAllServerListEachCycle !== false
+      ) {
+        try {
+          initializeAllServerQueue(settings);
+        } catch (error) {
+          pushLog("다음 사이클 전체 서버 목록 갱신 실패", error?.message || String(error));
+        }
+      }
+
+      pushLog(
+        cycleResult?.ok === false
+          ? `전체 서버 사이클 ${cycleNumber} 오류 후 재개 대기`
+          : `전체 서버 사이클 ${cycleNumber} 완료`,
+        {
+          completed: cycleResult?.completed,
+          total: cycleResult?.total,
+          ok: cycleResult?.ok,
+          error: cycleResult?.error || null
+        }
+      );
+
+      updateProgress({
+        phase: cycleResult?.ok === false
+          ? "retry-waiting"
+          : "waiting"
+      });
+      await sleep(Number(settings.loopDelayMs ?? 3000));
+    }
+  } catch (error) {
+    if (!isStopError(error)) throw error;
+    pushLog("사용자 요청으로 즉시 중지");
+  } finally {
+    saveState({ running: false, mode: "idle" });
+
+    if (loopRuntime.abortController === controller) {
+      loopRuntime.abortController = null;
+    }
+
+    loopRuntime.stopRequested = false;
+    loopRuntime.runningPromise = null;
+    loopRuntime.mode = "idle";
+    updateProgress({ phase: "idle" });
+    pushLog("전체 서버 무한반복 종료");
+  }
+
+  return true;
+})();
+
+loopRuntime.runningPromise = promise;
+renderPanelSafe();
+return promise;
+
+}
+
+function startAllServersInfiniteLoop(options = {}) {return startInfiniteLoop({...options,allServers: true});}
+
+async function resetAndStartAllServersInfiniteLoop(options = {}) {
+  const active = !!loopRuntime.abortController || !!loopRuntime.runningPromise;
+
+  if (active) {
+    throw new Error("실행 중인 조사를 먼저 중지한 뒤 초기화 후 시작하세요.");
+  }
+
+  loopRuntime.mode = "resetting";
+  updateProgress({
+    currentIndex: 0,
+    total: 0,
+    currentServerId: null,
+    phase: "resetting"
+  });
+
+  await resetSurveyProgress({ preserveSchema: true });
+  pushLog("초기화 완료 - 전체 서버 조사를 처음부터 시작합니다.");
+
+  return startAllServersInfiniteLoop({
+    ...options,
+    forceRefreshAllServers: true
+  });
+}
+
+function stopInfiniteLoop() {const wasRunning = !!loopRuntime.abortController || !!loopRuntime.runningPromise;
+
+loopRuntime.stopRequested = true;
+loopRuntime.mode = wasRunning ? "stopping" : "idle";
+updateProgress({ phase: wasRunning ? "stopping" : "idle" });
+
+try {
+  loopRuntime.abortController?.abort();
+} catch {}
+
+saveState({
+  running: false,
+  stopRequestedAt: nowIso()
+});
+
+pushLog(wasRunning ? "즉시 중지 요청" : "실행 중인 조사가 없음");
+renderPanelSafe();
+return wasRunning;
+
+}
+
+
+async function commitPendingNow(options = {}) {
+  const active = !!loopRuntime.abortController || !!loopRuntime.runningPromise;
+
+  if (active) {
+    throw new Error("조사 실행 중에는 수동 업로드를 시작할 수 없습니다.");
+  }
+
+  if (loopRuntime.mode === "resetting" || loopRuntime.mode === "committing-manual") {
+    throw new Error("다른 작업이 진행 중입니다.");
+  }
+
+  loopRuntime.stopRequested = false;
+  loopRuntime.mode = "committing-manual";
+  updateProgress({
+    phase: "committing",
+    currentServerId: null,
+    currentOutputPath: null
+  });
+
+  try {
+    const result = await commitPendingBatch(options);
+    const queue = loadServerQueue();
+
+    if (result?.skipped) {
+      pushLog("수동 GitHub 업로드 생략", result);
+      return result;
+    }
+
+    if (queue?.servers?.length) {
+      const settings = getSettings(options);
+      const completed = queue.servers.filter(server =>
+        isServerComplete(server, settings)
+      ).length;
+
+      if (completed >= queue.servers.length) {
+        clearServerQueue();
+      } else {
+        saveServerQueue(queue.servers, {
+          status: "partial-committed",
+          completed,
+          total: queue.servers.length,
+          lastCommitAt: nowIso(),
+          lastCommitSha: result?.commitSha || null,
+          lastError: null
+        });
+      }
+    }
+
+    pushLog("수동 GitHub 업로드 완료", {
+      sha: result?.commitSha || null,
+      serverCount: result?.serverCount || 0,
+      refreshedServerCount: result?.refreshedServerCount || 0,
+      fileCount: result?.fileCount || 0
+    });
+
+    return result;
+  } catch (error) {
+    saveState({
+      pendingCommit: true,
+      lastCommitErrorAt: nowIso(),
+      lastCommitError: error?.message || String(error)
+    });
+
+    pushLog("수동 GitHub 업로드 실패", {
+      message: error?.message || String(error),
+      status: error?.status ?? null,
+      response: error?.response ?? null
+    });
+
+    throw error;
+  } finally {
+    loopRuntime.mode = "idle";
+    updateProgress({
+      phase: "idle",
+      currentOutputPath: null,
+      commitChunkIndex: null,
+      commitChunkTotal: null
+    });
+  }
+}
+
+function configure(settings = {}) {const clean = {...settings};delete clean.token;const saved = saveSettings(clean);pushLog("설정 저장", {owner: saved.owner,repo: saved.repo,branch: saved.branch,token: sharedGithubToken() ? "shared" : "",allianceDataPath: saved.allianceDataPath,playerDataPath: saved.playerDataPath,serverDataPath: saved.serverDataPath,serverListBasePath: saved.serverListBasePath,serversLatestPath: saved.serversLatestPath,serversPopularLatestPath: saved.serversPopularLatestPath,movementBasePath: saved.movementBasePath,nicknameHistoryBasePath: saved.nicknameHistoryBasePath});return {...saved,token: sharedGithubToken() ? "********" : ""};}
+
+function promptConfigure() {const current = getSettings();const result = configure({owner: prompt("GitHub owner", current.owner || "") || current.owner,repo: prompt("GitHub repo", current.repo || "topwar-webutil-vite") || current.repo,branch: prompt("GitHub branch", current.branch || "main") || current.branch});window.TOPWAR?.ensureGithubToken?.({interactive:true}).catch(error => console.warn("[REALPOWER] shared token check failed:", error));return result;}
+
+function status() {const settings = getSettings();const state = getState();
+
+const st = {
+  version: "4.6.1-unified",
+  independent: false,
+  settingsKey: SETTINGS_KEY,
+  stateKey: STATE_KEY,
+  settings: {
+    ...settings,
+    token: settings.token ? "********" : ""
+  },
+  state,
+  queue: loadServerQueue(),
+  storageSchemaVersion: Number(localStorage.getItem(STORAGE_SCHEMA_KEY) || 0),
+  calibration: readCalibration(),
+  paths: {
+    allianceData: settings.allianceDataPath,
+    playerData: settings.playerDataPath,
+    serverData: settings.serverDataPath,
+    movementBase: settings.movementBasePath,
+    nicknameHistoryBase: settings.nicknameHistoryBasePath,
+    serverListBase: settings.serverListBasePath,
+    serversLatest: settings.serversLatestPath,
+    serversPopularLatest: settings.serversPopularLatestPath
+  },
+  components: {
+    WorldServerListPanel: !!getComponentSafe("WorldServerListPanel"),
+    WorldServerPowerRank: !!getComponentSafe("WorldServerPowerRank"),
+    WorldServerAlliancePowerRank: !!getComponentSafe("WorldServerAlliancePowerRank")
+  }
+};
+
+console.log("[REALPOWER] status:", st);
+return st;
+
+}
+
+async function clearOwnData() {localStorage.removeItem(SETTINGS_KEY);localStorage.removeItem(STATE_KEY);localStorage.removeItem(QUEUE_KEY);localStorage.removeItem(STORAGE_SCHEMA_KEY);localStorage.removeItem(UI_STATE_KEY);await deletePendingFiles();pushLog("독립 설정/상태/임시 데이터 초기화 완료");applyPanelVisibility();return true;}
+
+// ---------------------------------------------------------------------------// Compact UI: start/stop toggle + slide collapse// ---------------------------------------------------------------------------
+
+function readUiState() {const state = readLocal(UI_STATE_KEY, {collapsed: false});return {collapsed: state?.collapsed === true || state?.hidden === true};}
+
+function applyPanelVisibility() {const collapsed = readUiState().collapsed;const panel = document.getElementById("realpower-standalone-panel");const slide = panel?.querySelector("#rp-slide");
+
+if (panel) {
+  panel.style.setProperty("display", "block", "important");
+  panel.style.setProperty("visibility", "visible", "important");
+  panel.style.transform = collapsed
+    ? "translateX(calc(100% - 36px))"
+    : "translateX(0)";
+  panel.dataset.collapsed = collapsed ? "true" : "false";
+}
+
+if (slide) {
+  slide.textContent = collapsed ? "◀" : "▶";
+  slide.title = collapsed
+    ? "RealPower UI 펼치기 (Ctrl+Alt+R)"
+    : "RealPower UI 접기 (Ctrl+Alt+R)";
+  slide.setAttribute("aria-label", slide.title);
+  slide.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+return collapsed;
+
+}
+
+function setPanelCollapsed(collapsed) {writeLocal(UI_STATE_KEY, {collapsed: collapsed === true,updatedAt: nowIso()});applyPanelVisibility();renderPanelSafe();return collapsed === true;}
+
+function hidePanel() {return setPanelCollapsed(true);}
+function showPanel() {return setPanelCollapsed(false);}
+function togglePanelVisibility() {return setPanelCollapsed(!readUiState().collapsed);}
+
+function panelHtml() {return `
+      <div style="display:flex;align-items:stretch;width:100%;min-height:44px">
+        <button id="rp-slide" type="button" title="RealPower UI 접기 (Ctrl+Alt+R)" style="
+          flex:0 0 36px;
+          width:36px;
+          min-height:44px;
+          padding:0;
+          border:1px solid rgba(255,255,255,.32);
+          border-right:0;
+          border-radius:9px 0 0 9px;
+          background:rgba(0,0,0,.82);
+          color:#fff;
+          font-size:17px;
+          font-weight:700;
+          line-height:42px;
+          cursor:pointer;
+          box-shadow:-2px 2px 8px rgba(0,0,0,.30);
+        ">▶</button>
+        <div id="rp-body" style="
+          flex:1 1 auto;
+          min-width:0;
+          box-sizing:border-box;
+          padding:7px;
+          border:1px solid rgba(255,255,255,.24);
+          border-radius:0 0 0 8px;
+          background:rgba(0,0,0,.76);
+          box-shadow:0 2px 8px rgba(0,0,0,.28);
+          backdrop-filter:blur(3px);
+        ">
+          <div style="display:flex;align-items:center;gap:7px">
+            <button id="rp-toggle" type="button" style="
+              flex:1 1 0;
+              height:30px;
+              border:0;
+              border-radius:6px;
+              color:#fff;
+              font-weight:700;
+              cursor:pointer;
+            ">조사 시작</button>
+            <button id="rp-reset-start" type="button" title="기존 진행상태와 임시 데이터를 지우고 처음부터 조사" style="
+              flex:1.35 1 0;
+              height:30px;
+              border:0;
+              border-radius:6px;
+              background:#ef6c00;
+              color:#fff;
+              font-weight:700;
+              cursor:pointer;
+            ">초기화 후 시작</button>
+            <button id="rp-upload-now" type="button" title="IndexedDB에 저장된 조사 결과를 지금 GitHub에 업로드" style="
+              flex:1 1 0;
+              height:30px;
+              border:0;
+              border-radius:6px;
+              background:#1565c0;
+              color:#fff;
+              font-weight:700;
+              cursor:pointer;
+            ">지금 업로드</button>
+          </div>
+          <div id="rp-progress" style="
+            min-width:0;
+            margin-top:6px;
+            white-space:nowrap;
+            overflow:hidden;
+            text-overflow:ellipsis;
+            color:#fff;
+            font-size:12px;
+          ">대기 중</div>
+        </div>
+      </div>
+   `;}
+
+function panelMountTarget() {return document.fullscreenElement || document.body || document.documentElement;}
+
+function createPanel() {let panel = document.getElementById("realpower-standalone-panel");const oldLauncher = document.getElementById("realpower-standalone-launcher");
+
+// 이전 버전의 별도 RP 버튼은 제거한다.
+if (oldLauncher) oldLauncher.remove();
+
+// 이전 UI 구조가 페이지에 남아 있으면 슬라이드형으로 다시 만든다.
+if (panel && panel.dataset.uiVersion !== "slide-v3") {
+  panel.remove();
+  panel = null;
+}
+
+if (panel && panel.parentNode !== panelMountTarget()) {
+  panelMountTarget().appendChild(panel);
+}
+
+if (!panel) {
+  panel = document.createElement("div");
+  panel.id = "realpower-standalone-panel";
+  panel.dataset.uiVersion = "slide-v3";
+  panel.style.cssText = [
+    "display:block",
+    "visibility:visible",
+    "position:fixed",
+    "right:0",
+    "bottom:8px",
+    "z-index:2147483647",
+    "width:321px",
+    "box-sizing:border-box",
+    "font:12px/1.3 Arial,sans-serif",
+    "transition:transform .22s ease",
+    "will-change:transform",
+    "pointer-events:auto",
+    "isolation:isolate"
+  ].join(";");
+
+  panel.innerHTML = panelHtml();
+  panelMountTarget().appendChild(panel);
+
+  const ensureToken = () => {
+    if (getSettings().token) return true;
+
+    promptConfigure();
+
+    if (!getSettings().token) {
+      pushLog("GitHub token이 없어 조사를 시작하지 않았습니다.");
+      return false;
+    }
+
+    return true;
+  };
+
+  const logStartError = error => {
+    if (!isStopError(error)) {
+      console.error("[REALPOWER] 전체 서버 조사 실패:", error);
+      pushLog("전체 서버 조사 실패", error?.message || String(error));
+    }
+  };
+
+  panel.querySelector("#rp-toggle").onclick = () => {
+    const active = !!loopRuntime.abortController || !!loopRuntime.runningPromise;
+
+    if (active) {
+      stopInfiniteLoop();
+      return;
+    }
+
+    if (loopRuntime.mode === "resetting" || !ensureToken()) return;
+    startAllServersInfiniteLoop().catch(logStartError);
+  };
+
+  panel.querySelector("#rp-reset-start").onclick = () => {
+    const active = !!loopRuntime.abortController || !!loopRuntime.runningPromise;
+
+    if (active) {
+      pushLog("조사 실행 중에는 초기화 후 시작을 사용할 수 없습니다. 먼저 중지하세요.");
+      return;
+    }
+
+    if (loopRuntime.mode === "resetting" || !ensureToken()) return;
+
+    const confirmed = window.confirm(
+      "기존 조사 진행상태와 임시 저장 데이터를 삭제하고 처음부터 시작할까요?\nGitHub 설정과 토큰은 유지됩니다."
+    );
+
+    if (!confirmed) return;
+    resetAndStartAllServersInfiniteLoop().catch(logStartError);
+  };
+
+  panel.querySelector("#rp-upload-now").onclick = () => {
+    const active = !!loopRuntime.abortController || !!loopRuntime.runningPromise;
+
+    if (active) {
+      pushLog("조사 실행 중에는 지금 업로드를 사용할 수 없습니다. 먼저 중지하세요.");
+      return;
+    }
+
+    if (
+      loopRuntime.mode === "resetting" ||
+      loopRuntime.mode === "committing-manual" ||
+      !ensureToken()
+    ) {
+      return;
+    }
+
+    commitPendingNow().catch(error => {
+      if (!isStopError(error)) {
+        console.error("[REALPOWER] 수동 GitHub 업로드 실패:", error);
+      }
+    });
+  };
+
+  panel.querySelector("#rp-slide").onclick = togglePanelVisibility;
+}
+
+if (!window.__REALPOWER_UI_HOTKEY_BOUND__) {
+  window.__REALPOWER_UI_HOTKEY_BOUND__ = true;
+  window.addEventListener("keydown", event => {
+    if (event.ctrlKey && event.altKey && event.code === "KeyR") {
+      event.preventDefault();
+      togglePanelVisibility();
+    }
+  });
+}
+
+applyPanelVisibility();
+renderPanel();
+
+}
+
+function renderPanel() {const panel = document.getElementById("realpower-standalone-panel");if (!panel) return;
+
+const button = panel.querySelector("#rp-toggle");
+const resetStartButton = panel.querySelector("#rp-reset-start");
+const uploadNowButton = panel.querySelector("#rp-upload-now");
+const label = panel.querySelector("#rp-progress");
+const state = getState();
+const queue = loadServerQueue();
+const progress = loopRuntime.progress || state.progress || {};
+const active = !!loopRuntime.abortController || !!loopRuntime.runningPromise;
+const resetting = loopRuntime.mode === "resetting" || progress.phase === "resetting";
+const committing =
+  loopRuntime.mode === "committing-manual" ||
+  progress.phase === "committing";
+
+if (button) {
+  button.disabled = resetting || committing;
+  button.textContent = resetting
+    ? "초기화 중"
+    : (committing ? "업로드 중" : (active ? "조사 중지" : "조사 시작"));
+  button.style.background = resetting || committing
+    ? "#616161"
+    : (active ? "#c62828" : "#2e7d32");
+  button.style.cursor = resetting || committing ? "default" : "pointer";
+  button.style.opacity = resetting || committing ? ".72" : "1";
+}
+
+if (resetStartButton) {
+  resetStartButton.disabled = active || resetting || committing;
+  resetStartButton.style.background =
+    active || resetting || committing ? "#6d4c41" : "#ef6c00";
+  resetStartButton.style.cursor =
+    active || resetting || committing ? "default" : "pointer";
+  resetStartButton.style.opacity =
+    active || resetting || committing ? ".62" : "1";
+}
+
+if (uploadNowButton) {
+  uploadNowButton.disabled = active || resetting || committing;
+  uploadNowButton.style.background =
+    active || resetting || committing ? "#455a64" : "#1565c0";
+  uploadNowButton.style.cursor =
+    active || resetting || committing ? "default" : "pointer";
+  uploadNowButton.style.opacity =
+    active || resetting || committing ? ".62" : "1";
+}
+
+if (label) {
+  const current = Number(progress.currentIndex || 0);
+  const total = Number(progress.total || 0);
+  const serverId = progress.currentServerId;
+
+  if (resetting) {
+    label.textContent = "진행상태와 임시 데이터를 초기화하는 중";
+  } else if (committing) {
+    const outputPath = progress.currentOutputPath;
+    const chunkIndex = Number(progress.commitChunkIndex || 0);
+    const chunkTotal = Number(progress.commitChunkTotal || 0);
+
+    label.textContent = outputPath
+      ? `GitHub 업로드 중 ${chunkIndex}/${chunkTotal}: ${outputPath}`
+      : "GitHub 업로드 준비 중";
+  } else if (active && serverId != null) {
+    label.textContent = `${current}/${total} (${serverId}서버 조사중)`;
+  } else if (active) {
+    label.textContent = `${current}/${total} (서버 목록 준비중)`;
+  } else if (state.lastCommitError) {
+    label.textContent = `업로드 실패: ${state.lastCommitError}`;
+    label.title = state.lastCommitError;
+  } else if (queue?.status === "partial-committed") {
+    label.textContent =
+      `부분 업로드 완료: ${Number(queue.completed || 0)}/${Number(queue.total || 0)}`;
+  } else {
+    label.textContent = "대기 중";
+    label.title = "";
+  }
+}
+
+applyPanelVisibility();
+
+}
+function renderPanelSafe() {try {renderPanel();} catch {}}
+
+const api = {version: "4.6.1-unified",independent: false,
+
+configure,
+promptConfigure,
+status,
+clearOwnData,
+
+getSettings,
+getState,
+pendingCacheStatus,
+resetSurveyProgress,
+repairInvalidCompletedQueue,
+migrateLegacyPracticeData,
+listPendingFiles,
+deletePendingFiles,
+isStopError,
+throwIfStopped,
+readCalibration,
+calibrationStatus,
+captureNextClick,
+clearCalibration,
+
+getAllServersFromListPanel,
+getAllServerInfoFromListPanel,
+getAllServers2,
+getRealPowerServerOrderMode,
+orderRealPowerServers,
+initializeAllServerQueue,
+findWorldMapController,
+getCurrentServerId,
+collectActiveSceneTexts,
+isTargetBattleAreaVisible,
+waitForServerSelection,
+waitForBattleAreaEntry,
+waitForServerMove,
+moveToServer,
+
+getServerPowerRankRaw,
+inspectPlayerRankRow,
+getServerAllianceRankRaw,
+getServerPowerRank,
+getServerAllianceRank,
+rankListFingerprint,
+rankCaptureSnapshot,
+prepareRankCapture,
+waitForRankList,
+
+dispatchDomMousePress,
+clickJavaPointMouseOnly,
+clickJavaPointDomOnly,
+waitForEitherRankPanel,
+rankPointAttempts,
+backPointAttempts,
+trySemanticPanelClose,
+collectPanelCloseCommands,
+inspectPanelCloseCommands,
+closePanelByCommand,
+collectRankOpenCommands,
+inspectRankOpenCommands,
+openRankPanelByCommand,
+openRankPanelByJavaPoint,
+closeByJavaBackPoint,
+exitTheaterByJavaBackPoint,
+
+buildServerInfo,
+formatPowerPlayer,
+formatPowerAlliance,
+formatPowerServer,
+toEpochSeconds,
+latestPlayerActivitySeconds,
+buildServerListOutputFiles,
+buildPowerOutputFiles,
+buildCrossServerMovementRows,
+buildNicknameChangeRows,
+serverDateString,
+  buildDailyMovementOutput,
+  buildDailyNicknameHistoryOutput,
+collectOpenRanks,
+collectByClick,
+getTheaterPanelComponent,
+theaterPanelSnapshot,
+waitForFreshTheaterPanel,
+findServerNodeCandidates,
+collectStructuralServerOpenCandidates,
+invokeStructuralServerCandidates,
+openSelectedServerSemantic,
+buttonsInsideNode,
+openRankPanelSemantic,
+closePanelSemantic,
+listActiveButtons,
+findRankButton,
+findButtonNearSourceCoordinate,
+clickRankButtonByCoordinate,
+clickRankButton,
+openRankPanelByCoordinate,
+closeRankPanel,
+testJavaClickFlow,
+
+stageServerData,
+uploadServerData,
+commitPendingBatch,
+commitPendingNow,
+uploadOpenRanks,
+surveyServer,
+surveyServers,
+
+loadServerQueue,
+saveServerQueue,
+clearServerQueue,
+isReusableAllServerQueue,
+loadLastTempDataLikeJava,
+runOneCycle,
+startInfiniteLoop,
+startAllServersInfiniteLoop,
+resetAndStartAllServersInfiniteLoop,
+stopInfiniteLoop,
+isServerComplete,
+
+toClientPoint,
+getCanvasCenterPoint,
+clickCanvasCenter,
+openSelectedServerByCanvasCenter,
+clickCanvasNormalized,
+calibratedClientPoint,
+clickSavedPoint,
+clickCanvas,
+clickSequence,
+createPanel,
+readUiState,
+hidePanel,
+showPanel,
+togglePanelVisibility
+
+};
+
+window[API_NAME] = api;
+migrateLegacyRealPowerToken();
+
+function bootRealPowerUi() {
+  // 통합판에서는 별도 RealPower 패널을 만들지 않는다.
+  // window.REALPOWER API만 제공하고 TOPWAR 패널에서 제어한다.
+  return false;
+}
+
+// IndexedDB 복구는 백엔드 설치 후 별도로 실행한다.
+setTimeout(async () => {
+  try {
+    await repairInvalidCompletedQueue();
+    await migrateLegacyPracticeData();
+  } catch (error) {
+    console.warn("[REALPOWER] storage migration failed:", error);
+  } finally {
+    renderPanelSafe();
+  }
+}, 1500);
+
+console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weight:bold", api);})();
+
+/* ============================================================================
+ * V2.12.1 RealPower unified-panel bridge
+ * - Separate backend, shared TOPWAR GitHub token
+ * - Main button: Top100조사 ON/OFF
+ * - Advanced: 처음부터 / 지금 업로드
+ * ========================================================================== */
+(function installRealPowerUnifiedPanelBridge() {
+  "use strict";
+
+  const MAIN_BUTTON_ID = "tw26-realpower";
+  const STATUS_ID = "tw26-realpower-status";
+  const RESET_BUTTON_ID = "tw26-realpower-reset";
+  const UPLOAD_BUTTON_ID = "tw26-realpower-upload";
+
+  function rp() { return window.REALPOWER || null; }
+  function topwar() { return window.TOPWAR || null; }
+
+  function rpState() {
+    try { return rp()?.getState?.() || {}; }
+    catch { return {}; }
+  }
+
+  function otherAutomationRunning() {
+    const tw = topwar();
+    const s = tw?.state || {};
+    return !!(
+      s.watch133?.running ||
+      s.ui?.serverSurvey?.running ||
+      s.ui?.serverSurveyBatch?.running ||
+      s.cityRewardFinder?.running
+    );
+  }
+
+  async function ensureSharedToken() {
+    const tw = topwar();
+    if (typeof tw?.ensureGithubToken === "function") {
+      const token = await tw.ensureGithubToken({ interactive: true });
+      return !!token;
+    }
+    try { return !!String(localStorage.getItem("TOPWAR_GITHUB_TOKEN") || "").trim(); }
+    catch { return false; }
+  }
+
+  async function resolveSharedServerOrderMode() {
+    const tw = topwar();
+    const mode = String(
+      tw?.getAutomationServerOrderMode?.() ||
+      (() => {
+        try { return localStorage.getItem("TOPWAR_AUTOMATION_SERVER_ORDER"); }
+        catch { return "popular"; }
+      })() ||
+      "popular"
+    ).trim().toLowerCase();
+
+    const normalized = ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
+
+    // Top100 인기순 정렬도 동일한 servers-popular.json 캐시를 사용한다.
+    if (normalized === "popular") {
+      try { await tw?.resolveAutomationServerIds?.(); }
+      catch (error) { console.warn("[REALPOWER Unified UI] popular 목록 준비 실패:", error); }
+    }
+
+    return normalized;
+  }
+
+  async function startOrStop() {
+    const api = rp();
+    if (!api) {
+      alert("RealPower 백엔드가 아직 준비되지 않았습니다.");
+      return;
+    }
+
+    const state = rpState();
+    if (state.running === true) {
+      api.stopInfiniteLoop?.();
+      update();
+      return;
+    }
+
+    if (otherAutomationRunning()) {
+      alert("다른 조사가 진행 중입니다. 보상탐색 또는 지도조사를 먼저 OFF 하세요.");
+      return;
+    }
+
+    if (!await ensureSharedToken()) return;
+
+    const serverOrderMode = await resolveSharedServerOrderMode();
+
+    // Top100은 맵 901 데이터가 필요 없으므로 이전 지도조사의 대형 런타임 캐시를 먼저 해제한다.
+    try { topwar()?.clearCollected?.({ keepWatch: true }); } catch {}
+
+    api.startAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
+      if (!api.isStopError?.(error)) {
+        console.error("[REALPOWER Unified UI] 조사 실패:", error);
+        alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
+      }
+      update();
+    });
+    update();
+  }
+
+  async function resetAndStart() {
+    const api = rp();
+    if (!api) return;
+    if (rpState().running === true || otherAutomationRunning()) {
+      alert("실행 중인 조사를 먼저 모두 OFF 하세요.");
+      return;
+    }
+    if (!await ensureSharedToken()) return;
+    if (!confirm("전투력 조사 진행상태와 임시 저장 데이터를 지우고 처음부터 시작할까요?\nGitHub 토큰은 유지됩니다.")) return;
+
+    const serverOrderMode = await resolveSharedServerOrderMode();
+    try { topwar()?.clearCollected?.({ keepWatch: true }); } catch {}
+
+    api.resetAndStartAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
+      if (!api.isStopError?.(error)) {
+        console.error("[REALPOWER Unified UI] 초기화 후 시작 실패:", error);
+        alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
+      }
+      update();
+    });
+    update();
+  }
+
+  async function uploadNow() {
+    const api = rp();
+    if (!api) return;
+    if (rpState().running === true || otherAutomationRunning()) {
+      alert("조사 실행 중에는 수동 업로드를 사용할 수 없습니다.");
+      return;
+    }
+    if (!await ensureSharedToken()) return;
+
+    api.commitPendingNow?.().catch(error => {
+      console.error("[REALPOWER Unified UI] 수동 업로드 실패:", error);
+      alert(`Top100 업로드 오류\n\n${error?.message || String(error)}`);
+      update();
+    });
+    update();
+  }
+
+  function update() {
+    const button = document.getElementById(MAIN_BUTTON_ID);
+    const status = document.getElementById(STATUS_ID);
+    const reset = document.getElementById(RESET_BUTTON_ID);
+    const upload = document.getElementById(UPLOAD_BUTTON_ID);
+    if (!button) return;
+
+    const state = rpState();
+    const progress = state.progress || {};
+    const running = state.running === true;
+    const blocked = otherAutomationRunning();
+
+    button.textContent = "Top100조사";
+    button.title = running ? "실행 중 · 클릭하면 중지" : "중지됨 · 클릭하면 실행";
+    button.style.background = running ? "#247a4b" : "#3b3b3b";
+    button.disabled = !running && blocked;
+    button.style.opacity = button.disabled ? "0.55" : "1";
+
+    if (reset) {
+      reset.disabled = running || blocked;
+      reset.style.opacity = reset.disabled ? "0.55" : "1";
+    }
+    if (upload) {
+      upload.disabled = running || blocked;
+      upload.style.opacity = upload.disabled ? "0.55" : "1";
+    }
+
+    if (status) {
+      if (running) {
+        const current = Number(progress.currentIndex || 0);
+        const total = Number(progress.total || 0);
+        const server = progress.currentServerId ?? "-";
+        status.style.display = "block";
+        status.textContent = `Top100 ${current}/${total} · ${server}서버 · ${progress.phase || "실행중"}`;
+      } else if (state.lastCommitError) {
+        status.style.display = "block";
+        status.textContent = `Top100 업로드 실패: ${state.lastCommitError}`;
+      } else {
+        status.style.display = "none";
+        status.textContent = "";
+      }
+    }
+  }
+
+  function install() {
+    const api = rp();
+    const group = document.getElementById("tw26-scan-actions");
+    if (!api || !group) return false;
+
+    let button = document.getElementById(MAIN_BUTTON_ID);
+    if (!button) {
+      button = document.createElement("button");
+      button.id = MAIN_BUTTON_ID;
+      button.type = "button";
+      button.style.cssText = "height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;min-width:0;";
+      button.textContent = "Top100조사";
+      button.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void startOrStop();
+      });
+      group.appendChild(button);
+    }
+
+    let status = document.getElementById(STATUS_ID);
+    if (!status) {
+      status = document.createElement("div");
+      status.id = STATUS_ID;
+      status.style.cssText = "display:none;margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,0.05);font-size:10px;line-height:1.4;color:#aaa;word-break:break-word;";
+      group.insertAdjacentElement("afterend", status);
+    }
+
+    const advancedGrid = document.querySelector("#tw26-advanced div > div[style*='display:grid']");
+    if (advancedGrid) {
+      if (!document.getElementById(RESET_BUTTON_ID)) {
+        const reset = document.createElement("button");
+        reset.id = RESET_BUTTON_ID;
+        reset.type = "button";
+        reset.textContent = "Top100 처음부터";
+        reset.style.cssText = "height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;";
+        reset.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          void resetAndStart();
+        });
+        advancedGrid.appendChild(reset);
+      }
+
+      if (!document.getElementById(UPLOAD_BUTTON_ID)) {
+        const upload = document.createElement("button");
+        upload.id = UPLOAD_BUTTON_ID;
+        upload.type = "button";
+        upload.textContent = "Top100 업로드";
+        upload.style.cssText = "height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;";
+        upload.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          void uploadNow();
+        });
+        advancedGrid.appendChild(upload);
+      }
+    }
+
+    update();
+    return true;
+  }
+
+  const timer = setInterval(() => {
+    try {
+      install();
+      update();
+    } catch (error) {
+      console.warn("[REALPOWER Unified UI] bridge update failed:", error);
+    }
+  }, 500);
+
+  window.addEventListener("beforeunload", () => clearInterval(timer), { once: true });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", install, { once: true });
+  } else {
+    install();
+  }
 })();
