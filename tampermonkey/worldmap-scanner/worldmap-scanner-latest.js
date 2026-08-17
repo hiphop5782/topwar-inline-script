@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.12.8 - Restore Proven Thief Collector
+// @name         TopWar Unified Automation V2.12.11 - Upload Isolation
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.12.8
+// @version      2.12.11
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with shared GitHub token
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -204,7 +204,7 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.12.8-restore-proven-thief-collector";
+  const VERSION = "2.12.11-upload-isolation";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
@@ -3996,14 +3996,24 @@ TOPWAR.clearThiefQueue()
   }
 
   async function fetchGetText(url, options = {}) {
+    const headers = {
+      "Accept": "application/json,text/plain,*/*"
+    };
+    // popular 파일이 비공개 저장소에 있거나 GitHub의 익명 요청 제한에 걸린
+    // 경우에도 Contents API fallback을 사용할 수 있도록 공유 토큰을 적용한다.
+    if (/^https:\/\/api\.github\.com\//i.test(url)) {
+      const token = getGithubToken();
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+        headers["X-GitHub-Api-Version"] = "2022-11-28";
+      }
+    }
     const response = await fetch(url, {
       method: "GET",
       cache: options.force ? "no-store" : "default",
       mode: "cors",
       credentials: "omit",
-      headers: {
-        "Accept": "application/json,text/plain,*/*"
-      }
+      headers
     });
 
     if (!response.ok) throw new Error(`fetch HTTP ${response.status} ${response.statusText}`);
@@ -8190,8 +8200,12 @@ TOPWAR.clearThiefQueue()
 
     async function ensureRemoteServerListLoaded() {
       const topwarApi = window.TOPWAR || TOPWAR;
-      const cached = topwarApi?.getCachedRemoteServerList?.()?.serverIds ?? [];
-      if (cached.length) return cached;
+      const cachedResult = topwarApi?.getCachedRemoteServerList?.() || null;
+      const cached = cachedResult?.serverIds ?? [];
+      const fetchedAtMs = Date.parse(cachedResult?.fetchedAt || "");
+      const cacheFresh = cached.length && Number.isFinite(fetchedAtMs) &&
+        Date.now() - fetchedAtMs < 60 * 60 * 1000;
+      if (cacheFresh) return cached;
 
       const loader = topwarApi?.loadRemoteServerIds;
       if (typeof loader !== "function") return [];
@@ -8201,7 +8215,11 @@ TOPWAR.clearThiefQueue()
       render();
 
       try {
-        return await loader.call(topwarApi, { maxAgeMs: 60 * 60 * 1000, debug: true });
+        return await loader.call(topwarApi, {
+          maxAgeMs: 60 * 60 * 1000,
+          force: !!cached.length,
+          debug: true
+        });
       } catch (error) {
         lastServerListError = error?.message || String(error);
         console.error("[TopWar V2.12.1 UI] GitHub 서버목록 로드 실패:", error);
@@ -9771,6 +9789,9 @@ ${lastServerListError}`
   }
 
   async function uploadSurveyResultToGithub(data, options = {}) {
+    if (state.watch133?.running === true) {
+      return { ok: false, skipped: true, reason: "blocked during thief+cityReward finder" };
+    }
     await TOPWAR.ensureGithubToken?.({ interactive: true });
     const settings = {
       ...getStoredSettings(),
@@ -11186,34 +11207,57 @@ ${lastServerListError}`
   }
 
   async function goWorldMapFromBase(options = {}) {
-    await closeVisiblePopups({
-      maxRounds: options.closePopupRounds ?? 2,
-      delay: options.closePopupDelay ?? 250
-    });
+    const attempts = [];
+    const maxAttempts = Math.max(1, Number(options.worldReturnAttempts ?? 3));
 
-    const picked = pickButton(scoreWorldButton, options.minScore ?? 80, !!options.debug);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await closeVisiblePopups({
+        maxRounds: options.closePopupRounds ?? 3,
+        delay: options.closePopupDelay ?? 300
+      });
 
-    if (!picked.target) {
-      return { ok: false, reason: "go world button not found", candidates: picked.candidates };
+      const picked = pickButton(scoreWorldButton, options.minScore ?? 80, !!options.debug);
+      let clicked = false;
+
+      if (picked.target) {
+        clicked = TOPWAR.triggerCocosButtonSafe?.(picked.target.node) ?? false;
+      } else {
+        // 의미 기반 버튼을 찾지 못한 경우 기존 조사에서 사용하던 좌하단 전환 위치를 보조로 사용한다.
+        clicked = TOPWAR.clickCanvasRatio?.(0.1, 0.9) ?? false;
+      }
+
+      // mapCtrl은 기지 화면에서도 잠시 살아 있을 수 있으므로 클릭 직후 판정하지 않는다.
+      await sleep(Number(options.worldTransitionSettleMs ?? 2500));
+
+      const waitResult = await waitWorldMapReady({
+        timeout: options.waitWorldTimeout ?? 12000,
+        interval: options.waitWorldInterval ?? 300
+      });
+      const worldButtonStillVisible = !!pickButton(scoreWorldButton, options.minScore ?? 80, false).target;
+      const row = {
+        attempt,
+        clicked,
+        waitResult,
+        worldButtonStillVisible,
+        target: picked.target ? {
+          score: picked.target.score,
+          nodeName: picked.target.nodeName,
+          text: picked.target.text,
+          path: picked.target.path
+        } : null
+      };
+      attempts.push(row);
+
+      // 월드맵 컨트롤러가 준비되고 기지의 '월드맵' 전환 버튼이 사라져야 성공이다.
+      if (clicked && waitResult.ok && !worldButtonStillVisible) {
+        await sleep(Number(options.afterWorldConfirmedDelay ?? 1200));
+        return { ok: true, ...row, attempts };
+      }
+
+      await sleep(Number(options.worldReturnRetryDelay ?? 1000));
     }
 
-    const clicked = TOPWAR.triggerCocosButtonSafe?.(picked.target.node) ?? false;
-    const waitResult = await waitWorldMapReady({
-      timeout: options.waitWorldTimeout ?? 12000,
-      interval: options.waitWorldInterval ?? 300
-    });
-
-    return {
-      ok: clicked && waitResult.ok,
-      clicked,
-      waitResult,
-      target: {
-        score: picked.target.score,
-        nodeName: picked.target.nodeName,
-        text: picked.target.text,
-        path: picked.target.path
-      }
-    };
+    return { ok: false, reason: "world map transition not confirmed", attempts };
   }
 
   async function performSoftMemoryReset(options = {}) {
@@ -11239,7 +11283,11 @@ ${lastServerListError}`
       outgoingLimit: options.outgoingBufferLimit ?? 10
     });
 
-    const toWorld = await goWorldMapFromBase(options);
+      const toWorld = await goWorldMapFromBase(options);
+
+    if (!toWorld.ok) {
+      return { ok: false, stage: "goWorld", toBase, toWorld };
+    }
 
     if (!(await waitInterruptible(options.afterWorldDelay ?? 4000))) {
       return { ok: false, stopped: true, stage: "afterWorld", toBase, toWorld };
@@ -11506,6 +11554,23 @@ ${lastServerListError}`
             packetBufferLimit: normalizedOptions.packetBufferLimit ?? 20,
             outgoingBufferLimit: normalizedOptions.outgoingBufferLimit ?? 10
           });
+
+          if (!row.softReset?.ok) {
+            const reason = `서버 ${serverId} 조사 후 월드맵 복귀 실패`;
+            session.errors.push({ cycle, serverId, reason, softReset: row.softReset });
+            cycleResult.stopped = true;
+            cycleResult.reason = reason;
+            state.ui.serverSurveyBatch.current = {
+              phase: "worldReturnFailed",
+              cycle,
+              index: index + 1,
+              total: serverIds.length,
+              serverId,
+              reason
+            };
+            console.error(`[TopWar V2.12.9] ${reason}`, row.softReset);
+            break;
+          }
         }
 
         const nextIndex = index < serverIds.length - 1 ? index + 1 : 0;
@@ -12405,6 +12470,9 @@ ${lastServerListError}`
   }
 
   async function uploadSurveyResultToGithubV29(data, options = {}) {
+    if (state.watch133?.running === true) {
+      return { ok: false, skipped: true, reason: "blocked during thief+cityReward finder" };
+    }
     const settings = getStorageSettings(options);
 
     if (!settings.enabled) {
@@ -13564,6 +13632,9 @@ ${lastServerListError}`
   }
 
   async function uploadSurveyResultToGithubFastV293(data, options = {}) {
+    if (state.watch133?.running === true) {
+      return { ok: false, skipped: true, reason: "blocked during thief+cityReward finder" };
+    }
     await TOPWAR.ensureGithubToken?.({ interactive: true });
     const settings = getFastSettings(options);
 
@@ -15122,6 +15193,17 @@ class RealPowerStoppedError extends Error {constructor(message = "사용자 중�
 function activeAbortSignal() {return loopRuntime.abortController?.signal || null;}
 
 function isStopError(error) {return error?.code === "REALPOWER_STOPPED" ||error?.name === "RealPowerStoppedError" ||error?.name === "AbortError";}
+
+function isUnifiedFinderRunning() {return window.TOPWAR?.state?.watch133?.running === true;}
+
+function assertRealPowerUploadAllowed(action = "RealPower 작업") {
+  if (isUnifiedFinderRunning()) {
+    throw new RealPowerStoppedError(
+      `${action} 차단: 도시보상+도둑찾기 실행 중에는 RealPower 저장/업로드를 수행하지 않습니다.`
+    );
+  }
+  return true;
+}
 
 function throwIfStopped() {const signal = activeAbortSignal();if (loopRuntime.stopRequested || signal?.aborted) {throw new RealPowerStoppedError();}}
 
@@ -21153,6 +21235,7 @@ async function buildDailyNicknameHistoryOutput(
 }
 
 async function stageServerData(serverData, options = {}) {
+  assertRealPowerUploadAllowed("RealPower 임시 저장");
   const settings = getSettings(options);
   assertGithubSettings(settings);
   throwIfStopped();
@@ -21237,6 +21320,7 @@ function createGitTreeChunks(rows, settings) {
 }
 
 async function commitPendingBatch(options = {}) {
+  assertRealPowerUploadAllowed("RealPower GitHub 업로드");
   const settings = getSettings(options);
   assertGithubSettings(settings);
   throwIfStopped();
@@ -21859,6 +21943,33 @@ if (options.allServers === true) {
     options.forceRefreshAllServers !== true
   ) {
     let reusableServers = queue.servers;
+
+    // 새로 읽은 popular 목록이 전달되면 기존 큐의 모드 문자열이 같더라도
+    // 실제 순서를 다시 맞춘다. 완료/실패 정보는 서버번호별로 그대로 보존한다.
+    const requestedIds = Array.isArray(options.serverIds)
+      ? options.serverIds.map(Number).filter(Number.isFinite)
+      : [];
+    if (requestedIds.length) {
+      const previousById = new Map(
+        queue.servers.map(server => [Number(server?.serverNumber), server])
+      );
+      reusableServers = requestedIds.map(serverNumber =>
+        previousById.get(serverNumber) || createQueueFromServerIds([serverNumber])[0]
+      );
+      saveServerQueue(reusableServers, {
+        allServers: true,
+        serverOrderMode: requestedOrderMode,
+        source: `remote-or-explicit-server-ids:${requestedOrderMode}`,
+        total: reusableServers.length,
+        status: queue.status || "partial",
+        popularOrderRefreshedAt: nowIso()
+      });
+      pushLog("최신 인기순 목록으로 기존 조사 큐 재정렬", {
+        count: reusableServers.length,
+        firstServers: reusableServers.slice(0, 20).map(server => server.serverNumber)
+      });
+      return reusableServers;
+    }
 
     // 라디오 선택 기준이 기존 큐와 달라졌으면 완료/실패 정보는 유지한 채 순서만 다시 배치한다.
     if (queue.serverOrderMode !== requestedOrderMode) {
