@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.12.1 - OOM Cleanup + Shared Server Order
+// @name         TopWar Unified Automation V2.12.8 - Restore Proven Thief Collector
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.12.1
+// @version      2.12.8
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with shared GitHub token
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -204,7 +204,7 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.11.8-persistent-github-token-simple-ui-memory-optimized";
+  const VERSION = "2.12.8-restore-proven-thief-collector";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
@@ -222,6 +222,40 @@
     recentPackets: [],
     recentOutgoing: [],
     maxRecentPackets: 16,
+    // 도둑 전용 버퍼. 일반 901 recentPackets / 도시보상 수집과 완전히 분리한다.
+    // 901 수신 즉시 pointType=133만 경량 객체로 저장하므로 raw pointList를 붙잡지 않는다.
+    thiefBuffer: {
+      maxEvents: 512,
+      events: [],
+      nextEventId: 1,
+      activeTargetServerId: null,
+      stats: {
+        pointList901Received: 0,
+        thiefEventsCaptured: 0,
+        thievesCaptured: 0,
+        collectCalls: 0,
+        thievesCollected: 0,
+        uploadRequests: 0,
+        uploadSuccess: 0,
+        uploadFailure: 0,
+        githubGetAttempts: 0,
+        githubGetSuccess: 0,
+        githubPutAttempts: 0,
+        githubPutSuccess: 0,
+        last901At: null,
+        lastThiefCapturedAt: null,
+        lastCollectedAt: null,
+        lastUploadRequestedAt: null,
+        lastUploadSuccessAt: null,
+        lastUploadFailureAt: null,
+        lastGithubGetAt: null,
+        lastGithubPutAt: null,
+        lastError: null,
+        lastCaptured: null,
+        lastCollected: null,
+        lastUpload: null
+      }
+    },
     maxStoredObjects: 5000,
     maxStoredObjectsPerType: 1500,
     maxThiefQueue: 200,
@@ -1149,12 +1183,119 @@
     };
   }
 
+  function ensureThiefBuffer() {
+    const buffer = state.thiefBuffer ??= {
+      maxEvents: 512,
+      events: [],
+      nextEventId: 1,
+      activeTargetServerId: null,
+      stats: {}
+    };
+    buffer.events ??= [];
+    buffer.nextEventId = Number(buffer.nextEventId ?? 1);
+    buffer.maxEvents = Math.max(32, Number(buffer.maxEvents ?? 512));
+    buffer.stats ??= {};
+    return buffer;
+  }
+
+  function capture901ThiefEvent(record, detail) {
+    if (!Array.isArray(detail?.pointList)) return null;
+
+    const buffer = ensureThiefBuffer();
+    const stats = buffer.stats;
+    stats.pointList901Received = Number(stats.pointList901Received || 0) + 1;
+    stats.last901At = record?.time ?? now();
+
+    const packetServerIdRaw = Number(detail?.k);
+    const packetServerId = Number.isFinite(packetServerIdRaw) ? packetServerIdRaw : null;
+    const activeTargetServerIdRaw = Number(buffer.activeTargetServerId);
+    const scanServerId = Number.isFinite(activeTargetServerIdRaw) && activeTargetServerIdRaw > 0
+      ? activeTargetServerIdRaw
+      : null;
+    const thieves = [];
+
+    for (const point of detail.pointList) {
+      if (Number(point?.pointType) !== 133) continue;
+
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+      // 중요:
+      // detail.k는 패킷 메타값일 수 있으므로 point 자체의 서버 정보와 섞지 않는다.
+      // point에 서버 정보가 실제로 있을 때만 저장하고, 없으면 수집 시 현재 조사 서버를 사용한다.
+      const pointServerIdRaw = Number(point?.k ?? point?.p?.w ?? point?.p?.cMid);
+      const pointServerId = Number.isFinite(pointServerIdRaw) ? pointServerIdRaw : null;
+      const id = point?.id ?? null;
+
+      thieves.push({
+        serverId: pointServerId,
+        x,
+        y,
+        id,
+        pointType: 133
+      });
+    }
+
+    // 도둑 전용 버퍼에는 133이 없는 일반 901 이벤트를 넣지 않는다.
+    // 따라서 도시보상/일반 901 트래픽이 많아도 도둑 이벤트를 밀어내지 않는다.
+    if (!thieves.length) return {
+      stored: false,
+      time: record?.time ?? now(),
+      packetServerId,
+      scanServerId,
+      packetSeq: record?.packet?.seq ?? null,
+      thiefCount: 0
+    };
+
+    const eventId = Number(buffer.nextEventId ?? 1);
+    buffer.nextEventId = eventId + 1;
+
+    const event = {
+      id: eventId,
+      stored: true,
+      time: record?.time ?? now(),
+      packetServerId,
+      scanServerId,
+      packetSeq: record?.packet?.seq ?? null,
+      thiefCount: thieves.length,
+      thieves
+    };
+
+    pushLimited(buffer.events, event, buffer.maxEvents);
+
+    stats.thiefEventsCaptured = Number(stats.thiefEventsCaptured || 0) + 1;
+    stats.thievesCaptured = Number(stats.thievesCaptured || 0) + thieves.length;
+    stats.lastThiefCapturedAt = event.time;
+    stats.lastCaptured = {
+      eventId,
+      packetServerId,
+      scanServerId,
+      packetSeq: event.packetSeq,
+      thiefCount: thieves.length,
+      thieves: thieves.map(v => ({ ...v }))
+    };
+
+    console.warn("[TopWar Thief Buffer] 133 수신:", stats.lastCaptured);
+    return event;
+  }
+
   function handleDecodedPacket(record) {
     const packet = record.packet;
     const detail = packet?.decoded?.parsedDetail ?? packet?.decoded?.detail ?? null;
     if (packet?.c === 901 && Array.isArray(detail?.pointList)) {
+      // collectPointList가 playerMap/cityReward용 일반 데이터를 누적하기 전에/후와 관계없이
+      // 도둑은 이 수신 시점에 별도의 경량 네트워크 이벤트로 반드시 보존한다.
+      // recentPackets가 16개를 초과해 오래된 901이 밀려나도 133 탐지는 사라지지 않는다.
+      capture901ThiefEvent(record, detail);
+
       record.collected = collectPointList(detail.pointList, { time: record.time, c: packet.c, seq: packet.seq, serverId: detail?.k });
-      if (state.debug.log901) console.log("[TopWar 901 collected]", { seq: packet.seq, pointList: detail.pointList.length, collected: record.collected });
+      if (state.debug.log901) console.log("[TopWar 901 collected]", {
+        seq: packet.seq,
+        pointList: detail.pointList.length,
+        thiefEvents: state.thiefBuffer?.events?.length ?? 0,
+        collected: record.collected
+      });
     }
   }
 
@@ -1888,6 +2029,12 @@
     state.allianceRepresentativeMap = new Map();
     state.recentPackets = [];
     state.recentOutgoing = [];
+    if (state.thiefBuffer) {
+      state.thiefBuffer.events = [];
+      state.thiefBuffer.nextEventId = 1;
+      state.thiefBuffer.stats ??= {};
+      state.thiefBuffer.stats.lastCollected = null;
+    }
     state.commandCount = new Map();
     state.worldObjectStores = null;
 
@@ -7859,6 +8006,7 @@ TOPWAR.clearThiefQueue()
               <button id="tw26-game-font-logs" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">폰트 경고</button>
               <button id="tw26-activity" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">활동표</button>
               <button id="tw26-alliance" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">동맹표</button>
+              <button id="tw26-thief-upload-test" title="topwar-thief/data/thieves.json에 실제 GET/PUT을 수행해 업로드 권한과 경로를 확인합니다" style="grid-column:1 / -1;height:31px;border:1px solid rgba(255,255,255,0.12);border-radius:6px;background:#4a3f2b;color:#f2ddad;font-size:11px;font-weight:700;cursor:pointer;">도둑 업로드 테스트</button>
             </div>
 
             <div id="tw26-detail-status" style="
@@ -7948,6 +8096,7 @@ TOPWAR.clearThiefQueue()
     const gameFontLogsButton = panel.querySelector("#tw26-game-font-logs");
     const activityButton = panel.querySelector("#tw26-activity");
     const allianceButton = panel.querySelector("#tw26-alliance");
+    const thiefUploadTestButton = panel.querySelector("#tw26-thief-upload-test");
 
     const initialThiefUiSettings = loadThiefUiSettings();
     githubTokenInput.value = TOPWAR.getGithubToken?.() || "";
@@ -7955,6 +8104,8 @@ TOPWAR.clearThiefQueue()
     let folded = false;
     let serverListLoading = false;
     let lastServerListError = null;
+    let thiefUploadTestRunning = false;
+    let lastThiefUploadTest = null;
 
     const SERVER_ORDER_STORAGE_KEY = "TOPWAR_AUTOMATION_SERVER_ORDER";
 
@@ -8241,32 +8392,31 @@ TOPWAR.clearThiefQueue()
       return `${Number(x)}:${Number(y)}`;
     }
 
-    function collectNetworkThievesFromNew901(targetServerId, previousPacketRecords, destinationMap) {
+    function collectNetworkThievesFromNew901(targetServerId, eventMarker, destinationMap) {
       const output = destinationMap instanceof Map ? destinationMap : new Map();
-      const previous = previousPacketRecords instanceof Set ? previousPacketRecords : new Set();
+      const marker = Math.max(1, Number(eventMarker ?? 1));
       let added = 0;
       let observed = 0;
-      let packetCount = 0;
+      let eventCount = 0;
 
-      for (const record of state.recentPackets || []) {
-        if (previous.has(record)) continue;
-        if (Number(record?.packet?.c) !== 901 || !record?.packet?.isDecoded) continue;
+      // 도둑 탐색은 일반 recentPackets / cityReward 저장소를 전혀 보지 않는다.
+      // thiefBuffer.events에는 pointType=133이 실제로 존재한 이벤트만 들어 있다.
+      const thiefBuffer = state.thiefBuffer ??= { maxEvents: 512, events: [], nextEventId: 1, stats: {} };
+      thiefBuffer.stats ??= {};
 
-        const detail = record?.packet?.decoded?.parsedDetail ?? record?.packet?.decoded?.detail ?? null;
-        if (!Array.isArray(detail?.pointList)) continue;
-        packetCount++;
+      for (const event of thiefBuffer.events || []) {
+        if (Number(event?.id ?? 0) < marker) continue;
 
-        const packetServerId = Number(detail?.k ?? targetServerId);
-        if (Number.isFinite(packetServerId) && packetServerId !== Number(targetServerId)) continue;
+        // detail.k / point.p.w 같은 게임 내부 필드는 서버 판정에 사용하지 않는다.
+        // 스캔이 이동을 요청할 때 기록한 activeTargetServerId를 이벤트에 고정해 사용한다.
+        const scanServerId = event?.scanServerId == null ? null : Number(event.scanServerId);
+        if (scanServerId != null && Number.isFinite(scanServerId) &&
+            scanServerId !== Number(targetServerId)) {
+          continue;
+        }
+        eventCount++;
 
-        for (const point of detail.pointList) {
-          if (Number(point?.pointType) !== 133) continue;
-
-          const rawServerId = Number(
-            point?.k ?? point?.p?.w ?? point?.p?.cMid ?? detail?.k ?? targetServerId
-          );
-          if (Number.isFinite(rawServerId) && rawServerId !== Number(targetServerId)) continue;
-
+        for (const point of event?.thieves || []) {
           const x = Number(point?.x);
           const y = Number(point?.y);
           if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
@@ -8285,8 +8435,12 @@ TOPWAR.clearThiefQueue()
             id,
             pointType: 133,
             pointTypeName: "보물 탐사선",
-            time: record?.time ?? nowIso(),
-            source: "network901"
+            time: event?.time ?? nowIso(),
+            source: "dedicated-thief-buffer",
+            packetServerId: event?.packetServerId ?? null,
+            scanServerId: event?.scanServerId ?? null,
+            packetSeq: event?.packetSeq ?? null,
+            networkEventId: event?.id ?? null
           };
 
           if (!output.has(objectKey)) added++;
@@ -8294,7 +8448,36 @@ TOPWAR.clearThiefQueue()
         }
       }
 
-      return { added, observed, packetCount, total: output.size, map: output };
+      const result = {
+        added,
+        observed,
+        eventCount,
+        total: output.size,
+        marker,
+        latestEventId: Number(thiefBuffer.nextEventId ?? 1) - 1,
+        bufferedEvents: thiefBuffer.events?.length ?? 0,
+        map: output
+      };
+
+      const stats = thiefBuffer.stats;
+      stats.collectCalls = Number(stats.collectCalls || 0) + 1;
+      stats.thievesCollected = Number(stats.thievesCollected || 0) + added;
+      stats.lastCollectedAt = nowIso();
+      stats.lastCollected = {
+        targetServerId: Number(targetServerId),
+        marker,
+        added,
+        observed,
+        eventCount,
+        total: output.size,
+        bufferedEvents: thiefBuffer.events?.length ?? 0
+      };
+
+      if (added > 0 || observed > 0) {
+        console.warn("[TopWar Thief Buffer] 스캔에서 133 회수:", stats.lastCollected);
+      }
+
+      return result;
     }
 
     async function scanUnifiedFinderServer(serverId, options = {}, meta = {}) {
@@ -8357,6 +8540,17 @@ TOPWAR.clearThiefQueue()
 
       // 서버가 바뀔 때 이전 서버의 도둑/플레이어/901 캐시가 섞이지 않게 초기화한다.
       TOPWAR.clearCollected({ keepWatch: true });
+      const dedicatedThiefBuffer = state.thiefBuffer ??= {
+        maxEvents: 512,
+        events: [],
+        nextEventId: 1,
+        activeTargetServerId: null,
+        stats: {}
+      };
+      dedicatedThiefBuffer.activeTargetServerId = targetServerId;
+      dedicatedThiefBuffer.stats ??= {};
+      dedicatedThiefBuffer.stats.lastScanServerId = targetServerId;
+      dedicatedThiefBuffer.stats.lastScanStartedAt = nowIso();
 
       state.watch133.current = {
         phase: "unifiedScan",
@@ -8415,9 +8609,10 @@ TOPWAR.clearThiefQueue()
           }
 
           const y = row.y;
-          // 이 좌표 이동 전에 이미 존재하던 packet record를 기록한다.
-          // 아래 도둑 수집에서는 이 Set에 없던 새 901만 검사한다.
-          const packetRecordsBeforeMove = new Set(state.recentPackets || []);
+          // 이 좌표 이동 전에 다음 901 경량 이벤트 ID를 marker로 기억한다.
+          // 아래 도둑 수집에서는 marker 이후 수신된 네트워크 901만 검사한다.
+          // raw recentPackets(16개 제한)에 의존하지 않으므로 패킷 폭주 시에도 133이 유실되지 않는다.
+          const thiefNetworkEventMarker = Number(state.thiefBuffer?.nextEventId ?? 1);
           let moveResult = null;
           try {
             moveResult = await TOPWAR.moveMapToStableUnified(x, y, {
@@ -8441,18 +8636,57 @@ TOPWAR.clearThiefQueue()
           moveIndex++;
           if (!moveResult?.ok) failCount++;
 
+          // WebSocket message 이벤트의 data가 Blob이면 handleMessage 내부에서
+          // arrayBuffer 변환/패킷 파싱이 비동기로 끝난다. 지도 이동 Promise가 먼저
+          // 완료되는 경우 즉시 버퍼를 읽으면 이번 901의 133을 놓치고, 다음 좌표의
+          // marker가 그 이벤트 뒤로 이동해 영구 누락될 수 있다.
+          // 마지막 901 이후 짧은 정착 시간을 주어 이번 이동에서 시작된 비동기
+          // 디코딩이 버퍼에 반영된 다음 수집한다.
+          await sleep(Math.max(0, Number(options.thiefCaptureSettleMs ?? 450)));
+
           // 도둑은 이번 이동 후 새로 수신한 네트워크 901에서만 수집한다.
           // moveMapToStableUnified의 worldMapCache fallback 결과는 도둑 판정에 절대 사용하지 않는다.
           const thiefCollect = collectNetworkThievesFromNew901(
             targetServerId,
-            packetRecordsBeforeMove,
+            thiefNetworkEventMarker,
             thiefMap
           );
+
+          // 통합 전 도둑찾기에서 실제로 사용하던 검증된 수집 경로를 복원한다.
+          // collectPointList가 901을 처리하면서 objectsByType[133]에 넣은 결과를
+          // 읽어 전용 이벤트 버퍼 결과와 합친다. 서버 시작 시 clearCollected를
+          // 호출했으므로 여기에는 현재 서버의 이번 스캔 관측값만 남는다.
+          let legacyAdded = 0;
+          for (const obj of (TOPWAR.getObjectsByTypeRaw?.(133) || [])) {
+            const observedServerId = Number(obj?.serverId);
+            if (Number.isFinite(observedServerId) && observedServerId !== targetServerId) continue;
+            const px = Number(obj?.x);
+            const py = Number(obj?.y);
+            if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+            const id = obj?.id ?? null;
+            const objectKey = id != null
+              ? `${targetServerId}:133:id:${id}`
+              : `${targetServerId}:133:coord:${px}:${py}`;
+            if (!thiefMap.has(objectKey)) legacyAdded++;
+            thiefMap.set(objectKey, {
+              ...obj,
+              objectKey,
+              serverId: targetServerId,
+              pointType: 133,
+              pointTypeName: "보물 탐사선",
+              x: px,
+              y: py,
+              source: obj?.source || "proven-objectsByType-133"
+            });
+          }
+          thiefCollect.legacyAdded = legacyAdded;
+          thiefCollect.added = Number(thiefCollect.added || 0) + legacyAdded;
+          thiefCollect.total = thiefMap.size;
 
           // 이 이동에서 실제 pointList를 가진 네트워크 901을 받았을 때만
           // 해당 scan cell을 "확인 완료"로 인정한다. cache fallback/실패 지점은
           // 기존 GitHub 좌표 삭제 범위에 절대 포함하지 않는다.
-          if (Number(thiefCollect?.packetCount ?? 0) > 0) {
+          if (moveResult?.source === "network901" || moveResult?.stable?.ok === true) {
             confirmedThiefScanCells.add(unifiedScanCellKey(x, y));
           }
 
@@ -8478,6 +8712,20 @@ TOPWAR.clearThiefQueue()
               // 새 도둑만 보내는 것이 아니라 "이번 회차에서 지금까지 실제로 확인된
               // 도둑 전체"를 함께 전달한다. 업로더는 confirmedScanCells에 속하는
               // 기존 GitHub 좌표 중 이 목록에 없는 행을 삭제하고 새 도둑을 upsert한다.
+              const thiefStats = (state.thiefBuffer ??= { maxEvents: 512, events: [], nextEventId: 1, stats: {} }).stats ??= {};
+              thiefStats.uploadRequests = Number(thiefStats.uploadRequests || 0) + 1;
+              thiefStats.lastUploadRequestedAt = nowIso();
+              thiefStats.lastUpload = {
+                phase: "requested",
+                mode: "live",
+                serverId: targetServerId,
+                detected: thieves.length,
+                newDetected: newThieves.length,
+                moveIndex,
+                totalMoves
+              };
+              console.warn("[TopWar Thief Upload] GitHub 업로드 호출:", thiefStats.lastUpload);
+
               const liveUpload = await TOPWAR.uploadDetectedThieves(targetServerId, thieves, {
                 cycle: meta.cycle ?? null,
                 detectedAt: nowIso(),
@@ -8504,6 +8752,17 @@ TOPWAR.clearThiefQueue()
               state.watch133.lastGithubUpload = liveUpload;
               state.watch133.lastLiveThiefUpload = liveUpload;
 
+              if (liveUpload?.ok) {
+                thiefStats.uploadSuccess = Number(thiefStats.uploadSuccess || 0) + 1;
+                thiefStats.lastUploadSuccessAt = nowIso();
+                thiefStats.lastError = null;
+              } else {
+                thiefStats.uploadFailure = Number(thiefStats.uploadFailure || 0) + 1;
+                thiefStats.lastUploadFailureAt = nowIso();
+                thiefStats.lastError = liveUpload?.error || liveUpload?.reason || "unknown";
+              }
+              thiefStats.lastUpload = { ...thiefStats.lastUpload, phase: "finished", result: liveUpload };
+
               console.log("[TopWar Unified Finder] 도둑 즉시 GitHub 업로드:", {
                 serverId: targetServerId,
                 detected: newThieves.length,
@@ -8520,6 +8779,17 @@ TOPWAR.clearThiefQueue()
               };
               state.watch133.lastGithubUpload = liveUpload;
               state.watch133.lastLiveThiefUpload = liveUpload;
+              const thiefStats = (state.thiefBuffer ??= { maxEvents: 512, events: [], nextEventId: 1, stats: {} }).stats ??= {};
+              thiefStats.uploadFailure = Number(thiefStats.uploadFailure || 0) + 1;
+              thiefStats.lastUploadFailureAt = nowIso();
+              thiefStats.lastError = liveUpload.error;
+              thiefStats.lastUpload = {
+                phase: "failed",
+                mode: "live",
+                serverId: targetServerId,
+                detected: newThieves.length,
+                result: liveUpload
+              };
               console.error("[TopWar Unified Finder] 도둑 즉시 GitHub 업로드 실패:", error);
             }
           }
@@ -8877,6 +9147,8 @@ TOPWAR.clearThiefQueue()
       const usingRemoteServerList = !explicitInputServerIds().length;
 
       const thiefUiSettings = loadThiefUiSettings();
+      const thiefBuffer = state.thiefBuffer || {};
+      const thiefDiag = thiefBuffer.stats || {};
       const tokenStatus = TOPWAR.githubTokenStatus?.() ?? { configured: false };
       const logStatus = window.TOPWAR_LOG_CONTROL?.status?.() ?? { programLogs: true, gameFontWarnings: true };
 
@@ -8891,8 +9163,14 @@ TOPWAR.clearThiefQueue()
       thiefButton.style.opacity = thiefButton.disabled ? "0.55" : "1";
       surveyButton.style.opacity = surveyButton.disabled ? "0.55" : "1";
       const anyAutomationRunning = !!(watch.running || surveyRunning || realPowerRunning || state.cityRewardFinder?.running);
-      githubTokenInput.disabled = anyAutomationRunning;
+      githubTokenInput.disabled = anyAutomationRunning || thiefUploadTestRunning;
       githubTokenInput.style.opacity = githubTokenInput.disabled ? "0.6" : "1";
+      if (thiefUploadTestButton) {
+        thiefUploadTestButton.disabled = anyAutomationRunning || thiefUploadTestRunning;
+        thiefUploadTestButton.textContent = thiefUploadTestRunning ? "도둑 업로드 테스트 중..." : "도둑 업로드 테스트";
+        thiefUploadTestButton.style.opacity = thiefUploadTestButton.disabled ? "0.55" : "1";
+        thiefUploadTestButton.style.cursor = thiefUploadTestButton.disabled ? "default" : "pointer";
+      }
       serverOrderInputs.forEach(input => {
         input.disabled = anyAutomationRunning;
         input.parentElement.style.opacity = input.disabled ? "0.55" : "1";
@@ -8929,6 +9207,11 @@ TOPWAR.clearThiefQueue()
           GitHub Token: ${tokenStatus.configured ? "설정됨" : "필요"}<br>
           보상탐색: ${watch.running ? "ON" : "OFF"} / 큐 ${queue} / 처리 ${watch.handledKeys?.size ?? 0}<br>
           진행: ${watch.current?.totalMoves ? `${watch.current?.moveIndex ?? 0}/${watch.current.totalMoves}` : "-"} / 도둑 ${watch.current?.thiefCount ?? watch.lastUnifiedResult?.thiefCount ?? 0} / 도시보상 ${watch.current?.rewardCount ?? watch.lastUnifiedResult?.rewardCount ?? 0}<br>
+          도둑 버퍼: ${thiefBuffer.events?.length ?? 0}개 / 133수신 ${thiefDiag.thievesCaptured ?? 0} / 회수 ${thiefDiag.thievesCollected ?? 0}<br>
+          도둑 업로드: 요청 ${thiefDiag.uploadRequests ?? 0} / 성공 ${thiefDiag.uploadSuccess ?? 0} / 실패 ${thiefDiag.uploadFailure ?? 0}<br>
+          GitHub 요청: GET ${thiefDiag.githubGetSuccess ?? 0}/${thiefDiag.githubGetAttempts ?? 0} / PUT ${thiefDiag.githubPutSuccess ?? 0}/${thiefDiag.githubPutAttempts ?? 0}<br>
+          도둑 GitHub: ${watch.lastGithubUpload?.ok === true ? "성공" : watch.lastGithubUpload?.ok === false ? `실패 (${watch.lastGithubUpload?.error || watch.lastGithubUpload?.reason || "unknown"})` : "-"}${thiefDiag.lastError ? ` / ${thiefDiag.lastError}` : ""}<br>
+          업로드 테스트: ${thiefUploadTestRunning ? "진행 중" : lastThiefUploadTest?.ok === true ? `성공 (${lastThiefUploadTest.repo}/${lastThiefUploadTest.path})` : lastThiefUploadTest?.ok === false ? `실패 (${lastThiefUploadTest.error || lastThiefUploadTest.reason || lastThiefUploadTest.status || "unknown"})` : "-"}<br>
           지도조사: ${surveyRunning ? "ON" : "OFF"}${surveyStopping ? " / 중지 요청" : ""} / 단계 ${current.phase ?? state.fullScan?.phase ?? "-"}<br>
           Top100조사: ${realPowerRunning ? "ON" : "OFF"} / 단계 ${realPowerProgress?.phase ?? "-"}<br>
           플레이어 ${state.playerMap?.size ?? 0} / 동맹 ${state.allianceMap?.size ?? 0}<br>
@@ -9089,8 +9372,20 @@ ${lastServerListError}`
           trackActualInOut: true,
           flushCompactHistoryAfterEachCycle: true
         })
-          .then(result => console.log("[TopWar V2.7 UI] 반복 서버조사 종료:", result))
-          .catch(error => console.error("[TopWar V2.7 UI] 반복 서버조사 실패:", error));
+          .then(result => {
+            console.log("[TopWar V2.7 UI] 반복 서버조사 종료:", result);
+            if (result?.ok === false && !result?.stopped) {
+              const firstError = result?.errors?.[0]?.result;
+              const message = firstError?.error?.message || firstError?.reason || result?.reason || "알 수 없는 오류";
+              alert(`지도조사 실패\n\n${message}`);
+            }
+            render();
+          })
+          .catch(error => {
+            console.error("[TopWar V2.7 UI] 반복 서버조사 실패:", error);
+            alert(`지도조사 오류\n\n${error?.message || String(error)}`);
+            render();
+          });
       }
 
       render();
@@ -9159,6 +9454,81 @@ ${lastServerListError}`
       event.stopPropagation();
       allianceActivityTable(300);
       render();
+    });
+
+    thiefUploadTestButton?.addEventListener("click", async event => {
+      event.stopPropagation();
+
+      const topwarApi = window.TOPWAR || TOPWAR;
+      const anyAutomationRunning = !!(
+        state.watch133?.running ||
+        state.ui?.serverSurvey?.running ||
+        state.ui?.serverSurveyBatch?.running ||
+        window.REALPOWER?.getState?.()?.running === true ||
+        state.cityRewardFinder?.running
+      );
+
+      if (anyAutomationRunning) {
+        alert("조사가 진행 중일 때는 업로드 테스트를 실행하지 않습니다. 진행 중인 조사를 먼저 중지하세요.");
+        return;
+      }
+
+      if (typeof topwarApi?.testThiefGithubWrite !== "function") {
+        alert("도둑 업로드 테스트 함수를 찾지 못했습니다. 페이지를 새로고침해 주세요.");
+        return;
+      }
+
+      thiefUploadTestRunning = true;
+      lastThiefUploadTest = null;
+      render();
+
+      try {
+        // 입력창의 토큰이 변경되어 있으면 먼저 검증/저장한다.
+        const inputToken = String(githubTokenInput?.value || "").trim();
+        const storedToken = String(topwarApi.getGithubToken?.() || "").trim();
+        if (inputToken && inputToken !== storedToken) {
+          const saved = await saveGithubTokenFromUi();
+          if (!saved) {
+            lastThiefUploadTest = { ok: false, reason: "GitHub token validation failed" };
+            return;
+          }
+        }
+
+        const result = await topwarApi.testThiefGithubWrite({ interactive: true });
+        lastThiefUploadTest = {
+          ...result,
+          testedAt: new Date().toISOString()
+        };
+
+        if (result?.ok) {
+          alert(
+            `도둑 업로드 테스트 성공\n\n` +
+            `저장소: ${result.repo}\n` +
+            `경로: ${result.path}\n` +
+            `현재 도둑: ${result.count ?? 0}개\n\n` +
+            `GitHub GET + PUT 모두 정상입니다.`
+          );
+        } else {
+          alert(
+            `도둑 업로드 테스트 실패\n\n` +
+            `저장소: ${result?.repo || "topwar-thief"}\n` +
+            `경로: ${result?.path || "data/thieves.json"}\n` +
+            `상태: ${result?.status ?? "-"}\n` +
+            `오류: ${result?.error || result?.reason || "unknown error"}`
+          );
+        }
+      } catch (error) {
+        lastThiefUploadTest = {
+          ok: false,
+          testedAt: new Date().toISOString(),
+          error: error?.message || String(error)
+        };
+        console.error("[TopWar UI] 도둑 업로드 테스트 오류:", error);
+        alert(`도둑 업로드 테스트 오류\n\n${error?.message || String(error)}`);
+      } finally {
+        thiefUploadTestRunning = false;
+        render();
+      }
     });
 
     setInterval(render, 1000);
@@ -9576,6 +9946,7 @@ ${lastServerListError}`
 
   const TOPWAR = window.TOPWAR;
   if (!TOPWAR || TOPWAR.__thiefGithubUploaderInstalled) return;
+  const state = TOPWAR.state;
 
   const GITHUB = Object.freeze({
     owner: "hiphop5782",
@@ -9681,18 +10052,28 @@ ${lastServerListError}`
   async function fetchThiefGithubSnapshot(token) {
     const encodedPath = GITHUB.path.split("/").map(encodeURIComponent).join("/");
     const url = `https://api.github.com/repos/${GITHUB.owner}/${GITHUB.repo}/contents/${encodedPath}?ref=${encodeURIComponent(GITHUB.branch)}`;
+    const stats = (state.thiefBuffer ??= { maxEvents: 512, events: [], nextEventId: 1, stats: {} }).stats ??= {};
+    stats.githubGetAttempts = Number(stats.githubGetAttempts || 0) + 1;
+    stats.lastGithubGetAt = new Date().toISOString();
 
-    const response = await fetch(url, {
-      method: "GET",
-      cache: "no-store",
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "X-GitHub-Api-Version": "2022-11-28"
-      }
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "GET",
+        cache: "no-store",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2022-11-28"
+        }
+      });
+    } catch (error) {
+      stats.lastError = `GitHub GET network: ${error?.message || String(error)}`;
+      throw error;
+    }
 
     if (response.status === 404) {
+      stats.githubGetSuccess = Number(stats.githubGetSuccess || 0) + 1;
       return {
         sha: null,
         data: { version: 1, updatedAt: null, count: 0, locations: [] }
@@ -9701,12 +10082,15 @@ ${lastServerListError}`
 
     const body = await response.json().catch(() => null);
     if (!response.ok) {
-      const error = new Error(`[GitHub GET ${response.status}] ${body?.message || response.statusText}`);
+      stats.lastError = `[GitHub GET ${response.status}] ${body?.message || response.statusText}`;
+      const error = new Error(stats.lastError);
       error.status = response.status;
       error.data = body;
       throw error;
     }
 
+    stats.githubGetSuccess = Number(stats.githubGetSuccess || 0) + 1;
+    stats.lastError = null;
     return {
       sha: body?.sha ?? null,
       data: parseThiefGithubDataFromBody(body)
@@ -9721,28 +10105,40 @@ ${lastServerListError}`
       content: encodeBase64Utf8(JSON.stringify(data, null, 2)),
       branch: GITHUB.branch
     };
+    const stats = (state.thiefBuffer ??= { maxEvents: 512, events: [], nextEventId: 1, stats: {} }).stats ??= {};
+    stats.githubPutAttempts = Number(stats.githubPutAttempts || 0) + 1;
+    stats.lastGithubPutAt = new Date().toISOString();
 
     if (sha) payload.sha = sha;
 
-    const response = await fetch(url, {
-      method: "PUT",
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        method: "PUT",
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      stats.lastError = `GitHub PUT network: ${error?.message || String(error)}`;
+      throw error;
+    }
 
     const body = await response.json().catch(() => null);
     if (!response.ok) {
-      const error = new Error(`[GitHub PUT ${response.status}] ${body?.message || response.statusText}`);
+      stats.lastError = `[GitHub PUT ${response.status}] ${body?.message || response.statusText}`;
+      const error = new Error(stats.lastError);
       error.status = response.status;
       error.data = body;
       throw error;
     }
 
+    stats.githubPutSuccess = Number(stats.githubPutSuccess || 0) + 1;
+    stats.lastError = null;
     return body;
   }
 
@@ -10038,11 +10434,119 @@ ${lastServerListError}`
     };
   }
 
+
+  function thiefDiagnostics() {
+    const buffer = state.thiefBuffer || {};
+    const stats = buffer.stats || {};
+    const result = {
+      version: TOPWAR.state?.version ?? null,
+      github: {
+        ...GITHUB,
+        tokenConfigured: !!TOPWAR.getGithubToken?.()
+      },
+      buffer: {
+        size: buffer.events?.length ?? 0,
+        maxEvents: buffer.maxEvents ?? 0,
+        nextEventId: buffer.nextEventId ?? 1,
+        lastEvents: (buffer.events || []).slice(-5).map(event => ({
+          id: event.id,
+          time: event.time,
+          packetServerId: event.packetServerId,
+          scanServerId: event.scanServerId,
+          packetSeq: event.packetSeq,
+          thiefCount: event.thiefCount,
+          thieves: event.thieves
+        }))
+      },
+      stats: { ...stats },
+      lastGithubUpload: state.watch133?.lastGithubUpload ?? null,
+      lastLiveThiefUpload: state.watch133?.lastLiveThiefUpload ?? null,
+      currentScan: state.watch133?.current ?? null
+    };
+    console.log("[TopWar Thief Diagnostics]", result);
+    return result;
+  }
+
+  async function testThiefGithubAccess(options = {}) {
+    await TOPWAR.ensureGithubToken?.({ interactive: options.interactive !== false });
+    const token = TOPWAR.getGithubToken?.() || "";
+    if (!token) return { ok: false, reason: "github token is not configured", ...GITHUB };
+
+    try {
+      const snapshot = await fetchThiefGithubSnapshot(token);
+      const result = {
+        ok: true,
+        mode: "read-test",
+        ...GITHUB,
+        sha: snapshot.sha,
+        count: snapshot.data?.locations?.length ?? 0,
+        updatedAt: snapshot.data?.updatedAt ?? null
+      };
+      console.log("[TopWar Thief GitHub] GET 테스트 성공:", result);
+      return result;
+    } catch (error) {
+      const result = {
+        ok: false,
+        mode: "read-test",
+        ...GITHUB,
+        error: error?.message || String(error),
+        status: error?.status ?? null
+      };
+      console.error("[TopWar Thief GitHub] GET 테스트 실패:", result);
+      return result;
+    }
+  }
+
+  async function testThiefGithubWrite(options = {}) {
+    await TOPWAR.ensureGithubToken?.({ interactive: options.interactive !== false });
+    const token = TOPWAR.getGithubToken?.() || "";
+    if (!token) return { ok: false, reason: "github token is not configured", ...GITHUB };
+
+    try {
+      const snapshot = await fetchThiefGithubSnapshot(token);
+      const data = {
+        ...snapshot.data,
+        version: Number(snapshot.data?.version || 1),
+        updatedAt: new Date().toISOString(),
+        count: Array.isArray(snapshot.data?.locations) ? snapshot.data.locations.length : 0,
+        locations: Array.isArray(snapshot.data?.locations) ? snapshot.data.locations : []
+      };
+      const upload = await putThiefGithubSnapshot(
+        token,
+        data,
+        snapshot.sha,
+        `Verify thief uploader ${new Date().toISOString()}`
+      );
+      const result = {
+        ok: true,
+        mode: "write-test",
+        ...GITHUB,
+        count: data.locations.length,
+        htmlUrl: upload?.content?.html_url ?? null
+      };
+      console.log("[TopWar Thief GitHub] PUT 테스트 성공:", result);
+      return result;
+    } catch (error) {
+      const result = {
+        ok: false,
+        mode: "write-test",
+        ...GITHUB,
+        error: error?.message || String(error),
+        status: error?.status ?? null
+      };
+      console.error("[TopWar Thief GitHub] PUT 테스트 실패:", result);
+      return result;
+    }
+  }
+
   Object.assign(TOPWAR, {
     __thiefGithubUploaderInstalled: true,
     buildCompletedThiefServerResult,
     uploadDetectedThieves,
     uploadCompletedThiefServer,
+    thiefDiagnostics,
+    testThiefGithubAccess,
+    testThiefGithubWrite,
     thiefTtlMs: THIEF_TTL_MS,
     thiefGithubSettings: () => ({
       ...GITHUB,
@@ -15873,10 +16377,15 @@ function orderRealPowerServers(servers, options = {}) {
 
 function initializeAllServerQueue(options = {}) {
   const mode = getRealPowerServerOrderMode(options);
-  const servers = orderRealPowerServers(getAllServers2(), { ...options, serverOrderMode: mode });
+  const requestedIds = Array.isArray(options.serverIds)
+    ? options.serverIds.map(Number).filter(Number.isFinite)
+    : [];
+  const servers = requestedIds.length
+    ? orderRealPowerServers(createQueueFromServerIds(requestedIds), { ...options, serverOrderMode: mode })
+    : orderRealPowerServers(getAllServers2(), { ...options, serverOrderMode: mode });
   const queue = saveServerQueue(servers, {
     status: "ready",
-    source: `WorldServerListPanel.m_data:${mode}`,
+    source: requestedIds.length ? `remote-or-explicit-server-ids:${mode}` : `WorldServerListPanel.m_data:${mode}`,
     allServers: true,
     serverOrderMode: mode,
     total: servers.length,
@@ -21395,15 +21904,17 @@ if (options.allServers === true) {
     );
   }
 
-  // 전체 서버 조사에서는 WorldServerListPanel.m_data를 기준으로 선택 순서를 적용한다.
-  const servers = orderRealPowerServers(getAllServers2(), {
+  const requestedIds = Array.isArray(options.serverIds)
+    ? options.serverIds.map(Number).filter(Number.isFinite)
+    : [];
+  const servers = orderRealPowerServers(requestedIds.length ? createQueueFromServerIds(requestedIds) : getAllServers2(), {
     ...options,
     serverOrderMode: requestedOrderMode
   });
 
   saveServerQueue(servers, {
     status: "ready",
-    source: `WorldServerListPanel.m_data:${requestedOrderMode}`,
+    source: requestedIds.length ? `remote-or-explicit-server-ids:${requestedOrderMode}` : `WorldServerListPanel.m_data:${requestedOrderMode}`,
     allServers: true,
     serverOrderMode: requestedOrderMode,
     total: servers.length,
@@ -22580,12 +23091,13 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     const normalized = ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
 
     // Top100 인기순 정렬도 동일한 servers-popular.json 캐시를 사용한다.
+    let serverIds = [];
     if (normalized === "popular") {
-      try { await tw?.resolveAutomationServerIds?.(); }
+      try { serverIds = await tw?.resolveAutomationServerIds?.() || []; }
       catch (error) { console.warn("[REALPOWER Unified UI] popular 목록 준비 실패:", error); }
     }
 
-    return normalized;
+    return { mode: normalized, serverIds };
   }
 
   async function startOrStop() {
@@ -22609,12 +23121,16 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     if (!await ensureSharedToken()) return;
 
-    const serverOrderMode = await resolveSharedServerOrderMode();
+    const { mode: serverOrderMode, serverIds } = await resolveSharedServerOrderMode();
+    if (serverOrderMode === "popular" && !serverIds.length) {
+      alert("인기순 서버목록을 읽지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
+      return;
+    }
 
     // Top100은 맵 901 데이터가 필요 없으므로 이전 지도조사의 대형 런타임 캐시를 먼저 해제한다.
     try { topwar()?.clearCollected?.({ keepWatch: true }); } catch {}
 
-    api.startAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
+    api.startAllServersInfiniteLoop?.({ serverOrderMode, serverIds }).catch(error => {
       if (!api.isStopError?.(error)) {
         console.error("[REALPOWER Unified UI] 조사 실패:", error);
         alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
@@ -22634,10 +23150,14 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     if (!await ensureSharedToken()) return;
     if (!confirm("전투력 조사 진행상태와 임시 저장 데이터를 지우고 처음부터 시작할까요?\nGitHub 토큰은 유지됩니다.")) return;
 
-    const serverOrderMode = await resolveSharedServerOrderMode();
+    const { mode: serverOrderMode, serverIds } = await resolveSharedServerOrderMode();
+    if (serverOrderMode === "popular" && !serverIds.length) {
+      alert("인기순 서버목록을 읽지 못했습니다. 네트워크 상태를 확인한 뒤 다시 시도하세요.");
+      return;
+    }
     try { topwar()?.clearCollected?.({ keepWatch: true }); } catch {}
 
-    api.resetAndStartAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
+    api.resetAndStartAllServersInfiniteLoop?.({ serverOrderMode, serverIds }).catch(error => {
       if (!api.isStopError?.(error)) {
         console.error("[REALPOWER Unified UI] 초기화 후 시작 실패:", error);
         alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
