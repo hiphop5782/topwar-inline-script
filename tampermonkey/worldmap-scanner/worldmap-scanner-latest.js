@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.12.11 - Upload Isolation
+// @name         TopWar Unified Automation V2.13.1 - DataHub Upload Units
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.12.11
-// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with shared GitHub token
+// @version      2.13.1
+// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -10,6 +10,251 @@
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
+
+/* ============================================================================
+ * TopWar DataHub client
+ * - All scanners upload to the central Spring Boot server.
+ * - Failed requests are retained in IndexedDB and retried before later uploads.
+ * ========================================================================== */
+(function installTopWarDataHubClient() {
+  "use strict";
+
+  if (window.TOPWAR_DATAHUB?.version) return;
+
+  const SETTINGS_KEY = "TOPWAR_DATAHUB_SETTINGS_V1";
+  const DB_NAME = "topwar-datahub-upload-queue";
+  const DB_VERSION = 1;
+  const STORE_NAME = "requests";
+  const DEFAULT_BASE_URL = "https://datahub.progamer.info";
+  const ENDPOINTS = Object.freeze({
+    cityRewards: "/api/v1/city-rewards/server",
+    thieves: "/api/v1/thieves/detected",
+    map: "/api/v1/map/server",
+    top100: "/api/v1/top100/server"
+  });
+  let requestChain = Promise.resolve();
+
+  function readSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+      return {
+        baseUrl: String(saved.baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, ""),
+        scannerId: String(saved.scannerId || "").trim(),
+        key: String(saved.key || "").trim()
+      };
+    } catch {
+      return { baseUrl: DEFAULT_BASE_URL, scannerId: "", key: "" };
+    }
+  }
+
+  function configure(next = {}) {
+    const current = readSettings();
+    const settings = {
+      baseUrl: String(next.baseUrl ?? current.baseUrl ?? DEFAULT_BASE_URL).trim().replace(/\/+$/, ""),
+      scannerId: String(next.scannerId ?? current.scannerId ?? "").trim(),
+      key: String(next.key ?? current.key ?? "").trim()
+    };
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    return status();
+  }
+
+  function promptConfigure() {
+    const current = readSettings();
+    const baseUrl = prompt("DataHub 주소", current.baseUrl || DEFAULT_BASE_URL);
+    if (baseUrl == null) return false;
+    const scannerId = prompt("조사기 ID (서버의 scanner-keys 이름)", current.scannerId || "city-01");
+    if (scannerId == null) return false;
+    const key = prompt("조사기 API 키", current.key || "");
+    if (key == null) return false;
+    configure({ baseUrl, scannerId, key });
+    return true;
+  }
+
+  function requireSettings(interactive = true) {
+    let settings = readSettings();
+    if ((!settings.scannerId || !settings.key) && interactive) {
+      promptConfigure();
+      settings = readSettings();
+    }
+    if (!settings.baseUrl) throw new Error("DataHub 주소가 없습니다.");
+    if (!settings.scannerId) throw new Error("DataHub 조사기 ID가 없습니다.");
+    if (!settings.key) throw new Error("DataHub 조사기 API 키가 없습니다.");
+    return settings;
+  }
+
+  function requestId() {
+    return crypto.randomUUID?.() || `tw-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function openQueueDb() {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(STORE_NAME)) {
+          db.createObjectStore(STORE_NAME, { keyPath: "requestId" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("DataHub queue DB open failed"));
+    });
+  }
+
+  async function queuePut(row) {
+    const db = await openQueueDb();
+    try {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        tx.objectStore(STORE_NAME).put(row);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function queueDelete(id) {
+    const db = await openQueueDb();
+    try {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        tx.objectStore(STORE_NAME).delete(id);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function queueList() {
+    const db = await openQueueDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const request = tx.objectStore(STORE_NAME).getAll();
+        request.onsuccess = () => resolve(request.result || []);
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  async function sendRow(row, settings = requireSettings(false)) {
+    const response = await fetch(`${settings.baseUrl}${row.endpoint}`, {
+      method: "POST",
+      mode: "cors",
+      cache: "no-store",
+      credentials: "omit",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${settings.key}`,
+        "X-Scanner-Id": settings.scannerId,
+        "X-Request-Id": row.requestId
+      },
+      body: JSON.stringify(row.payload)
+    });
+    const text = await response.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+    if (!response.ok) {
+      const error = new Error(`DataHub HTTP ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+      error.status = response.status;
+      throw error;
+    }
+    return body;
+  }
+
+  async function flushQueuedInternal(limit = 50) {
+    const settings = requireSettings(false);
+    const rows = (await queueList())
+      .sort((a, b) => Number(a.createdAtMs || 0) - Number(b.createdAtMs || 0))
+      .slice(0, Math.max(1, Number(limit) || 50));
+    let sent = 0;
+    for (const row of rows) {
+      try {
+        await sendRow(row, settings);
+        await queueDelete(row.requestId);
+        sent++;
+      } catch (error) {
+        if (Number(error?.status) === 400 || Number(error?.status) === 401 || Number(error?.status) === 403) throw error;
+        break;
+      }
+    }
+    return { ok: true, queued: rows.length, sent };
+  }
+
+  function flushQueued(limit = 50) {
+    const next = requestChain.catch(() => null).then(() => flushQueuedInternal(limit));
+    requestChain = next;
+    return next;
+  }
+
+  function upload(type, payload, options = {}) {
+    const endpoint = ENDPOINTS[type];
+    if (!endpoint) return Promise.reject(new Error(`Unknown DataHub dataset: ${type}`));
+    const next = requestChain.catch(() => null).then(async () => {
+      const settings = requireSettings(options.interactive !== false);
+      if (options.flushFirst !== false) {
+        try { await flushQueuedInternal(options.flushLimit ?? 20); }
+        catch (error) { console.warn("[TopWar DataHub] pending flush failed:", error); }
+      }
+      const row = {
+        requestId: options.requestId || requestId(),
+        endpoint,
+        type,
+        payload,
+        createdAt: new Date().toISOString(),
+        createdAtMs: Date.now()
+      };
+      try {
+        const response = await sendRow(row, settings);
+        return { ok: true, type, requestId: row.requestId, response };
+      } catch (error) {
+        if (![400, 401, 403].includes(Number(error?.status))) {
+          await queuePut({ ...row, error: error?.message || String(error) });
+          return { ok: false, queued: true, type, requestId: row.requestId, error: error?.message || String(error) };
+        }
+        throw error;
+      }
+    });
+    requestChain = next;
+    return next;
+  }
+
+  async function status() {
+    const settings = readSettings();
+    let queued = null;
+    try { queued = (await queueList()).length; } catch {}
+    return {
+      version: "1.0.0",
+      baseUrl: settings.baseUrl,
+      scannerId: settings.scannerId,
+      configured: !!(settings.scannerId && settings.key),
+      queued
+    };
+  }
+
+  window.TOPWAR_DATAHUB = {
+    version: "1.0.0",
+    endpoints: ENDPOINTS,
+    configure,
+    promptConfigure,
+    readSettings,
+    status,
+    flushQueued,
+    upload,
+    uploadCityRewards: payload => upload("cityRewards", payload),
+    uploadThieves: payload => upload("thieves", payload),
+    uploadMap: payload => upload("map", payload),
+    uploadTop100: payload => upload("top100", payload)
+  };
+})();
 
 // Enriched player data patch: V1.5 - legacy fields preserved, raw 901/playerInfo retained.
 
@@ -204,7 +449,7 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.12.11-upload-isolation";
+  const VERSION = "2.13.1-datahub-upload-units";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
@@ -457,103 +702,12 @@
   }
 
   async function ensureGithubToken(options = {}) {
-    if (githubTokenEnsurePromise) return githubTokenEnsurePromise;
-
-    githubTokenEnsurePromise = (async () => {
-      const interactive = options.interactive !== false;
-      let token = getGithubToken();
-
-      // 이미 이 페이지에서 정상 검증된 토큰은 다시 GitHub API로 검증하지 않는다.
-      if (
-        token &&
-        options.forcePrompt !== true &&
-        githubTokenValidationState.checked === true &&
-        githubTokenValidationState.valid === true
-      ) {
-        return token;
-      }
-
-      if (token && options.forcePrompt !== true) {
-        const validation = await validateGithubToken(token);
-
-        if (validation.ok) {
-          githubTokenValidationState = {
-            checked: true,
-            valid: true,
-            login: validation.login ?? null,
-            checkedAt: new Date().toISOString(),
-            error: null
-          };
-          return token;
-        }
-
-        // GitHub가 명확하게 인증 실패(401)를 반환한 경우에만 저장 토큰이 틀렸다고 판단한다.
-        // 네트워크/CORS/일시 장애/403 rate-limit 등에서는 기존 토큰을 삭제하거나 다시 묻지 않는다.
-        const definitelyInvalid = Number(validation.status) === 401;
-        githubTokenValidationState = {
-          checked: true,
-          valid: definitelyInvalid ? false : null,
-          login: null,
-          checkedAt: new Date().toISOString(),
-          error: validation.reason ?? null
-        };
-
-        if (!definitelyInvalid) {
-          console.warn("[TopWar GitHub] token 검증을 완료하지 못했지만 저장 토큰을 유지합니다.", {
-            status: validation.status,
-            reason: validation.reason
-          });
-          return token;
-        }
-
-        console.warn("[TopWar GitHub] 저장된 token이 유효하지 않습니다. 새 token 입력이 필요합니다.", {
-          status: validation.status,
-          reason: validation.reason
-        });
-        writeRawGithubToken("");
-        token = "";
-      }
-
-      if (!interactive) return token || "";
-
-      while (!token) {
-        const entered = prompt(
-          "GitHub Personal Access Token을 입력하세요.\n" +
-          "저장된 토큰이 없거나 GitHub에서 401 인증 실패가 확인된 경우에만 표시됩니다."
-        );
-        if (entered == null) return "";
-
-        const candidate = String(entered).trim();
-        if (!candidate) continue;
-
-        const validation = await validateGithubToken(candidate);
-        if (validation.ok) {
-          writeRawGithubToken(candidate);
-          githubTokenValidationState = {
-            checked: true,
-            valid: true,
-            login: validation.login ?? null,
-            checkedAt: new Date().toISOString(),
-            error: null
-          };
-          console.log("[TopWar GitHub] token 검증 및 저장 완료", {
-            login: validation.login ?? null
-          });
-          return candidate;
-        }
-
-        // 새로 입력한 값은 검증 성공 전에는 저장하지 않는다.
-        alert(`GitHub token 검증 실패 (${validation.status}): ${validation.reason || "unknown error"}`);
-      }
-
-      return token;
-    })();
-
-    try {
-      return await githubTokenEnsurePromise;
-    } finally {
-      githubTokenEnsurePromise = null;
+    let settings = window.TOPWAR_DATAHUB?.readSettings?.() || {};
+    if ((!settings.scannerId || !settings.key) && options.interactive !== false) {
+      window.TOPWAR_DATAHUB?.promptConfigure?.();
+      settings = window.TOPWAR_DATAHUB?.readSettings?.() || {};
     }
+    return String(settings.key || "");
   }
 
   function githubTokenStatus() {
@@ -3852,12 +4006,7 @@ TOPWAR.clearThiefQueue()
     "https://cdn.jsdelivr.net/gh/hiphop5782/topwar-webutil-vite@main/src/assets/json/servers/servers-popular.json",
     "https://cdn.jsdelivr.net/gh/hiphop5782/topwar-webutil-vite@master/src/assets/json/servers/servers-popular.json",
     "https://raw.githubusercontent.com/hiphop5782/topwar-webutil-vite/main/src/assets/json/servers/servers-popular.json",
-    "https://raw.githubusercontent.com/hiphop5782/topwar-webutil-vite/master/src/assets/json/servers/servers-popular.json",
-    "https://github.com/hiphop5782/topwar-webutil-vite/raw/main/src/assets/json/servers/servers-popular.json",
-    "https://github.com/hiphop5782/topwar-webutil-vite/raw/master/src/assets/json/servers/servers-popular.json",
-    "https://api.github.com/repos/hiphop5782/topwar-webutil-vite/contents/src/assets/json/servers/servers-popular.json",
-    "https://api.github.com/repos/hiphop5782/topwar-webutil-vite/contents/src/assets/json/servers/servers-popular.json?ref=main",
-    "https://api.github.com/repos/hiphop5782/topwar-webutil-vite/contents/src/assets/json/servers/servers-popular.json?ref=master"
+    "https://raw.githubusercontent.com/hiphop5782/topwar-webutil-vite/master/src/assets/json/servers/servers-popular.json"
   ];
   const REMOTE_SERVER_LIST_CACHE_KEY = "TOPWAR_REMOTE_POPULAR_SERVER_LIST_CACHE_V1";
 
@@ -7463,29 +7612,14 @@ TOPWAR.clearThiefQueue()
           surveyOptions.githubUpload !== false
         ) {
           try {
-            const githubSettings = JSON.parse(
-              localStorage.getItem("TOPWAR_GITHUB_JSON_UPLOAD_SETTINGS") || "{}"
-            );
-
-            if (githubSettings.enabled) {
-              result.data.githubUpload = await TOPWAR.uploadSurveyResultToGithub(result.data, {
-                ...githubSettings,
-                // UI/서버조사 옵션을 GitHub 저장 레이어까지 명시적으로 전달합니다.
-                trackActualInOut: surveyOptions.trackActualInOut ?? true,
-                uploadUserMovementHistory: surveyOptions.uploadUserMovementHistory ?? true,
-                uploadUserLatestIndex: surveyOptions.uploadUserLatestIndex ?? true,
-                ...(surveyOptions.github || {})
-              });
-
-              result.githubUpload = result.data.githubUpload;
-
-              console.log("[TopWar V2.6] GitHub 업로드 완료:", {
-                serverId,
-                githubUpload: result.githubUpload
-              });
-            } else {
-              console.log("[TopWar V2.6] GitHub 업로드 비활성화 상태");
-            }
+            result.data.githubUpload = await TOPWAR.uploadSurveyResultToGithub(result.data, {
+              trackActualInOut: surveyOptions.trackActualInOut ?? true,
+              uploadUserMovementHistory: surveyOptions.uploadUserMovementHistory ?? true,
+              uploadUserLatestIndex: surveyOptions.uploadUserLatestIndex ?? true,
+              ...(surveyOptions.github || {})
+            });
+            result.githubUpload = result.data.githubUpload;
+            console.log("[TopWar DataHub] 지도 서버 업로드 완료:", { serverId, upload: result.githubUpload });
           } catch (error) {
             result.githubUpload = {
               ok: false,
@@ -8001,8 +8135,13 @@ TOPWAR.clearThiefQueue()
         <details id="tw26-advanced" style="margin-top:7px;">
           <summary style="cursor:pointer;color:#999;font-size:11px;padding:4px 2px;outline:none;">고급 설정</summary>
           <div style="margin-top:5px;padding-top:7px;border-top:1px solid rgba(255,255,255,0.08);">
-            <label style="display:block;font-size:11px;color:#999;margin-bottom:4px;">GitHub Token</label>
-            <input id="tw26-github-token" type="password" autocomplete="off" spellcheck="false" placeholder="필요할 때만 입력" style="
+            <label style="display:block;font-size:11px;color:#999;margin-bottom:4px;">DataHub 조사기 ID</label>
+            <input id="tw26-datahub-scanner-id" type="text" autocomplete="off" spellcheck="false" placeholder="예: city-01" style="
+              width:100%;height:31px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.15);
+              border-radius:6px;padding:0 8px;background:rgba(0,0,0,0.3);color:#fff;font-size:11px;outline:none;
+            " />
+            <label style="display:block;font-size:11px;color:#999;margin:7px 0 4px;">DataHub API 키</label>
+            <input id="tw26-github-token" type="password" autocomplete="off" spellcheck="false" placeholder="scanner-keys에 설정한 값" style="
               width:100%;height:31px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.15);
               border-radius:6px;padding:0 8px;background:rgba(0,0,0,0.3);color:#fff;font-size:11px;outline:none;
             " />
@@ -8016,7 +8155,7 @@ TOPWAR.clearThiefQueue()
               <button id="tw26-game-font-logs" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">폰트 경고</button>
               <button id="tw26-activity" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">활동표</button>
               <button id="tw26-alliance" style="height:29px;border:0;border-radius:6px;background:#333;color:#ccc;font-size:11px;cursor:pointer;">동맹표</button>
-              <button id="tw26-thief-upload-test" title="topwar-thief/data/thieves.json에 실제 GET/PUT을 수행해 업로드 권한과 경로를 확인합니다" style="grid-column:1 / -1;height:31px;border:1px solid rgba(255,255,255,0.12);border-radius:6px;background:#4a3f2b;color:#f2ddad;font-size:11px;font-weight:700;cursor:pointer;">도둑 업로드 테스트</button>
+              <button id="tw26-thief-upload-test" title="DataHub 설정을 저장하고 대기 중 요청을 다시 전송합니다" style="grid-column:1 / -1;height:31px;border:1px solid rgba(255,255,255,0.12);border-radius:6px;background:#4a3f2b;color:#f2ddad;font-size:11px;font-weight:700;cursor:pointer;">DataHub 설정 저장 / 재전송</button>
             </div>
 
             <div id="tw26-detail-status" style="
@@ -8093,6 +8232,7 @@ TOPWAR.clearThiefQueue()
     const fold = panel.querySelector("#tw26-fold");
     const serverInput = panel.querySelector("#tw26-server");
     const serverOrderInputs = [...panel.querySelectorAll('input[name="tw26-server-order"]')];
+    const dataHubScannerIdInput = panel.querySelector("#tw26-datahub-scanner-id");
     const githubTokenInput = panel.querySelector("#tw26-github-token");
     const thiefButton = panel.querySelector("#tw26-thief");
     const surveyButton = panel.querySelector("#tw26-survey");
@@ -8109,7 +8249,9 @@ TOPWAR.clearThiefQueue()
     const thiefUploadTestButton = panel.querySelector("#tw26-thief-upload-test");
 
     const initialThiefUiSettings = loadThiefUiSettings();
-    githubTokenInput.value = TOPWAR.getGithubToken?.() || "";
+    const initialDataHubSettings = window.TOPWAR_DATAHUB?.readSettings?.() || {};
+    dataHubScannerIdInput.value = initialDataHubSettings.scannerId || "";
+    githubTokenInput.value = initialDataHubSettings.key || "";
 
     let folded = false;
     let serverListLoading = false;
@@ -8744,7 +8886,7 @@ TOPWAR.clearThiefQueue()
               };
               console.warn("[TopWar Thief Upload] GitHub 업로드 호출:", thiefStats.lastUpload);
 
-              const liveUpload = await TOPWAR.uploadDetectedThieves(targetServerId, thieves, {
+              const liveUpload = await TOPWAR.uploadDetectedThieves(targetServerId, newThieves, {
                 cycle: meta.cycle ?? null,
                 detectedAt: nowIso(),
                 newDetectedCount: newThieves.length,
@@ -9246,30 +9388,24 @@ TOPWAR.clearThiefQueue()
     });
 
     async function saveGithubTokenFromUi() {
+      const scannerId = String(dataHubScannerIdInput.value || "").trim();
       const candidate = String(githubTokenInput.value || "").trim();
-      if (!candidate) {
-        TOPWAR.setGithubToken?.("");
-        render();
-        return false;
-      }
-
-      githubTokenInput.disabled = true;
-      try {
-        const result = await TOPWAR.validateAndSaveGithubToken?.(candidate);
-        if (!result?.ok) {
-          githubTokenInput.value = "";
-          alert(`GitHub token 검증 실패 (${result?.status ?? "?"}): ${result?.reason || "unknown error"}`);
-          return false;
-        }
-        return true;
-      } finally {
-        githubTokenInput.disabled = false;
-        render();
-      }
+      if (!scannerId || !candidate) return false;
+      window.TOPWAR_DATAHUB?.configure?.({
+        baseUrl: "https://datahub.progamer.info",
+        scannerId,
+        key: candidate
+      });
+      render();
+      return true;
     }
 
     // 실제 값이 변경된 경우에만 검증한다. 단순 focus/blur로는 재검증하지 않는다.
     githubTokenInput.addEventListener("change", event => {
+      event.stopPropagation();
+      void saveGithubTokenFromUi();
+    });
+    dataHubScannerIdInput.addEventListener("change", event => {
       event.stopPropagation();
       void saveGithubTokenFromUi();
     });
@@ -9386,6 +9522,7 @@ ${lastServerListError}`
           repeatUntilStopped: true,
           popularFirst: false,
           resortByPopularityEachCycle: false,
+          softResetAfterServer: false,
           // UI 자동실행은 실제 UID 서버이동 결과를 매 사이클마다 GitHub로 flush한다.
           trackActualInOut: true,
           flushCompactHistoryAfterEachCycle: true
@@ -9501,48 +9638,24 @@ ${lastServerListError}`
       render();
 
       try {
-        // 입력창의 토큰이 변경되어 있으면 먼저 검증/저장한다.
-        const inputToken = String(githubTokenInput?.value || "").trim();
-        const storedToken = String(topwarApi.getGithubToken?.() || "").trim();
-        if (inputToken && inputToken !== storedToken) {
-          const saved = await saveGithubTokenFromUi();
-          if (!saved) {
-            lastThiefUploadTest = { ok: false, reason: "GitHub token validation failed" };
-            return;
-          }
-        }
-
-        const result = await topwarApi.testThiefGithubWrite({ interactive: true });
+        const saved = await saveGithubTokenFromUi();
+        if (!saved) throw new Error("조사기 ID와 API 키를 모두 입력하세요.");
+        const result = await window.TOPWAR_DATAHUB.flushQueued(100);
         lastThiefUploadTest = {
+          ok: true,
           ...result,
           testedAt: new Date().toISOString()
         };
-
-        if (result?.ok) {
-          alert(
-            `도둑 업로드 테스트 성공\n\n` +
-            `저장소: ${result.repo}\n` +
-            `경로: ${result.path}\n` +
-            `현재 도둑: ${result.count ?? 0}개\n\n` +
-            `GitHub GET + PUT 모두 정상입니다.`
-          );
-        } else {
-          alert(
-            `도둑 업로드 테스트 실패\n\n` +
-            `저장소: ${result?.repo || "topwar-thief"}\n` +
-            `경로: ${result?.path || "data/thieves.json"}\n` +
-            `상태: ${result?.status ?? "-"}\n` +
-            `오류: ${result?.error || result?.reason || "unknown error"}`
-          );
-        }
+        const settings = window.TOPWAR_DATAHUB.readSettings();
+        alert(`DataHub 설정 저장 완료\n\n주소: ${settings.baseUrl}\n조사기: ${settings.scannerId}\n재전송: ${result.sent ?? 0}건`);
       } catch (error) {
         lastThiefUploadTest = {
           ok: false,
           testedAt: new Date().toISOString(),
           error: error?.message || String(error)
         };
-        console.error("[TopWar UI] 도둑 업로드 테스트 오류:", error);
-        alert(`도둑 업로드 테스트 오류\n\n${error?.message || String(error)}`);
+        console.error("[TopWar UI] DataHub 설정/재전송 오류:", error);
+        alert(`DataHub 설정/재전송 오류\n\n${error?.message || String(error)}`);
       } finally {
         thiefUploadTestRunning = false;
         render();
@@ -9731,7 +9844,10 @@ ${lastServerListError}`
     const data = await res.json().catch(() => null);
 
     if (!res.ok) {
-      throw new Error(`[GitHub API ${res.status}] ${data?.message || res.statusText}`);
+      const error = new Error(`[GitHub API ${res.status}] ${data?.message || res.statusText}`);
+      error.status = res.status;
+      error.data = data;
+      throw error;
     }
 
     return data;
@@ -9744,7 +9860,8 @@ ${lastServerListError}`
     branch = "main",
     path,
     content,
-    message
+    message,
+    knownSha = null
   }) {
     if (!token) throw new Error("GitHub token이 없습니다.");
     if (!owner) throw new Error("GitHub owner가 없습니다.");
@@ -9754,19 +9871,21 @@ ${lastServerListError}`
     const encodedPath = encodeGithubPath(path);
     const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}`;
 
-    let sha = null;
+    let sha = knownSha || null;
 
-    try {
-      const current = await githubRequest({
-        method: "GET",
-        url: `${apiUrl}?ref=${encodeURIComponent(branch)}`,
-        token
-      });
+    if (!sha) {
+      try {
+        const current = await githubRequest({
+          method: "GET",
+          url: `${apiUrl}?ref=${encodeURIComponent(branch)}`,
+          token
+        });
 
-      sha = current.sha;
-    } catch (e) {
-      if (!String(e.message).includes("404")) {
-        throw e;
+        sha = current.sha;
+      } catch (e) {
+        if (!String(e.message).includes("404")) {
+          throw e;
+        }
       }
     }
 
@@ -9780,12 +9899,19 @@ ${lastServerListError}`
       body.sha = sha;
     }
 
-    return await githubRequest({
-      method: "PUT",
-      url: apiUrl,
-      token,
-      body
-    });
+    try {
+      return await githubRequest({ method: "PUT", url: apiUrl, token, body });
+    } catch (error) {
+      // 외부 갱신으로 SHA가 충돌한 경우에만 최신 SHA를 한 번 다시 읽는다.
+      if (Number(error?.status) !== 409 || !sha) throw error;
+      const current = await githubRequest({
+        method: "GET",
+        url: `${apiUrl}?ref=${encodeURIComponent(branch)}`,
+        token
+      });
+      body.sha = current?.sha;
+      return await githubRequest({ method: "PUT", url: apiUrl, token, body });
+    }
   }
 
   async function uploadSurveyResultToGithub(data, options = {}) {
@@ -10335,12 +10461,6 @@ ${lastServerListError}`
   }
 
   async function uploadDetectedThievesNow(targetServerId, objects, meta = {}) {
-    await TOPWAR.ensureGithubToken?.({ interactive: true });
-    const token = TOPWAR.getGithubToken?.() || "";
-    if (!token) {
-      return { ok: false, skipped: true, reason: "github token is not configured" };
-    }
-
     const serverId = Number(targetServerId);
     if (!Number.isFinite(serverId) || serverId <= 0) {
       return { ok: false, skipped: true, reason: "invalid serverId" };
@@ -10355,31 +10475,26 @@ ${lastServerListError}`
       return { ok: true, skipped: true, serverId, detected: 0, reason: "no new thieves" };
     }
 
-    const commit = await commitThiefGithubMutation(
-      token,
-      existing => mergeDetectedThieves(existing, serverId, detected, meta.scanProgress ?? null),
-      `Sync thief progress for server ${serverId} (${Number(meta?.scanProgress?.moveIndex ?? 0)}/${Number(meta?.scanProgress?.totalMoves ?? 0)})`,
-      { maxAttempts: meta.githubConflictMaxAttempts ?? 5 }
-    );
-    const merged = commit.merged;
-    const upload = commit.upload;
+    const upload = await window.TOPWAR_DATAHUB.uploadThieves({
+      version: 1,
+      serverId,
+      detectedAt: observedAt,
+      count: detected.length,
+      locations: detected,
+      scanProgress: meta.scanProgress ?? null
+    });
 
     return {
-      ok: true,
-      mode: "live-progress-sync",
+      ...upload,
+      mode: "datahub-live-detection",
       serverId,
       detected: detected.length,
       newDetected: Number(meta?.newDetectedCount ?? 0),
-      removedConfirmedMissing: Number(merged.removedConfirmedMissing ?? 0),
       confirmedCells: Array.isArray(meta?.scanProgress?.confirmedScanCells)
         ? meta.scanProgress.confirmedScanCells.length
         : 0,
       moveIndex: Number(meta?.scanProgress?.moveIndex ?? 0),
-      totalMoves: Number(meta?.scanProgress?.totalMoves ?? 0),
-      totalCount: merged.count,
-      githubAttempt: commit.attempt,
-      path: GITHUB.path,
-      htmlUrl: upload?.content?.html_url ?? null
+      totalMoves: Number(meta?.scanProgress?.totalMoves ?? 0)
     };
   }
 
@@ -10394,14 +10509,8 @@ ${lastServerListError}`
   }
 
   async function uploadCompletedServerNow(serverResult) {
-    await TOPWAR.ensureGithubToken?.({ interactive: true });
     if (!serverResult?.completed || !serverResult?.ok) {
       return { ok: false, skipped: true, reason: "server scan not completed" };
-    }
-
-    const token = TOPWAR.getGithubToken?.() || "";
-    if (!token) {
-      return { ok: false, skipped: true, reason: "github token is not configured" };
     }
 
     const serverId = Number(serverResult?.serverId);
@@ -10409,23 +10518,18 @@ ${lastServerListError}`
       return { ok: false, skipped: true, reason: "invalid serverId" };
     }
 
-    const commit = await commitThiefGithubMutation(
-      token,
-      existing => mergeCompletedServer(existing, serverResult),
-      `Update thief locations for server ${serverId}`,
-      { maxAttempts: serverResult.githubConflictMaxAttempts ?? 5 }
-    );
-    const merged = commit.merged;
-    const upload = commit.upload;
+    const upload = await window.TOPWAR_DATAHUB.uploadThieves({
+      version: 1,
+      serverId,
+      scannedAt: serverResult.scannedAt || new Date().toISOString(),
+      count: Array.isArray(serverResult.locations) ? serverResult.locations.length : 0,
+      locations: Array.isArray(serverResult.locations) ? serverResult.locations : []
+    });
 
     return {
-      ok: true,
+      ...upload,
       serverId,
-      found: serverResult.locations?.length ?? 0,
-      totalCount: merged.count,
-      githubAttempt: commit.attempt,
-      path: GITHUB.path,
-      htmlUrl: upload?.content?.html_url ?? null
+      found: serverResult.locations?.length ?? 0
     };
   }
 
@@ -11535,9 +11639,13 @@ ${lastServerListError}`
 
         state.ui.serverSurveyBatch.running = true;
         state.fullScan.running = true;
-        state.fullScan.phase = "softReset";
+        state.fullScan.phase = normalizedOptions.softResetAfterServer === true
+          ? "softReset"
+          : "betweenServers";
         state.ui.serverSurveyBatch.current = {
-          phase: "softReset",
+          phase: normalizedOptions.softResetAfterServer === true
+            ? "softReset"
+            : "betweenServers",
           mode: session.mode,
           cycle,
           index: index + 1,
@@ -11546,7 +11654,10 @@ ${lastServerListError}`
           serverIds
         };
 
-        if (normalizedOptions.softResetAfterServer !== false) {
+        // 기지 내부 왕복은 서버 변경에 필요하지 않고 화면 전환 실패의 원인이었다.
+        // 기본 조사에서는 월드맵 상태를 유지한 채 다음 서버로 직접 이동한다.
+        // 메모리 진단이 필요한 수동 실행에서만 softResetAfterServer:true로 활성화한다.
+        if (normalizedOptions.softResetAfterServer === true) {
           row.softReset = await performSoftMemoryReset({
             debug: !!normalizedOptions.softResetDebug,
             baseStayDelay: normalizedOptions.baseStayDelay ?? 8000,
@@ -11608,31 +11719,8 @@ ${lastServerListError}`
       // 무한 반복 UI 모드에서는 여기서 직접 flush해야 실제로 "매 사이클 저장"이 된다.
       if (normalizedOptions.flushCompactHistoryAfterEachCycle === true) {
         try {
-          const storedGithubSettings = JSON.parse(
-            localStorage.getItem("TOPWAR_GITHUB_JSON_UPLOAD_SETTINGS") || "{}"
-          );
-
-          if (storedGithubSettings.enabled && typeof TOPWAR.flushLocalCompactHistoryToGithub === "function") {
-            cycleResult.compactHistoryFlush = await TOPWAR.flushLocalCompactHistoryToGithub({
-              ...storedGithubSettings,
-              ...normalizedOptions,
-              trackActualInOut: normalizedOptions.trackActualInOut ?? true,
-              flushCompactHistoryAfterEachCycle: true
-            });
-            console.log("[TopWar V2.10.0 UI] cycle compact history flush 완료:", {
-              cycle,
-              uploads: cycleResult.compactHistoryFlush?.uploads?.map(row => row.path) ?? []
-            });
-          } else {
-            cycleResult.compactHistoryFlush = {
-              ok: false,
-              skipped: true,
-              reason: storedGithubSettings.enabled
-                ? "flushLocalCompactHistoryToGithub function is not ready"
-                : "github upload disabled"
-            };
-            console.log("[TopWar V2.10.0 UI] cycle compact history flush 생략:", cycleResult.compactHistoryFlush.reason);
-          }
+          cycleResult.compactHistoryFlush = await window.TOPWAR_DATAHUB.flushQueued(100);
+          console.log("[TopWar DataHub] cycle pending queue flush 완료:", cycleResult.compactHistoryFlush);
         } catch (error) {
           cycleResult.compactHistoryFlush = { ok: false, error: error?.message || String(error) };
           console.error("[TopWar V2.10.0 UI] cycle compact history flush 실패:", error);
@@ -12705,11 +12793,17 @@ ${lastServerListError}`
   }
 
   function getFastSettings(options = {}) {
-    return {
+    const settings = {
       ...DEFAULT_FAST_POLICY,
       ...readStoredSettings(),
       ...options
     };
+    // 일반 설정 JSON에서는 token을 의도적으로 제거해 보관한다. 호출 옵션에
+    // token: undefined가 포함되더라도 마지막 spread가 공용 토큰을 지우지 못하게 한다.
+    settings.token = String(
+      options.token || TOPWAR.getGithubToken?.() || settings.token || ""
+    ).trim();
+    return settings;
   }
 
   function assertGithubSettings(settings) {
@@ -12861,6 +12955,7 @@ ${lastServerListError}`
     try {
       const uploaded = await putWithSha(sha);
       rememberSha(path, uploaded?.content?.sha ?? uploaded?.content?.git_url ?? sha);
+      await mirrorUserDataFile(settings, path, content, message);
       return { type: "file", path, htmlUrl: uploaded?.content?.html_url ?? null, shaCached: !!sha };
     } catch (error) {
       // SHA가 오래되어 409가 날 수 있다. 이때만 다시 GET 후 1회 재시도한다.
@@ -12870,8 +12965,48 @@ ${lastServerListError}`
       const current = await readGithubTextFile(settings, path);
       const uploaded = await putWithSha(current.sha);
       rememberSha(path, uploaded?.content?.sha ?? current.sha);
+      await mirrorUserDataFile(settings, path, content, message);
       return { type: "file", path, htmlUrl: uploaded?.content?.html_url ?? null, shaRefreshed: true };
     }
+  }
+
+  function isMirrorUserDataPath(path) {
+    const value = String(path || "");
+    return value.startsWith("src/assets/json/realpower/") ||
+      value === "src/assets/json/power/playerData.json" ||
+      value === "src/assets/json/power/serverData.json" ||
+      value === "src/assets/json/power/allianceData.json" ||
+      value.startsWith("src/assets/json/power/movement/") ||
+      value.startsWith("src/assets/json/power/nickname/");
+  }
+
+  async function mirrorUserDataFile(settings, path, content, message) {
+    if (settings?._skipUserDataMirror === true) return null;
+    if (String(settings?.repo || "") !== "topwar-webutil-vite") return null;
+    if (!isMirrorUserDataPath(path)) return null;
+
+    const mirrorSettings = {
+      ...settings,
+      owner: "hiphop5782",
+      repo: "topwar-database",
+      branch: "main",
+      _skipUserDataMirror: true
+    };
+    const current = await readGithubTextFile(mirrorSettings, path);
+    const body = {
+      message: `[mirror] ${message || `Update ${path}`}`,
+      content: toBase64Utf8(content),
+      branch: mirrorSettings.branch
+    };
+    if (current?.sha) body.sha = current.sha;
+    const uploaded = await githubApiRequest({
+      method: "PUT",
+      url: contentApiUrl(mirrorSettings, path),
+      token: mirrorSettings.token,
+      body
+    });
+    console.log("[TopWar Dual Upload] topwar-database mirror 완료", { path });
+    return uploaded;
   }
 
   async function writeGithubJsonFileFast(settings, path, value, message) {
@@ -13596,6 +13731,7 @@ ${lastServerListError}`
   }
 
   async function flushLocalCompactHistoryToGithub(options = {}) {
+    await TOPWAR.ensureGithubToken?.({ interactive: false });
     const settings = getFastSettings(options);
     assertGithubSettings(settings);
 
@@ -13635,6 +13771,13 @@ ${lastServerListError}`
     if (state.watch133?.running === true) {
       return { ok: false, skipped: true, reason: "blocked during thief+cityReward finder" };
     }
+    const dataHubServerId = Number(data?.serverId ?? options?.serverId);
+    if (!Number.isFinite(dataHubServerId) || dataHubServerId <= 0) {
+      throw new Error("DataHub 지도 업로드 serverId가 없습니다.");
+    }
+    return window.TOPWAR_DATAHUB.uploadMap({ ...data, serverId: dataHubServerId });
+
+    /* Legacy GitHub uploader retained below for rollback/reference only. */
     await TOPWAR.ensureGithubToken?.({ interactive: true });
     const settings = getFastSettings(options);
 
@@ -13775,11 +13918,9 @@ ${lastServerListError}`
     TOPWAR.runMultiServerSurvey = async function runMultiServerSurveyWithOptionalFlush(options = {}) {
       const normalized = Array.isArray(options) ? { serverIds: options } : { ...options };
       const result = await previousRunMultiServerSurvey(normalized);
-      const settings = getFastSettings(normalized);
-
-      if (settings.flushCompactHistoryAfterEachCycle === true && settings.enabled) {
+      if (normalized.flushCompactHistoryAfterEachCycle === true) {
         try {
-          result.compactHistoryFlush = await flushLocalCompactHistoryToGithub(settings);
+          result.compactHistoryFlush = await window.TOPWAR_DATAHUB.flushQueued(100);
         } catch (error) {
           result.compactHistoryFlush = { ok: false, error: error?.message || String(error) };
           console.error("[TopWar V2.9.3 Fast Storage] cycle flush 실패:", error);
@@ -13985,6 +14126,11 @@ ${lastServerListError}`
     branch: "main",
     path: "data/city-rewards.json"
   });
+
+  // 동일 실행에서는 방금 업로드한 통합 데이터와 SHA를 재사용한다.
+  // 첫 업로드 뒤에는 서버마다 반복하던 통합 파일 GET과 SHA GET이 사라진다.
+  let existingGithubDataCache = null;
+  let existingGithubShaCache = null;
 
   const PANEL_BODY_ID = "tw26-body";
   const SERVER_INPUT_ID = "tw26-server";
@@ -14488,6 +14634,8 @@ ${lastServerListError}`
   }
 
   async function loadExistingGithubData() {
+    if (existingGithubDataCache) return existingGithubDataCache;
+
     await TOPWAR.ensureGithubToken?.({ interactive: true });
     const token = githubToken();
     if (!token) throw new Error("GitHub token이 없습니다. 통합 패널에서 한 번 입력하세요.");
@@ -14503,7 +14651,9 @@ ${lastServerListError}`
     });
 
     if (response.status === 404) {
-      return { version: 3, updatedAt: null, count: 0, locations: [] };
+      existingGithubShaCache = null;
+      existingGithubDataCache = { version: 3, updatedAt: null, count: 0, locations: [] };
+      return existingGithubDataCache;
     }
 
     const body = await response.json().catch(() => null);
@@ -14513,14 +14663,16 @@ ${lastServerListError}`
 
     const text = decodeBase64Utf8(body?.content || "");
     const parsed = parseJson(text, null);
+    existingGithubShaCache = body?.sha ?? null;
 
     if (Array.isArray(parsed?.locations)) {
-      return {
+      existingGithubDataCache = {
         version: Number(parsed.version || 3),
         updatedAt: parsed.updatedAt ?? null,
         count: parsed.locations.length,
         locations: parsed.locations.filter(row => isFreshReward(row))
       };
+      return existingGithubDataCache;
     }
 
     // 예전 servers[].locations 형식도 읽는다.
@@ -14530,10 +14682,12 @@ ${lastServerListError}`
           ? server.locations.filter(row => isFreshReward(row))
           : []
       );
-      return { version: 3, updatedAt: parsed.updatedAt ?? null, count: locations.length, locations };
+      existingGithubDataCache = { version: 3, updatedAt: parsed.updatedAt ?? null, count: locations.length, locations };
+      return existingGithubDataCache;
     }
 
-    return { version: 3, updatedAt: null, count: 0, locations: [] };
+    existingGithubDataCache = { version: 3, updatedAt: null, count: 0, locations: [] };
+    return existingGithubDataCache;
   }
 
   function mergeCompletedServer(existingData, serverResult) {
@@ -14564,13 +14718,26 @@ ${lastServerListError}`
   }
 
   async function uploadCompletedServer(serverResult) {
-    await TOPWAR.ensureGithubToken?.({ interactive: true });
-    const token = githubToken();
-    if (!token) throw new Error("GitHub token이 없습니다. 통합 패널에서 한 번 입력하세요.");
     if (!serverResult?.completed || !serverResult?.ok) {
       return { ok: false, skipped: true, reason: "server scan not completed" };
     }
 
+    const dataHubServerId = Number(serverResult.serverId);
+    if (!Number.isFinite(dataHubServerId) || dataHubServerId <= 0) {
+      throw new Error("DataHub 도시보상 업로드 serverId가 없습니다.");
+    }
+    const locations = Array.isArray(serverResult.locations) ? serverResult.locations : [];
+    const dataHubUpload = await window.TOPWAR_DATAHUB.uploadCityRewards({
+      version: 3,
+      serverId: dataHubServerId,
+      scannedAt: serverResult.scannedAt || nowIso(),
+      count: locations.length,
+      locations
+    });
+    return { ...dataHubUpload, serverId: dataHubServerId, found: locations.length };
+
+    /* Legacy GitHub uploader retained below for rollback/reference only. */
+    const token = githubToken();
     const existing = await loadExistingGithubData();
     const merged = mergeCompletedServer(existing, serverResult);
     const content = JSON.stringify(merged, null, 2);
@@ -14586,8 +14753,12 @@ ${lastServerListError}`
       branch: GITHUB.branch,
       path: GITHUB.path,
       content,
-      message: `Update cityReward locations for server ${serverResult.serverId}`
+      message: `Update cityReward locations for server ${serverResult.serverId}`,
+      knownSha: existingGithubShaCache
     });
+
+    existingGithubDataCache = merged;
+    existingGithubShaCache = upload?.content?.sha ?? existingGithubShaCache;
 
     return {
       ok: true,
@@ -21236,13 +21407,41 @@ async function buildDailyNicknameHistoryOutput(
 
 async function stageServerData(serverData, options = {}) {
   assertRealPowerUploadAllowed("RealPower 임시 저장");
-  const settings = getSettings(options);
-  assertGithubSettings(settings);
   throwIfStopped();
 
   const formatted = formatPowerServer(serverData);
   const serverId = String(formatted.serverNumber);
+  const numericServerId = Number(serverId);
+  if (!Number.isFinite(numericServerId) || numericServerId <= 0) {
+    throw new Error("DataHub Top100 임시 저장 serverId가 없습니다.");
+  }
   const internalPath = `__power_server__/${serverId}.json`;
+  await putPendingFile(internalPath, {
+    ...formatted,
+    serverId: numericServerId
+  }, {
+    type: "server",
+    serverId
+  });
+  saveState({
+    lastRunAt: nowIso(),
+    lastServerId: serverId,
+    pendingCommit: true
+  });
+  pushLog(`${serverId} Top100 로컬 임시 저장 완료`);
+  return {
+    ok: true,
+    staged: true,
+    serverId,
+    stagedAt: nowIso(),
+    internalPath,
+    files: [{ ok: true, staged: true, path: internalPath }]
+  };
+
+  /* Legacy GitHub staging retained below for rollback/reference only. */
+  const settings = getSettings(options);
+  assertGithubSettings(settings);
+  const legacyInternalPath = `__power_server__/${serverId}.json`;
 
   await putPendingFile(internalPath, formatted, {
     type: "server",
@@ -21320,6 +21519,61 @@ function createGitTreeChunks(rows, settings) {
 }
 
 async function commitPendingBatch(options = {}) {
+  const settings = getSettings(options);
+  const queue = loadServerQueue();
+  if (queue?.servers?.length) {
+    const incomplete = queue.servers.filter(server => !isServerComplete(server, settings));
+    if (incomplete.length) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: "top100 survey is not fully completed",
+        completed: queue.servers.length - incomplete.length,
+        total: queue.servers.length
+      };
+    }
+  }
+
+  const pendingRows = (await listPendingFiles()).filter(row => row?.type === "server");
+  if (!pendingRows.length) {
+    const flushOnly = await window.TOPWAR_DATAHUB.flushQueued(100);
+    return { ok: true, skipped: true, mode: "datahub-top100-complete", fileCount: 0, serverCount: 0, ...flushOnly };
+  }
+
+  const results = [];
+  for (let index = 0; index < pendingRows.length; index++) {
+    throwIfStopped();
+    const row = pendingRows[index];
+    const numericServerId = Number(row?.data?.serverId ?? row?.serverId ?? row?.data?.serverNumber);
+    updateProgress({
+      phase: "committing",
+      currentServerId: numericServerId,
+      commitChunkIndex: index + 1,
+      commitChunkTotal: pendingRows.length,
+      currentOutputPath: `/api/v1/top100/server (${numericServerId})`
+    });
+    const upload = await window.TOPWAR_DATAHUB.upload("top100", {
+      ...row.data,
+      serverId: numericServerId,
+      uploadedAt: nowIso()
+    }, { flushFirst: false });
+    results.push({ serverId: numericServerId, ...upload });
+    if (upload?.ok || upload?.queued) await deletePendingFiles([row.path]);
+  }
+
+  const flush = await window.TOPWAR_DATAHUB.flushQueued(100);
+  return {
+    ok: true,
+    mode: "datahub-top100-complete",
+    skipped: false,
+    fileCount: results.length,
+    serverCount: results.length,
+    results,
+    queueFlush: flush
+  };
+
+  /* Legacy GitHub batch commit retained below for rollback/reference only. */
+  {
   assertRealPowerUploadAllowed("RealPower GitHub 업로드");
   const settings = getSettings(options);
   assertGithubSettings(settings);
@@ -21450,6 +21704,30 @@ async function commitPendingBatch(options = {}) {
     .map(encodeURIComponent)
     .join("/");
 
+  const mirrorSettings = {
+    ...settings,
+    owner: "hiphop5782",
+    repo: "topwar-database",
+    branch: "main"
+  };
+  const mirrorBranchPath = encodeURIComponent(mirrorSettings.branch);
+  const mirrorRef = await githubApiRequest(
+    mirrorSettings,
+    "GET",
+    `git/ref/heads/${mirrorBranchPath}`
+  );
+  const mirrorHeadSha = mirrorRef?.object?.sha;
+  if (!mirrorHeadSha) {
+    throw new Error("topwar-database main 브랜치 HEAD가 없습니다. 저장소에 README 초기 커밋을 먼저 생성하세요.");
+  }
+  const mirrorHeadCommit = await githubApiRequest(
+    mirrorSettings,
+    "GET",
+    `git/commits/${mirrorHeadSha}`
+  );
+  const mirrorBaseTreeSha = mirrorHeadCommit?.tree?.sha;
+  if (!mirrorBaseTreeSha) throw new Error("topwar-database 기준 Tree SHA를 찾지 못했습니다.");
+
   const ref = await githubApiRequest(
     settings,
     "GET",
@@ -21471,6 +21749,7 @@ async function commitPendingBatch(options = {}) {
   // 대용량 JSON을 tree 요청에 직접 넣지 않고 각각 Blob으로 먼저 생성한다.
   // playerData/serverData가 수 MB를 넘어도 tree 요청 크기 제한에 걸리지 않는다.
   const treeEntries = [];
+  const mirrorTreeEntries = [];
   const outputStats = [];
 
   for (let index = 0; index < outputFiles.length; index++) {
@@ -21513,6 +21792,27 @@ async function commitPendingBatch(options = {}) {
       mode: "100644",
       type: "blob",
       sha: blob.sha
+    });
+
+    // 같은 직렬화 결과를 다시 만들지 않고, 메모리 참조를 해제하기 전에
+    // 비공개 user-data 저장소에도 동일 Blob을 생성한다.
+    const mirrorBlob = await githubApiRequest(
+      mirrorSettings,
+      "POST",
+      "git/blobs",
+      {
+        content,
+        encoding: "utf-8"
+      }
+    );
+    if (!mirrorBlob?.sha) {
+      throw new Error(`topwar-database GitHub Blob 생성 실패: ${output.path}`);
+    }
+    mirrorTreeEntries.push({
+      path: output.path,
+      mode: "100644",
+      type: "blob",
+      sha: mirrorBlob.sha
     });
 
     outputStats.push({
@@ -21568,6 +21868,43 @@ async function commitPendingBatch(options = {}) {
     }
   );
 
+  const mirrorTree = await githubApiRequest(
+    mirrorSettings,
+    "POST",
+    "git/trees",
+    {
+      base_tree: mirrorBaseTreeSha,
+      tree: mirrorTreeEntries
+    }
+  );
+  if (!mirrorTree?.sha) throw new Error("topwar-database 통합 Tree 생성 실패");
+
+  const mirrorCommit = await githubApiRequest(
+    mirrorSettings,
+    "POST",
+    "git/commits",
+    {
+      message: `[mirror] ${message}`,
+      tree: mirrorTree.sha,
+      parents: [mirrorHeadSha]
+    }
+  );
+  if (!mirrorCommit?.sha) throw new Error("topwar-database 커밋 생성 실패");
+
+  await githubApiRequest(
+    mirrorSettings,
+    "PATCH",
+    `git/refs/heads/${mirrorBranchPath}`,
+    {
+      sha: mirrorCommit.sha,
+      force: false
+    }
+  );
+  pushLog("topwar-database 이중 업로드 완료", {
+    commitSha: mirrorCommit.sha,
+    files: mirrorTreeEntries.length
+  });
+
   await deletePendingFiles();
   saveState({
     pendingCommit: false,
@@ -21616,6 +21953,7 @@ async function commitPendingBatch(options = {}) {
     files: outputStats,
     message
   };
+  }
 }
 
 async function uploadOpenRanks(serverId, options = {}) {const data = await collectOpenRanks(serverId);const result = await uploadServerData(data, options);return { data, result };}
@@ -22080,7 +22418,7 @@ return servers;
 
 }
 
-async function runOneCycle(options = {}) {const settings = getSettings(options);assertGithubSettings(settings);const startedAt = Date.now();
+async function runOneCycle(options = {}) {const settings = getSettings(options);const startedAt = Date.now();
 
 let servers = loadLastTempDataLikeJava(settings);
 saveServerQueue(servers, {
