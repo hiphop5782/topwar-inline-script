@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.13.3 - DataHub Settings Fix
+// @name         TopWar Unified Automation V2.14.0 - Top100 DataHub Batch
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.13.3
+// @version      2.14.0
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -30,7 +30,8 @@
     cityRewards: "/api/v1/city-rewards/server",
     thieves: "/api/v1/thieves/detected",
     map: "/api/v1/map/server",
-    top100: "/api/v1/top100/server"
+    top100: "/api/v1/top100/server",
+    top100Complete: "/api/v1/top100/complete"
   });
   let requestChain = Promise.resolve();
 
@@ -232,7 +233,7 @@
     let queued = null;
     try { queued = (await queueList()).length; } catch {}
     return {
-      version: "1.0.0",
+      version: "1.1.0",
       baseUrl: settings.baseUrl,
       scannerId: settings.scannerId,
       configured: !!(settings.scannerId && settings.key),
@@ -241,7 +242,7 @@
   }
 
   window.TOPWAR_DATAHUB = {
-    version: "1.0.0",
+    version: "1.1.0",
     endpoints: ENDPOINTS,
     configure,
     promptConfigure,
@@ -252,7 +253,8 @@
     uploadCityRewards: payload => upload("cityRewards", payload),
     uploadThieves: payload => upload("thieves", payload),
     uploadMap: payload => upload("map", payload),
-    uploadTop100: payload => upload("top100", payload)
+    uploadTop100: payload => upload("top100", payload),
+    completeTop100: payload => upload("top100Complete", payload)
   };
 })();
 
@@ -21535,12 +21537,29 @@ async function commitPendingBatch(options = {}) {
     }
   }
 
-  const pendingRows = (await listPendingFiles()).filter(row => row?.type === "server");
+  const pendingRows = (await listPendingFiles())
+    .filter(row => row?.type === "server")
+    .sort((a, b) =>
+      Number(a?.data?.serverNumber ?? a?.data?.serverId ?? a?.serverId ?? 0) -
+      Number(b?.data?.serverNumber ?? b?.data?.serverId ?? b?.serverId ?? 0)
+    );
   if (!pendingRows.length) {
     const flushOnly = await window.TOPWAR_DATAHUB.flushQueued(100);
     return { ok: true, skipped: true, mode: "datahub-top100-complete", fileCount: 0, serverCount: 0, ...flushOnly };
   }
 
+  const dataHubSettings = window.TOPWAR_DATAHUB.readSettings();
+  const sourceRunId = String(
+    pendingRows.find(row => row?.runId)?.runId ||
+    loadServerQueue()?.runId ||
+    `run-${Date.now()}`
+  );
+  const safeRunId = sourceRunId.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 80);
+  const safeScannerId = String(dataHubSettings?.scannerId || "top100")
+    .replace(/[^A-Za-z0-9._:-]/g, "-")
+    .slice(0, 30);
+  const batchId = `top100-${safeRunId}-${safeScannerId}`.slice(0, 120);
+  const batchTotal = pendingRows.length;
   const results = [];
   for (let index = 0; index < pendingRows.length; index++) {
     throwIfStopped();
@@ -21556,20 +21575,37 @@ async function commitPendingBatch(options = {}) {
     const upload = await window.TOPWAR_DATAHUB.upload("top100", {
       ...row.data,
       serverId: numericServerId,
+      batchId,
+      batchIndex: index + 1,
+      batchTotal,
+      batchCompleted: index + 1 === batchTotal,
       uploadedAt: nowIso()
     }, { flushFirst: false });
     results.push({ serverId: numericServerId, ...upload });
-    if (upload?.ok || upload?.queued) await deletePendingFiles([row.path]);
   }
 
-  const flush = await window.TOPWAR_DATAHUB.flushQueued(100);
+  const completion = await window.TOPWAR_DATAHUB.completeTop100({
+    batchId,
+    expectedServers: batchTotal
+  }, { flushFirst: false });
+
+  // 서버별 요청과 완료 요청이 전송되었거나 재시도 큐에 안전하게 들어간 뒤에만
+  // 원본 pending 데이터를 제거한다. 중간 종료 시 같은 batchId와 전체 개수로 재시도된다.
+  if (completion?.ok || completion?.queued) {
+    await deletePendingFiles(pendingRows.map(row => row.path));
+  }
+
+  const flush = await window.TOPWAR_DATAHUB.flushQueued(Math.max(200, batchTotal + 20));
   return {
     ok: true,
     mode: "datahub-top100-complete",
     skipped: false,
+    batchId,
+    batchTotal,
     fileCount: results.length,
     serverCount: results.length,
     results,
+    completion,
     queueFlush: flush
   };
 
