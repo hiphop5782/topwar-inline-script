@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.13.1 - DataHub Upload Units
+// @name         TopWar Unified Automation V2.13.2 - DataHub State Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.13.1
+// @version      2.13.2
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -449,7 +449,7 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.13.1-datahub-upload-units";
+  const VERSION = "2.13.2-datahub-state-fix";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
@@ -7628,7 +7628,7 @@ TOPWAR.clearThiefQueue()
 
             result.data.githubUpload = result.githubUpload;
 
-            console.error("[TopWar V2.6] GitHub 업로드 실패:", error);
+            console.error("[TopWar V2.6] DataHub 지도 업로드 실패:", error);
           }
         }
 
@@ -8950,7 +8950,7 @@ TOPWAR.clearThiefQueue()
                 detected: newThieves.length,
                 result: liveUpload
               };
-              console.error("[TopWar Unified Finder] 도둑 즉시 GitHub 업로드 실패:", error);
+              console.error("[TopWar Unified Finder] 도둑 즉시 DataHub 업로드 실패:", error);
             }
           }
 
@@ -9084,7 +9084,7 @@ TOPWAR.clearThiefQueue()
         } catch (error) {
           result.thiefUpload = { ok: false, serverId: targetServerId, error: error?.message || String(error) };
           state.watch133.lastGithubUpload = result.thiefUpload;
-          console.error("[TopWar Unified Finder] 도둑 GitHub 업로드 실패:", error);
+          console.error("[TopWar Unified Finder] 도둑 DataHub 업로드 실패:", error);
         }
 
         try {
@@ -9096,7 +9096,7 @@ TOPWAR.clearThiefQueue()
         } catch (error) {
           result.rewardUpload = { ok: false, serverId: targetServerId, error: error?.message || String(error) };
           state.watch133.lastRewardGithubUpload = result.rewardUpload;
-          console.error("[TopWar Unified Finder] 도시보상 GitHub 업로드 실패:", error);
+          console.error("[TopWar Unified Finder] 도시보상 DataHub 업로드 실패:", error);
         }
       }
 
@@ -12558,7 +12558,7 @@ ${lastServerListError}`
   }
 
   async function uploadSurveyResultToGithubV29(data, options = {}) {
-    if (state.watch133?.running === true) {
+    if (TOPWAR.state?.watch133?.running === true) {
       return { ok: false, skipped: true, reason: "blocked during thief+cityReward finder" };
     }
     const settings = getStorageSettings(options);
@@ -13768,7 +13768,7 @@ ${lastServerListError}`
   }
 
   async function uploadSurveyResultToGithubFastV293(data, options = {}) {
-    if (state.watch133?.running === true) {
+    if (TOPWAR.state?.watch133?.running === true) {
       return { ok: false, skipped: true, reason: "blocked during thief+cityReward finder" };
     }
     const dataHubServerId = Number(data?.serverId ?? options?.serverId);
