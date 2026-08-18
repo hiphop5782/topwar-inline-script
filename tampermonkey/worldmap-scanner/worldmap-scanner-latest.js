@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.13.2 - DataHub State Fix
+// @name         TopWar Unified Automation V2.13.3 - DataHub Settings Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.13.2
+// @version      2.13.3
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -312,6 +312,7 @@
       const removed = [];
       const keep = new Set([
         TOPWAR_GITHUB_TOKEN_STORAGE_KEY,
+        "TOPWAR_DATAHUB_SETTINGS_V1",
         TOPWAR_STORAGE_CLEANUP_MARKER
       ]);
 
@@ -449,7 +450,7 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.13.2-datahub-state-fix";
+  const VERSION = "2.13.3-datahub-settings-fix";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
