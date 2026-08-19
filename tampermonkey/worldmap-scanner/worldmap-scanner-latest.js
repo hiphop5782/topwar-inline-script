@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.0 - Top100 DataHub Batch
+// @name         TopWar Unified Automation V2.14.2 - DataHub Settings Sync
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.0
+// @version      2.14.2
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -56,6 +56,24 @@
       key: String(next.key ?? current.key ?? "").trim()
     };
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+
+    // 콘솔이나 다른 기능에서 설정을 변경한 뒤, 패널의 오래된 값이 다시 저장되는 것을 막는다.
+    const scannerIdInput = document.getElementById("tw26-datahub-scanner-id");
+    const keyInput = document.getElementById("tw26-github-token");
+    if (scannerIdInput && scannerIdInput.value !== settings.scannerId) {
+      scannerIdInput.value = settings.scannerId;
+    }
+    if (keyInput && keyInput.value !== settings.key) {
+      keyInput.value = settings.key;
+    }
+
+    window.dispatchEvent(new CustomEvent("topwar:datahub-settings-changed", {
+      detail: {
+        baseUrl: settings.baseUrl,
+        scannerId: settings.scannerId,
+        configured: !!(settings.scannerId && settings.key)
+      }
+    }));
     return status();
   }
 
@@ -5810,6 +5828,10 @@ TOPWAR.clearThiefQueue()
     const waitBefore = Number(options.waitBefore ?? 900);
     const clickDelay = Number(options.clickDelay ?? 350);
     const popupTimeout = Number(options.popupTimeout ?? 1200);
+    const recenterEvery = Math.max(1, Number(options.recenterEvery ?? 3));
+    const targetX = Number(options.targetX);
+    const targetY = Number(options.targetY);
+    const hasTarget = Number.isFinite(targetX) && Number.isFinite(targetY);
 
     await interruptibleSleep(waitBefore);
 
@@ -5831,7 +5853,42 @@ TOPWAR.clearThiefQueue()
 
     const logs = [];
 
-    for (let round = 1; round <= Number(options.rounds ?? 2); round++) {
+    const maximumRounds = Math.max(1, Number(options.rounds ?? 3));
+
+    async function returnToTarget(reason, round, index) {
+      if (!hasTarget) return { ok: false, skipped: true, reason: "target coordinates unavailable" };
+
+      const recovery = await recoverToMapAfterFailedCollect({
+        ...options,
+        recoverBackClickCount: options.baseRetryBackClickCount ?? 2,
+        recoverBackClickDelay: options.baseRetryBackClickDelay ?? 450,
+        afterCloseWait: options.baseRetryCloseWait ?? 350
+      });
+
+      if (shouldStopServerSurvey()) {
+        return { ok: false, stopped: true, reason: "manual stop", recovery };
+      }
+
+      const move = await TOPWAR.moveMapToStableUnified(targetX, targetY, {
+        serverId: options.serverId ?? currentServerId(),
+        subMap: options.subMap ?? 0,
+        scale: options.openScale ?? 1,
+        afterMoveWait: options.baseRetryAfterMoveWait ?? 500,
+        wait901Timeout: options.wait901Timeout ?? 2200,
+        quietMs: options.quietMs ?? 300,
+        maxRetries: options.maxRetries ?? 1,
+        collectCache: false
+      });
+
+      await interruptibleSleep(Number(options.baseRetrySettleDelay ?? 900));
+
+      const entry = { type: "returnToTarget", reason, round, index, recovery, move };
+      logs.push(entry);
+      console.warn("[TopWar V2.14.1] 원하는 기지 메뉴가 열리지 않아 좌표로 복귀합니다.", entry);
+      return { ok: move?.ok !== false, recovery, move };
+    }
+
+    for (let round = 1; round <= maximumRounds; round++) {
       for (let index = 0; index < candidates.length; index++) {
         if (shouldStopServerSurvey()) {
           return {
@@ -5876,6 +5933,34 @@ TOPWAR.clearThiefQueue()
             ry,
             clicked,
             wait,
+            logs
+          };
+        }
+
+        const failedInRound = index + 1;
+        const shouldRecenter = failedInRound % recenterEvery === 0;
+        const hasMoreAttempts = round < maximumRounds || index + 1 < candidates.length;
+
+        if (shouldRecenter && hasMoreAttempts) {
+          const returned = await returnToTarget("NWorldCityPopup timeout", round, index);
+          if (returned.stopped) {
+            return {
+              ok: false,
+              stopped: true,
+              reason: "manual stop during base click recovery",
+              logs
+            };
+          }
+        }
+      }
+
+      if (round < maximumRounds) {
+        const returned = await returnToTarget("base click round exhausted", round, candidates.length - 1);
+        if (returned.stopped) {
+          return {
+            ok: false,
+            stopped: true,
+            reason: "manual stop during base click recovery",
             logs
           };
         }
@@ -5940,10 +6025,16 @@ TOPWAR.clearThiefQueue()
     await interruptibleSleep(delay.afterMove);
 
     result.stages.baseClick = await clickBaseUntilCityPopup({
+      targetX: x,
+      targetY: y,
+      serverId,
+      subMap: options.subMap ?? 0,
+      openScale: options.openScale ?? 1,
       waitBefore: options.beforeBaseClickDelay ?? 900,
       clickDelay: options.baseClickDelay ?? 350,
       popupTimeout: options.cityPopupClickTimeout ?? 1200,
-      rounds: options.baseClickRounds ?? 2,
+      rounds: options.baseClickRounds ?? 3,
+      recenterEvery: options.baseClickRecenterEvery ?? 3,
       candidates: options.baseClickCandidates
     });
 
@@ -5995,6 +6086,32 @@ TOPWAR.clearThiefQueue()
       allianceName: options.allianceName,
       serverId
     });
+
+    const expectedAllianceId = options.allianceId != null
+      ? String(options.allianceId)
+      : null;
+    const openedAllianceId = result.stages.allianceInfo?.allianceId != null
+      ? String(result.stages.allianceInfo.allianceId)
+      : null;
+
+    if (expectedAllianceId && openedAllianceId && expectedAllianceId !== openedAllianceId) {
+      result.reason = "different base/alliance popup opened";
+      result.stages.targetValidation = {
+        ok: false,
+        expectedAllianceId,
+        openedAllianceId,
+        expectedAllianceTag: options.allianceTag ?? null,
+        openedAllianceTag: result.stages.allianceInfo?.allianceTag ?? null
+      };
+      console.warn("[TopWar V2.14.1] 다른 오브젝트 또는 기지가 선택되어 다시 시도합니다.", result.stages.targetValidation);
+      return result;
+    }
+
+    result.stages.targetValidation = {
+      ok: true,
+      expectedAllianceId,
+      openedAllianceId
+    };
 
     result.stages.memberButtonClick = clickAllianceMemberButton();
 
