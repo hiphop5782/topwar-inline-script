@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.2 - DataHub Settings Sync
+// @name         TopWar Unified Automation V2.14.3 - Map Server Transition Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.2
+// @version      2.14.3
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -1870,6 +1870,24 @@
     const scale = Number(options.scale ?? 0.27);
     const maxRetries = Number(options.maxRetries ?? 1);
 
+    async function waitForTargetServer(timeoutMs = 3500) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        const range = ctrl.getWorldMapDataInstance()?.status?.viewport?.range;
+        if (String(range?.k ?? "") === String(serverId)) {
+          return { ok: true, serverId: range?.k, waitedMs: Date.now() - startedAt };
+        }
+        await sleep(100);
+      }
+      const range = ctrl.getWorldMapDataInstance()?.status?.viewport?.range;
+      return {
+        ok: false,
+        expectedServerId: serverId,
+        actualServerId: range?.k ?? null,
+        waitedMs: Date.now() - startedAt
+      };
+    }
+
     for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
       const before901 = getCommandCount(901);
       const beforeObjects = state.objectMap.size;
@@ -1897,13 +1915,16 @@
         interval: Number(options.interval ?? 30),
         minNewCount: Number(options.minNewCount ?? 1)
       });
+      const serverArrival = await waitForTargetServer(
+        Number(options.serverTransitionTimeout ?? 3500)
+      );
 
       let cacheCollected = null;
       if (!stable.ok && options.collectCache !== false) cacheCollected = collectObjectsFromWorldMapCache();
 
       const gainedObjects = state.objectMap.size - beforeObjects;
       const gainedPlayers = state.playerMap.size - beforePlayers;
-      const ok = stable.ok || gainedObjects > 0 || gainedPlayers > 0;
+      const ok = serverArrival.ok && (stable.ok || gainedObjects > 0 || gainedPlayers > 0);
 
       if (ok) {
         const successResult = {
@@ -1917,6 +1938,7 @@
           attempt,
           error,
           stable,
+          serverArrival,
           cacheCollected,
           gainedObjects,
           gainedPlayers,
@@ -1927,12 +1949,13 @@
       }
 
       if (attempt <= maxRetries) {
-        console.warn("[TopWar] no network/cache data, retry:", { x, y, attempt, stable, gainedObjects, gainedPlayers });
+        console.warn("[TopWar] 목표 서버 이동/데이터 수신 실패, retry:", { x, y, attempt, stable, serverArrival, gainedObjects, gainedPlayers });
         await sleep(Number(options.retryDelay ?? 250));
       }
     }
 
-    const failResult = { ok: false, x, y, serverId, subMap, scale, reason: "no network 901 and no cache objects", totals: getSummary() };
+    const actualServerId = ctrl.getWorldMapDataInstance()?.status?.viewport?.range?.k ?? null;
+    const failResult = { ok: false, x, y, serverId, actualServerId, subMap, scale, reason: String(actualServerId ?? "") !== String(serverId) ? "target server transition not confirmed" : "no network 901 and no cache objects", totals: getSummary() };
     noteMoveResultForConnectionGuard(failResult, { x, y, serverId });
     return failResult;
   }
@@ -9639,6 +9662,8 @@ ${lastServerListError}`
 
         surveyRunner.call(topwarApi || null, {
           serverIds,
+          serverOrderMode: getServerOrderMode(),
+          resumeFromSavedServer: false,
           repeatUntilStopped: true,
           popularFirst: false,
           resortByPopularityEachCycle: false,
@@ -11555,6 +11580,50 @@ ${lastServerListError}`
     if (state.fullScan) {
       state.fullScan.running = false;
     }
+
+    state.ui ??= {};
+    state.ui.serverSurveyBatch ??= {};
+    state.ui.serverSurveyBatch.current = {
+      ...(state.ui.serverSurveyBatch.current || {}),
+      phase: "serverTransition",
+      serverId
+    };
+
+    // serverId를 조사 결과의 라벨로만 사용하지 않고 실제 월드맵 이동을 먼저 확정한다.
+    const transition = await TOPWAR.moveMapToStableUnified(
+      Number(options.serverTransitionX ?? 400),
+      Number(options.serverTransitionY ?? 450),
+      {
+        serverId,
+        subMap: options.subMap ?? 0,
+        scale: options.scale ?? 0.27,
+        afterMoveWait: options.serverTransitionAfterMoveWait ?? 400,
+        wait901Timeout: options.serverTransition901Timeout ?? 3500,
+        serverTransitionTimeout: options.serverTransitionTimeout ?? 5000,
+        quietMs: options.quietMs ?? 300,
+        maxRetries: options.serverTransitionRetries ?? 2,
+        collectCache: false
+      }
+    );
+
+    const actualServerId = TOPWAR.range?.()?.k ?? null;
+    if (!transition?.ok || String(actualServerId ?? "") !== String(serverId)) {
+      const reason = `목표 서버 이동 실패: expected=${serverId}, actual=${actualServerId ?? "unknown"}`;
+      console.error("[TopWar V2.14.3]", reason, transition);
+      return {
+        ok: false,
+        stopped: false,
+        serverId,
+        actualServerId,
+        reason,
+        transition
+      };
+    }
+
+    console.log("[TopWar V2.14.3] 지도 서버 이동 확인:", {
+      serverId,
+      actualServerId
+    });
 
     const result = await originalRunMultiServerSurvey({
       ...options,
