@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.3 - Map Server Transition Fix
+// @name         TopWar Unified Automation V2.14.4 - Memory and Thief Reconciliation Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.3
+// @version      2.14.4
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -124,7 +124,30 @@
     try {
       await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
-        tx.objectStore(STORE_NAME).put(row);
+        const store = tx.objectStore(STORE_NAME);
+
+        // 같은 조사 단위의 실패 요청은 최신 스냅샷 하나만 남긴다.
+        // 지도/Top100처럼 큰 payload가 통신 장애 중 계속 쌓여 브라우저 메모리를
+        // 고갈시키는 것을 방지한다.
+        if (row.queueKey) {
+          const cursorRequest = store.openCursor();
+          cursorRequest.onsuccess = event => {
+            const cursor = event.target.result;
+            if (!cursor) {
+              store.put(row);
+              return;
+            }
+            const existingQueueKey = cursor.value?.queueKey ||
+              queueKeyFor(cursor.value?.type, cursor.value?.payload);
+            if (existingQueueKey === row.queueKey && cursor.value?.requestId !== row.requestId) {
+              cursor.delete();
+            }
+            cursor.continue();
+          };
+          cursorRequest.onerror = () => reject(cursorRequest.error);
+        } else {
+          store.put(row);
+        }
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
         tx.onabort = () => reject(tx.error);
@@ -149,18 +172,52 @@
     }
   }
 
-  async function queueList() {
+  async function queueList(limit = 50) {
     const db = await openQueueDb();
     try {
       return await new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readonly");
-        const request = tx.objectStore(STORE_NAME).getAll();
-        request.onsuccess = () => resolve(request.result || []);
+        const rows = [];
+        const maximum = Math.max(1, Number(limit) || 50);
+        const request = tx.objectStore(STORE_NAME).openCursor();
+        request.onsuccess = event => {
+          const cursor = event.target.result;
+          if (!cursor || rows.length >= maximum) {
+            resolve(rows);
+            return;
+          }
+          rows.push(cursor.value);
+          cursor.continue();
+        };
         request.onerror = () => reject(request.error);
       });
     } finally {
       db.close();
     }
+  }
+
+  async function queueCount() {
+    const db = await openQueueDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const request = db.transaction(STORE_NAME, "readonly").objectStore(STORE_NAME).count();
+        request.onsuccess = () => resolve(Number(request.result || 0));
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      db.close();
+    }
+  }
+
+  function queueKeyFor(type, payload) {
+    const serverId = Number(payload?.serverId);
+    const batchId = String(payload?.batchId || "").trim();
+    if (type === "map" && Number.isFinite(serverId)) return `map:${serverId}`;
+    if (type === "cityRewards" && Number.isFinite(serverId)) return `cityRewards:${serverId}`;
+    if (type === "thieves" && Number.isFinite(serverId)) return `thieves:${serverId}`;
+    if (type === "top100" && batchId && Number.isFinite(serverId)) return `top100:${batchId}:${serverId}`;
+    if (type === "top100Complete" && batchId) return `top100Complete:${batchId}`;
+    return null;
   }
 
   async function sendRow(row, settings = requireSettings(false)) {
@@ -191,7 +248,7 @@
 
   async function flushQueuedInternal(limit = 50) {
     const settings = requireSettings(false);
-    const rows = (await queueList())
+    const rows = (await queueList(limit))
       .sort((a, b) => Number(a.createdAtMs || 0) - Number(b.createdAtMs || 0))
       .slice(0, Math.max(1, Number(limit) || 50));
     let sent = 0;
@@ -201,7 +258,20 @@
         await queueDelete(row.requestId);
         sent++;
       } catch (error) {
-        if (Number(error?.status) === 400 || Number(error?.status) === 401 || Number(error?.status) === 403) throw error;
+        const status = Number(error?.status);
+        // payload 자체가 잘못된 요청은 다시 보내도 성공하지 않는다.
+        // 영구 실패 행 하나가 전체 대기열을 영원히 막지 않도록 폐기한다.
+        if ([400, 404, 413, 422].includes(status)) {
+          await queueDelete(row.requestId);
+          console.warn("[TopWar DataHub] permanent queued request discarded:", {
+            status,
+            type: row.type,
+            queueKey: row.queueKey,
+            requestId: row.requestId
+          });
+          continue;
+        }
+        if (status === 401 || status === 403) throw error;
         break;
       }
     }
@@ -227,6 +297,7 @@
         requestId: options.requestId || requestId(),
         endpoint,
         type,
+        queueKey: queueKeyFor(type, payload),
         payload,
         createdAt: new Date().toISOString(),
         createdAtMs: Date.now()
@@ -235,7 +306,7 @@
         const response = await sendRow(row, settings);
         return { ok: true, type, requestId: row.requestId, response };
       } catch (error) {
-        if (![400, 401, 403].includes(Number(error?.status))) {
+        if (![400, 401, 403, 404, 413, 422].includes(Number(error?.status))) {
           await queuePut({ ...row, error: error?.message || String(error) });
           return { ok: false, queued: true, type, requestId: row.requestId, error: error?.message || String(error) };
         }
@@ -249,7 +320,7 @@
   async function status() {
     const settings = readSettings();
     let queued = null;
-    try { queued = (await queueList()).length; } catch {}
+    try { queued = await queueCount(); } catch {}
     return {
       version: "1.1.0",
       baseUrl: settings.baseUrl,
@@ -8838,6 +8909,7 @@ TOPWAR.clearThiefQueue()
       // GitHub 즉시 업로드 시 이 셀들에 속하는 기존 좌표 중 이번 회차에서
       // 다시 관측되지 않은 도둑만 점진적으로 제거한다.
       const confirmedThiefScanCells = new Set();
+      let lastThiefProgressUploadConfirmedCount = 0;
       let moveIndex = 0;
       let failCount = 0;
 
@@ -8955,35 +9027,8 @@ TOPWAR.clearThiefQueue()
             thiefMap
           );
 
-          // 통합 전 도둑찾기에서 실제로 사용하던 검증된 수집 경로를 복원한다.
-          // collectPointList가 901을 처리하면서 objectsByType[133]에 넣은 결과를
-          // 읽어 전용 이벤트 버퍼 결과와 합친다. 서버 시작 시 clearCollected를
-          // 호출했으므로 여기에는 현재 서버의 이번 스캔 관측값만 남는다.
-          let legacyAdded = 0;
-          for (const obj of (TOPWAR.getObjectsByTypeRaw?.(133) || [])) {
-            const observedServerId = Number(obj?.serverId);
-            if (Number.isFinite(observedServerId) && observedServerId !== targetServerId) continue;
-            const px = Number(obj?.x);
-            const py = Number(obj?.y);
-            if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
-            const id = obj?.id ?? null;
-            const objectKey = id != null
-              ? `${targetServerId}:133:id:${id}`
-              : `${targetServerId}:133:coord:${px}:${py}`;
-            if (!thiefMap.has(objectKey)) legacyAdded++;
-            thiefMap.set(objectKey, {
-              ...obj,
-              objectKey,
-              serverId: targetServerId,
-              pointType: 133,
-              pointTypeName: "보물 탐사선",
-              x: px,
-              y: py,
-              source: obj?.source || "proven-objectsByType-133"
-            });
-          }
-          thiefCollect.legacyAdded = legacyAdded;
-          thiefCollect.added = Number(thiefCollect.added || 0) + legacyAdded;
+          // objectsByType[133]은 지나온 지역의 사라진 객체를 계속 보존할 수 있으므로
+          // 다시 합치지 않는다. 이번 이동 이후 수신한 네트워크 901만 진실로 사용한다.
           thiefCollect.total = thiefMap.size;
 
           // 이 이동에서 실제 pointList를 가진 네트워크 901을 받았을 때만
@@ -9006,7 +9051,12 @@ TOPWAR.clearThiefQueue()
             return !liveUploadedThiefKeys.has(key);
           });
 
-          if (newThieves.length > 0 && options.githubUpload !== false) {
+          const confirmedSinceLastUpload =
+            confirmedThiefScanCells.size - lastThiefProgressUploadConfirmedCount;
+          const shouldUploadThiefProgress =
+            newThieves.length > 0 || confirmedSinceLastUpload >= 10;
+
+          if (shouldUploadThiefProgress && options.githubUpload !== false) {
             try {
               if (typeof TOPWAR.uploadDetectedThieves !== "function") {
                 throw new Error("uploadDetectedThieves not installed");
@@ -9029,7 +9079,7 @@ TOPWAR.clearThiefQueue()
               };
               console.warn("[TopWar Thief Upload] GitHub 업로드 호출:", thiefStats.lastUpload);
 
-              const liveUpload = await TOPWAR.uploadDetectedThieves(targetServerId, newThieves, {
+              const liveUpload = await TOPWAR.uploadDetectedThieves(targetServerId, thieves, {
                 cycle: meta.cycle ?? null,
                 detectedAt: nowIso(),
                 newDetectedCount: newThieves.length,
@@ -9043,6 +9093,7 @@ TOPWAR.clearThiefQueue()
               });
 
               if (liveUpload?.ok) {
+                lastThiefProgressUploadConfirmedCount = confirmedThiefScanCells.size;
                 for (const obj of newThieves) {
                   const key = obj?.objectKey ??
                     (obj?.id != null
@@ -9260,6 +9311,19 @@ TOPWAR.clearThiefQueue()
         thiefUpload: result.thiefUpload,
         rewardUpload: result.rewardUpload
       });
+
+      // 다음 서버로 넘어가기 전에 이번 서버의 큰 임시 컬렉션과 패킷 참조를 해제한다.
+      thiefMap.clear();
+      rewardMap.clear();
+      liveUploadedThiefKeys.clear();
+      confirmedThiefScanCells.clear();
+      dedicatedThiefBuffer.events = [];
+      dedicatedThiefBuffer.activeTargetServerId = null;
+      if (dedicatedThiefBuffer.stats) {
+        dedicatedThiefBuffer.stats.lastCaptured = null;
+        dedicatedThiefBuffer.stats.lastCollected = null;
+      }
+      TOPWAR.clearCollected?.({ keepWatch: true });
 
       return result;
     }
@@ -10616,7 +10680,11 @@ ${lastServerListError}`
       .map(obj => normalizeThiefLocation(obj, serverId, observedAt))
       .filter(Boolean);
 
-    if (!detected.length) {
+    const confirmedCellCount = Array.isArray(meta?.scanProgress?.confirmedScanCells)
+      ? meta.scanProgress.confirmedScanCells.length
+      : 0;
+
+    if (!detected.length && confirmedCellCount === 0) {
       return { ok: true, skipped: true, serverId, detected: 0, reason: "no new thieves" };
     }
 
