@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.4 - Memory and Thief Reconciliation Fix
+// @name         TopWar Unified Automation V2.14.5 - New Server Player Limit Guard
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.4
+// @version      2.14.5
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -3615,6 +3615,26 @@
           });
 
           scanCount++;
+
+          const currentPlayers = Number(TOPWAR.summary?.()?.players ?? state.playerMap?.size ?? 0);
+          const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
+          if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
+              currentPlayers > maxPlayersPerServer) {
+            console.warn(`[TopWar Player Guard] server=${serverId} players=${currentPlayers} - 도둑조사 폐기, 다음 서버로 이동`);
+            clearHeavySurveyData({ packetLimit: 0, outgoingLimit: 0 });
+            return {
+              ok: false,
+              stopped: false,
+              completed: false,
+              skipped: true,
+              playerLimitExceeded: true,
+              serverId,
+              players: currentPlayers,
+              maximumPlayers: maxPlayersPerServer,
+              reason: `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`
+            };
+          }
+
           const current = getObjectsByTypeRaw(pointType);
           const skipSharedLocations = options.skipSharedLocations ?? true;
 
@@ -7518,6 +7538,36 @@ TOPWAR.clearThiefQueue()
 
         if (!result?.ok) failCount++;
 
+        const currentSummary = TOPWAR.summary();
+        const currentPlayers = Number(currentSummary?.players ?? 0);
+        const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
+
+        if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
+            currentPlayers > maxPlayersPerServer) {
+          const reason = `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`;
+          console.warn(`[TopWar Player Guard] server=${serverId} players=${currentPlayers} - 신서버로 판단, 현재 조사를 폐기하고 다음 서버로 이동`);
+
+          clearHeavySurveyData({ packetLimit: 0, outgoingLimit: 0 });
+
+          return {
+            ok: false,
+            stopped: false,
+            skipped: true,
+            playerLimitExceeded: true,
+            reason,
+            summary: {
+              ...currentSummary,
+              serverId,
+              subMap,
+              totalMoves: count,
+              failCount,
+              total,
+              elapsedSec: Math.round((Date.now() - startedAt) / 1000),
+              maximumPlayers: maxPlayersPerServer
+            }
+          };
+        }
+
         if (count % Number(options.logEvery ?? 1) === 0 || !result?.ok) {
           const summary = TOPWAR.summary();
           const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
@@ -7550,6 +7600,9 @@ TOPWAR.clearThiefQueue()
   function getDefaultSurveyOptions(serverId, options = {}) {
     return {
       serverId,
+
+      // Top100을 제외한 지도 기반 조사에서 고유 플레이어 2,000명 초과 서버는 건너뜁니다.
+      maxPlayersPerServer: 2000,
 
       startX: 50,
       startY: 50,
@@ -7712,6 +7765,17 @@ TOPWAR.clearThiefQueue()
             message: "NWorldController를 찾지 못했거나 월드맵 데이터 수집을 시작하지 못했습니다. 빈 결과는 저장하지 않습니다."
           });
           console.error("[TopWar V2.9.6] 맵스캔 실패 - 빈 서버조사 결과를 만들지 않고 중단합니다.", result.errors.at(-1));
+          return result;
+        }
+
+        if (result.stages.mapScan?.playerLimitExceeded === true) {
+          result.ok = false;
+          result.stopped = false;
+          result.skipped = true;
+          result.playerLimitExceeded = true;
+          result.reason = result.stages.mapScan.reason;
+          result.summary = result.stages.mapScan.summary;
+          console.warn(`[TopWar Player Guard] server=${serverId} 지도조사 업로드 생략, 다음 서버로 이동`, result.summary);
           return result;
         }
 
@@ -9018,6 +9082,42 @@ TOPWAR.clearThiefQueue()
           // 마지막 901 이후 짧은 정착 시간을 주어 이번 이동에서 시작된 비동기
           // 디코딩이 버퍼에 반영된 다음 수집한다.
           await sleep(Math.max(0, Number(options.thiefCaptureSettleMs ?? 450)));
+
+          const currentPlayers = Number(TOPWAR.summary?.()?.players ?? 0);
+          const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
+          if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
+              currentPlayers > maxPlayersPerServer) {
+            const reason = `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`;
+            console.warn(`[TopWar Player Guard] server=${targetServerId} players=${currentPlayers} - 도둑/보상 통합조사 폐기, 다음 서버로 이동`);
+
+            thiefMap.clear();
+            rewardMap.clear();
+            liveUploadedThiefKeys.clear();
+            confirmedThiefScanCells.clear();
+            dedicatedThiefBuffer.events = [];
+            dedicatedThiefBuffer.activeTargetServerId = null;
+            TOPWAR.clearHeavySurveyData?.({ packetLimit: 0, outgoingLimit: 0 });
+            TOPWAR.clearCollected?.({ keepWatch: true });
+
+            return {
+              ok: true,
+              stopped: false,
+              completed: false,
+              skipped: true,
+              playerLimitExceeded: true,
+              serverId: targetServerId,
+              players: currentPlayers,
+              maximumPlayers: maxPlayersPerServer,
+              reason,
+              startedAt,
+              finishedAt: nowIso(),
+              totalMoves,
+              moveIndex,
+              failCount,
+              thiefCount: 0,
+              rewardCount: 0
+            };
+          }
 
           // 도둑은 이번 이동 후 새로 수신한 네트워크 901에서만 수집한다.
           // moveMapToStableUnified의 worldMapCache fallback 결과는 도둑 판정에 절대 사용하지 않는다.
@@ -14831,6 +14931,37 @@ ${lastServerListError}`
 
         moveIndex++;
         if (!moveResult?.ok) failCount++;
+
+        const currentPlayers = Number(TOPWAR.summary?.()?.players ?? 0);
+        const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
+        if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
+            currentPlayers > maxPlayersPerServer) {
+          const reason = `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`;
+          console.warn(`[TopWar Player Guard] server=${serverId} players=${currentPlayers} - 보상조사 폐기, 다음 서버로 이동`);
+
+          reward.currentRewards.clear();
+          TOPWAR.clearHeavySurveyData?.({ packetLimit: 0, outgoingLimit: 0 });
+          TOPWAR.clearCollected?.({ keepWatch: true });
+
+          return {
+            ok: false,
+            stopped: false,
+            completed: false,
+            skipped: true,
+            playerLimitExceeded: true,
+            serverId: Number(serverId),
+            players: currentPlayers,
+            maximumPlayers: maxPlayersPerServer,
+            reason,
+            startedAt,
+            finishedAt: nowIso(),
+            totalMoves,
+            moveIndex,
+            failCount,
+            count: 0,
+            locations: []
+          };
+        }
 
         const collected = collectRewardsFromRecent901(serverId, reward.currentRewards);
 
