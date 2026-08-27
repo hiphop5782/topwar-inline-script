@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.5 - New Server Player Limit Guard
+// @name         TopWar Unified Automation V2.14.6 - UID RealPower Movement
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.5
-// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with central DataHub upload
+// @version      2.14.6
+// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with UID-based map movement detection
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -23,8 +23,9 @@
 
   const SETTINGS_KEY = "TOPWAR_DATAHUB_SETTINGS_V1";
   const DB_NAME = "topwar-datahub-upload-queue";
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const STORE_NAME = "requests";
+  const UID_SERVER_STORE_NAME = "uidServers";
   const DEFAULT_BASE_URL = "https://datahub.progamer.info";
   const ENDPOINTS = Object.freeze({
     cityRewards: "/api/v1/city-rewards/server",
@@ -112,6 +113,9 @@
         const db = request.result;
         if (!db.objectStoreNames.contains(STORE_NAME)) {
           db.createObjectStore(STORE_NAME, { keyPath: "requestId" });
+        }
+        if (!db.objectStoreNames.contains(UID_SERVER_STORE_NAME)) {
+          db.createObjectStore(UID_SERVER_STORE_NAME, { keyPath: "uid" });
         }
       };
       request.onsuccess = () => resolve(request.result);
@@ -207,6 +211,135 @@
     } finally {
       db.close();
     }
+  }
+
+  function movementText(value) {
+    if (value == null) return null;
+    const text = String(value).trim();
+    return text || null;
+  }
+
+  function movementNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function movementUid(player) {
+    return movementText(player?.uid ?? player?.pid ?? player?.userId ?? player?.playerId);
+  }
+
+  function movementSnapshot(player, fallbackServerId, observedAt) {
+    const snapshot = {
+      uid: movementUid(player),
+      nickname: movementText(player?.nickname ?? player?.username ?? player?.name),
+      server: movementNumber(player?.serverId ?? player?.server ?? fallbackServerId),
+      rank: movementNumber(player?.rank),
+      score: movementNumber(player?.score ?? player?.cp ?? player?.power),
+      level: movementNumber(player?.level),
+      allianceId: movementText(player?.allianceId ?? player?.aid),
+      allianceTag: movementText(player?.allianceTag ?? player?.a_tag),
+      allianceName: movementText(player?.allianceName ?? player?.a_name),
+      observedAt
+    };
+    return Object.fromEntries(
+      Object.entries(snapshot).filter(([, value]) => value !== null && value !== "")
+    );
+  }
+
+  function idbRequest(request) {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+    });
+  }
+
+  async function enrichMapPayloadWithUidMovements(payload) {
+    const serverId = movementNumber(payload?.serverId ?? payload?.summary?.serverId);
+    const players = Array.isArray(payload?.players) ? payload.players : [];
+    if (!Number.isFinite(serverId) || !players.length) return payload;
+
+    const detectedAt = String(payload?.exportedAt || new Date().toISOString());
+    const db = await openQueueDb();
+    const movementEvents = [];
+    const eventKeys = new Set();
+
+    try {
+      const tx = db.transaction(UID_SERVER_STORE_NAME, "readwrite");
+      const store = tx.objectStore(UID_SERVER_STORE_NAME);
+
+      for (const player of players) {
+        const uid = movementUid(player);
+        if (!uid) continue;
+
+        const current = movementSnapshot(player, serverId, detectedAt);
+        const previous = await idbRequest(store.get(uid));
+        const previousServer = movementNumber(previous?.server);
+        const currentServer = movementNumber(current.server);
+
+        // power/movement와 동일하게 동일 UID가 다른 서버에서 실제 관측된 경우만 기록한다.
+        // 한 서버에서 보이지 않는다는 사실만으로는 OUT 또는 서버이동으로 판단하지 않는다.
+        if (
+          previous &&
+          Number.isFinite(previousServer) &&
+          Number.isFinite(currentServer) &&
+          previousServer !== currentServer
+        ) {
+          const key = `${uid}|${previousServer}|${currentServer}`;
+          if (!eventKeys.has(key)) {
+            eventKeys.add(key);
+            movementEvents.push({
+              detectedAt,
+              uid,
+              nickname: current.nickname ?? previous.nickname ?? null,
+              fromServer: previousServer,
+              toServer: currentServer,
+              from: Object.fromEntries(
+                Object.entries(previous).filter(([key, value]) => key !== "lastSeenAt" && value != null && value !== "")
+              ),
+              to: current
+            });
+          }
+        }
+
+        store.put({
+          ...previous,
+          ...current,
+          uid,
+          server: currentServer,
+          firstSeenAt: previous?.firstSeenAt || detectedAt,
+          lastSeenAt: detectedAt
+        });
+      }
+
+      await new Promise((resolve, reject) => {
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error || new Error("UID movement transaction failed"));
+        tx.onabort = () => reject(tx.error || new Error("UID movement transaction aborted"));
+      });
+    } finally {
+      db.close();
+    }
+
+    movementEvents.sort((a, b) =>
+      Number(a.fromServer) - Number(b.fromServer) ||
+      Number(a.toServer) - Number(b.toServer) ||
+      String(a.uid).localeCompare(String(b.uid))
+    );
+
+    return {
+      ...payload,
+      movementTracking: {
+        version: 1,
+        mode: "uid-cross-server",
+        detectedAt,
+        eventCount: movementEvents.length
+      },
+      movementEvents,
+      summary: {
+        ...(payload?.summary || {}),
+        movementEvents: movementEvents.length
+      }
+    };
   }
 
   function queueKeyFor(type, payload) {
@@ -341,7 +474,7 @@
     upload,
     uploadCityRewards: payload => upload("cityRewards", payload),
     uploadThieves: payload => upload("thieves", payload),
-    uploadMap: payload => upload("map", payload),
+    uploadMap: async payload => upload("map", await enrichMapPayloadWithUidMovements(payload)),
     uploadTop100: payload => upload("top100", payload),
     completeTop100: payload => upload("top100Complete", payload)
   };
