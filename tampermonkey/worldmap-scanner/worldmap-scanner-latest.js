@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.6 - UID RealPower Movement
+// @name         TopWar Unified Automation V2.14.9 - Integrated Map/Reward/Thief
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.6
-// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with UID-based map movement detection
+// @version      2.14.9
+// @description  Unified TopWar map/thief/reward survey with per-server map/reward uploads and immediate thief uploads
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -691,7 +691,9 @@
     sockets: [],
     recentPackets: [],
     recentOutgoing: [],
-    maxRecentPackets: 16,
+    // 901은 pointList 전체를 포함하므로 몇 개만 남겨도 매우 클 수 있다.
+    // 보상은 playerMap을 1차 소스로 사용하므로 fallback 원본은 최근 2개만 유지한다.
+    maxRecentPackets: 2,
     // 도둑 전용 버퍼. 일반 901 recentPackets / 도시보상 수집과 완전히 분리한다.
     // 901 수신 즉시 pointType=133만 경량 객체로 저장하므로 raw pointList를 붙잡지 않는다.
     thiefBuffer: {
@@ -726,8 +728,12 @@
         lastUpload: null
       }
     },
-    maxStoredObjects: 5000,
-    maxStoredObjectsPerType: 1500,
+    // 신규 유저가 폭증한 서버에서도 Map이 브라우저 메모리를 끝없이 점유하지 않게 한다.
+    maxStoredPlayers: 2000,
+    playerLimitReached: false,
+    droppedPlayers: 0,
+    maxStoredObjects: 3000,
+    maxStoredObjectsPerType: 750,
     maxThiefQueue: 200,
     commandCount: new Map(),
 
@@ -1374,6 +1380,15 @@
 
     const prev = state.playerMap.get(obj.uid);
 
+    // 사후 검사만으로는 한 번의 대형 901에서 수천 명이 한꺼번에 들어오는 것을 막지 못한다.
+    // 기존 유저 갱신은 허용하되 신규 UID는 저장 직전 2,000명에서 하드 차단한다.
+    const maxStoredPlayers = Math.max(1, Number(state.maxStoredPlayers) || 2000);
+    if (!prev && state.playerMap.size >= maxStoredPlayers) {
+      state.playerLimitReached = true;
+      state.droppedPlayers = Number(state.droppedPlayers || 0) + 1;
+      return false;
+    }
+
     // 기존 V2.10.4가 제공하던 필드는 그대로 명시적으로 유지한다.
     const legacyPlayer = {
       time: obj.time,
@@ -1473,6 +1488,9 @@
     };
 
     state.playerMap.set(obj.uid, player);
+    if (state.playerMap.size >= maxStoredPlayers) {
+      state.playerLimitReached = true;
+    }
 
     if (obj.allianceId) {
       const prevAlliance = state.allianceMap.get(obj.allianceId);
@@ -1543,6 +1561,9 @@
     }
 
     for (const point of pointList) {
+      // 이 서버는 조사 루프에서 곧바로 폐기된다. 대형 901의 나머지 수만 건을
+      // 정규화해 임시 객체를 계속 만드는 작업도 여기서 즉시 중단한다.
+      if (state.playerLimitReached === true) break;
       const obj = normalizeMapPoint(point, meta);
       setBoundedMapValue(state.objectMap, obj.objectKey, obj, state.maxStoredObjects);
       addedObjectsRaw++;
@@ -1666,7 +1687,49 @@
       // collectPointList가 playerMap/cityReward용 일반 데이터를 누적하기 전에/후와 관계없이
       // 도둑은 이 수신 시점에 별도의 경량 네트워크 이벤트로 반드시 보존한다.
       // recentPackets가 16개를 초과해 오래된 901이 밀려나도 133 탐지는 사라지지 않는다.
-      capture901ThiefEvent(record, detail);
+      const capturedThiefEvent = capture901ThiefEvent(record, detail);
+
+      // 지도조사 중에는 별도의 지도 이동 루프를 실행하지 않고 동일한 901 패킷에서
+      // 도둑을 즉시 업로드한다. 좌표 이동 충돌을 피하면서 발견 즉시 전송하기 위한 경로다.
+      const integratedSurvey = state.ui?.serverSurvey;
+      if (
+        integratedSurvey?.running === true &&
+        integratedSurvey?.integratedFinders === true &&
+        Array.isArray(capturedThiefEvent?.thieves) &&
+        capturedThiefEvent.thieves.length > 0 &&
+        typeof window.TOPWAR?.uploadDetectedThieves === "function"
+      ) {
+        integratedSurvey.liveThiefKeys ??= new Set();
+        const newThieves = capturedThiefEvent.thieves.filter(thief => {
+          const key = `${Number(thief.serverId ?? integratedSurvey.current?.serverId)}|${thief.id ?? ""}|${thief.x}|${thief.y}`;
+          if (integratedSurvey.liveThiefKeys.has(key)) return false;
+          integratedSurvey.liveThiefKeys.add(key);
+          return true;
+        });
+
+        if (newThieves.length) {
+          const targetServerId = Number(
+            integratedSurvey.current?.serverId ??
+            capturedThiefEvent.scanServerId ??
+            capturedThiefEvent.packetServerId
+          );
+          void window.TOPWAR.uploadDetectedThieves(targetServerId, newThieves, {
+            detectedAt: new Date().toISOString(),
+            newDetectedCount: newThieves.length,
+            scanProgress: {
+              mode: "map-survey-live",
+              moveIndex: Number(state.fullScan?.moveIndex ?? 0),
+              totalMoves: Number(state.fullScan?.totalMoves ?? 0)
+            }
+          }).then(upload => {
+            integratedSurvey.lastLiveThiefUpload = upload;
+            state.watch133.lastLiveThiefUpload = upload;
+          }).catch(error => {
+            integratedSurvey.lastLiveThiefUpload = { ok: false, error: error?.message || String(error) };
+            console.error("[TopWar Integrated Survey] 도둑 즉시 DataHub 업로드 실패:", error);
+          });
+        }
+      }
 
       record.collected = collectPointList(detail.pointList, { time: record.time, c: packet.c, seq: packet.seq, serverId: detail?.k });
       if (state.debug.log901) console.log("[TopWar 901 collected]", {
@@ -2290,6 +2353,7 @@
   }
 
   function players() { return [...state.playerMap.values()]; }
+  function playerValues() { return state.playerMap.values(); }
   function alliances() { return [...state.allianceMap.values()]; }
   function objects() { return [...state.objectMap.values()]; }
   function allianceRepresentatives() { return [...state.allianceRepresentativeMap.values()].sort((a, b) => Number(b.power ?? 0) - Number(a.power ?? 0)); }
@@ -2297,6 +2361,9 @@
   function getSummary() {
     return {
       players: state.playerMap.size,
+      maximumPlayers: state.maxStoredPlayers,
+      playerLimitReached: state.playerLimitReached === true,
+      droppedPlayers: Number(state.droppedPlayers || 0),
       alliances: state.allianceMap.size,
       objects: state.objectMap.size,
       allianceRepresentatives: state.allianceRepresentativeMap.size,
@@ -2427,6 +2494,8 @@
     state.objectMap = new Map();
     state.objectsByType = {};
     state.playerMap = new Map();
+    state.playerLimitReached = false;
+    state.droppedPlayers = 0;
     state.allianceMap = new Map();
     state.allianceRepresentativeMap = new Map();
     state.recentPackets = [];
@@ -3752,7 +3821,7 @@
           const currentPlayers = Number(TOPWAR.summary?.()?.players ?? state.playerMap?.size ?? 0);
           const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
           if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
-              currentPlayers > maxPlayersPerServer) {
+              currentPlayers >= maxPlayersPerServer) {
             console.warn(`[TopWar Player Guard] server=${serverId} players=${currentPlayers} - 도둑조사 폐기, 다음 서버로 이동`);
             clearHeavySurveyData({ packetLimit: 0, outgoingLimit: 0 });
             return {
@@ -3970,6 +4039,7 @@ TOPWAR.clearThiefQueue()
     collectObjectsFromWorldMapCache,
 
     players,
+    playerValues,
     alliances,
     objects,
     allianceRepresentatives,
@@ -4690,6 +4760,8 @@ TOPWAR.clearThiefQueue()
     state.objectMap = new Map();
     state.objectsByType = {};
     state.playerMap = new Map();
+    state.playerLimitReached = false;
+    state.droppedPlayers = 0;
     state.allianceMap = new Map();
     state.allianceRepresentativeMap = new Map();
     state.memberMap = new Map();
@@ -4712,6 +4784,71 @@ TOPWAR.clearThiefQueue()
 
     console.log("[TopWar V2.7] heavy survey data cleared");
     return true;
+  }
+
+  function cleanupIntegratedSurveyResidue(options = {}) {
+    const removedStorageKeys = [];
+    const obsoleteExactKeys = new Set([
+      // DataHub 전환 뒤 더 이상 소비되지 않는 구 GitHub 업로드 캐시/큐.
+      "TOPWAR_GITHUB_SHA_CACHE_V293",
+      "TOPWAR_FAST_COMPACT_HISTORY_QUEUE_V293",
+      "TOPWAR_FAST_GLOBAL_USER_INDEX_V293"
+    ]);
+    const obsoletePrefixes = [
+      "TOPWAR_FAST_SERVER_USER_INDEX_V293:"
+    ];
+
+    // 인증, UI 설정, 서버목록 캐시, 조사 순서 및 재개 포인터는 보존한다.
+    try {
+      for (let index = localStorage.length - 1; index >= 0; index--) {
+        const key = localStorage.key(index);
+        if (!key) continue;
+        if (obsoleteExactKeys.has(key) || obsoletePrefixes.some(prefix => key.startsWith(prefix))) {
+          localStorage.removeItem(key);
+          removedStorageKeys.push(key);
+        }
+      }
+    } catch (error) {
+      console.warn("[TopWar Integrated Survey] localStorage 잔존 데이터 정리 실패:", error);
+    }
+
+    // localStorage에 정상 저장된 재개 포인터의 sessionStorage 중복본만 제거한다.
+    try {
+      if (localStorage.getItem("TOPWAR_SERVER_SURVEY_RESUME_V1")) {
+        sessionStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1");
+      }
+    } catch {}
+
+    const thiefBuffer = state.thiefBuffer;
+    if (thiefBuffer && options.keepLiveThiefEvents !== true) {
+      thiefBuffer.events = [];
+      thiefBuffer.activeTargetServerId = null;
+      if (thiefBuffer.stats) {
+        thiefBuffer.stats.lastCaptured = null;
+        thiefBuffer.stats.lastCollected = null;
+      }
+    }
+
+    // 완료된 비동기 공유 항목과 과거 서버의 중복방지 키는 다음 서버로 넘기지 않는다.
+    if (Array.isArray(state.pendingThiefItems)) {
+      state.pendingThiefItems = state.pendingThiefItems.filter(item =>
+        item && !["shared", "failed", "expired", "removed"].includes(String(item.status || "").toLowerCase())
+      );
+    }
+    if (state.pendingThiefObjectKeys instanceof Set && !state.pendingThiefItems?.length) {
+      state.pendingThiefObjectKeys.clear();
+    }
+
+    pruneRecentBuffers({ packetLimit: 0, outgoingLimit: 0 });
+    state.commandCount = new Map();
+    state.worldObjectStores = null;
+    state.mapCtrlCache = null;
+
+    console.log("[TopWar Integrated Survey] 잔존 데이터 정리 완료", {
+      phase: options.phase ?? "unknown",
+      removedStorageKeys: removedStorageKeys.length
+    });
+    return { ok: true, removedStorageKeys };
   }
 
   function shouldStopServerSurvey() {
@@ -7676,7 +7813,7 @@ TOPWAR.clearThiefQueue()
         const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
 
         if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
-            currentPlayers > maxPlayersPerServer) {
+            currentPlayers >= maxPlayersPerServer) {
           const reason = `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`;
           console.warn(`[TopWar Player Guard] server=${serverId} players=${currentPlayers} - 신서버로 판단, 현재 조사를 폐기하고 다음 서버로 이동`);
 
@@ -7844,6 +7981,10 @@ TOPWAR.clearThiefQueue()
 
     const surveyOptions = getDefaultSurveyOptions(serverId, options);
 
+    // 새 서버 수집 전에 이전 서버의 대형 참조와 더 이상 사용하지 않는 구 저장 캐시를 제거한다.
+    // DataHub 인증/실패 업로드 큐와 조사 재개 포인터는 cleanup 함수가 보존한다.
+    cleanupIntegratedSurveyResidue({ phase: "server-start" });
+
     // 서버별 연속 조사에서 이전 서버 데이터가 섞이지 않도록 완전 초기화한다.
     // skipMapScan=true일 때는 사용자가 기존 수집 데이터를 재사용하려는 의도로 보고 초기화하지 않는다.
     if (surveyOptions.skipMapScan !== true && surveyOptions.clearBeforeStart !== false) {
@@ -7861,6 +8002,10 @@ TOPWAR.clearThiefQueue()
     state.ui.serverSurvey = {
       running: true,
       stopping: false,
+      integratedFinders: surveyOptions.integratedFinders !== false,
+      includeRewards: surveyOptions.includeRewards === true,
+      liveThiefKeys: new Set(),
+      rewardMap: new Map(),
       startedAt: nowIso(),
       finishedAt: null,
       current: {
@@ -7916,6 +8061,25 @@ TOPWAR.clearThiefQueue()
           result.stopped = true;
           result.reason = "manual stop during map scan";
           return result;
+        }
+
+        // 보상 포함 지도조사는 지도 스캔이 이미 모은 playerMap/최근 901을 재사용한다.
+        // 별도 보상 스캐너가 지도를 다시 움직이지 않으므로 두 자동화의 좌표 충돌이 없다.
+        if (
+          surveyOptions.includeRewards === true &&
+          typeof TOPWAR.collectRewardsFromRecent901 === "function"
+        ) {
+          try {
+            const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map
+              ? state.ui.serverSurvey.rewardMap
+              : new Map();
+            state.ui.serverSurvey.rewardMap = rewardMap;
+            result.stages.rewardCollect = TOPWAR.collectRewardsFromRecent901(serverId, rewardMap);
+          } catch (error) {
+            result.stages.rewardCollect = { ok: false, error: error?.message || String(error) };
+            result.errors.push({ stage: "rewardCollect", message: error?.message || String(error) });
+            console.error("[TopWar Integrated Survey] 도시보상 수집 실패:", error);
+          }
         }
       } else {
         result.stages.mapScan = {
@@ -8043,6 +8207,36 @@ TOPWAR.clearThiefQueue()
           }
         }
 
+        // 지도와 보상은 서버 1개의 모든 수집이 끝난 export 단계에서 각각 업로드한다.
+        // 지도 업로드 실패가 보상 업로드를 막거나 그 반대가 되지 않도록 독립 처리한다.
+        if (
+          surveyOptions.includeRewards === true &&
+          typeof TOPWAR.uploadRewardServerResults === "function"
+        ) {
+          const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map
+            ? state.ui.serverSurvey.rewardMap
+            : new Map();
+          const locations = [...rewardMap.values()].sort((a, b) =>
+            Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0)
+          );
+          try {
+            result.rewardUpload = await TOPWAR.uploadRewardServerResults({
+              ok: true,
+              completed: true,
+              serverId,
+              scannedAt: nowIso(),
+              count: locations.length,
+              locations
+            });
+            state.ui.serverSurvey.lastRewardUpload = result.rewardUpload;
+          } catch (error) {
+            result.rewardUpload = { ok: false, serverId, error: error?.message || String(error) };
+            state.ui.serverSurvey.lastRewardUpload = result.rewardUpload;
+            result.errors.push({ stage: "rewardUpload", message: error?.message || String(error) });
+            console.error("[TopWar Integrated Survey] 도시보상 DataHub 업로드 실패:", error);
+          }
+        }
+
         result.summary = result.data?.summary ?? null;
         result.ok = true;
 
@@ -8083,6 +8277,11 @@ TOPWAR.clearThiefQueue()
       state.ui.serverSurvey.stopping = false;
       state.ui.serverSurvey.finishedAt = nowIso();
       state.ui.serverSurvey.result = slimServerSurveyResult(result);
+      state.ui.serverSurvey.liveThiefKeys?.clear?.();
+      state.ui.serverSurvey.rewardMap?.clear?.();
+
+      // 서버 결과를 가볍게 요약해 남긴 뒤 원본 패킷, 지도 객체, 도둑 이벤트 참조를 해제한다.
+      cleanupIntegratedSurveyResidue({ phase: "server-finished" });
 
       console.log("[TopWar V2.6] 서버조사 종료:", result.summary ?? result);
     }
@@ -8390,6 +8589,7 @@ TOPWAR.clearThiefQueue()
     shouldStopServerSurvey,
     clearSurveyRuntimeData,
     clearHeavySurveyData,
+    cleanupIntegratedSurveyResidue,
     pruneRecentBuffers,
     slimServerSurveyResult,
     stopFullScan: requestStopServerSurvey,
@@ -8533,9 +8733,10 @@ TOPWAR.clearThiefQueue()
           <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" name="tw26-server-order" value="random">랜덤으로</label>
         </div>
 
-        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px;">
+        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px;">
           <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">보상탐색</button>
           <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">지도조사</button>
+          <button id="tw26-survey-rewards" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:11px;font-weight:700;cursor:pointer;">지도+보상</button>
         </div>
 
         <div id="tw26-status" style="
@@ -8647,6 +8848,7 @@ TOPWAR.clearThiefQueue()
     const githubTokenInput = panel.querySelector("#tw26-github-token");
     const thiefButton = panel.querySelector("#tw26-thief");
     const surveyButton = panel.querySelector("#tw26-survey");
+    const surveyRewardsButton = panel.querySelector("#tw26-survey-rewards");
     const status = panel.querySelector("#tw26-status");
     const detailStatus = panel.querySelector("#tw26-detail-status");
     const resetButton = panel.querySelector("#tw26-reset");
@@ -9219,7 +9421,7 @@ TOPWAR.clearThiefQueue()
           const currentPlayers = Number(TOPWAR.summary?.()?.players ?? 0);
           const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
           if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
-              currentPlayers > maxPlayersPerServer) {
+              currentPlayers >= maxPlayersPerServer) {
             const reason = `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`;
             console.warn(`[TopWar Player Guard] server=${targetServerId} players=${currentPlayers} - 도둑/보상 통합조사 폐기, 다음 서버로 이동`);
 
@@ -9753,15 +9955,18 @@ TOPWAR.clearThiefQueue()
       const logStatus = window.TOPWAR_LOG_CONTROL?.status?.() ?? { programLogs: true, gameFontWarnings: true };
 
       setButton(thiefButton, !!watch.running, "보상탐색");
-      setButton(surveyButton, surveyRunning, "지도조사");
+      setButton(surveyButton, surveyRunning && survey.includeRewards !== true, "지도조사");
+      setButton(surveyRewardsButton, surveyRunning && survey.includeRewards === true, "지도+보상");
       setLogButton(programLogsButton, !!logStatus.programLogs, "프로그램 로그");
       setLogButton(gameFontLogsButton, !!logStatus.gameFontWarnings, "게임 폰트경고");
 
       thiefButton.disabled = surveyRunning || realPowerRunning || disconnected;
       surveyButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
+      surveyRewardsButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
 
       thiefButton.style.opacity = thiefButton.disabled ? "0.55" : "1";
       surveyButton.style.opacity = surveyButton.disabled ? "0.55" : "1";
+      surveyRewardsButton.style.opacity = surveyRewardsButton.disabled ? "0.55" : "1";
       const anyAutomationRunning = !!(watch.running || surveyRunning || realPowerRunning || state.cityRewardFinder?.running);
       githubTokenInput.disabled = anyAutomationRunning || thiefUploadTestRunning;
       githubTokenInput.style.opacity = githubTokenInput.disabled ? "0.6" : "1";
@@ -9957,8 +10162,13 @@ ${lastServerListError}`
           return;
         }
 
+        const includeRewards = surveyButton.dataset.includeRewards === "true";
+        delete surveyButton.dataset.includeRewards;
+
         surveyRunner.call(topwarApi || null, {
           serverIds,
+          includeRewards,
+          integratedFinders: true,
           serverOrderMode: getServerOrderMode(),
           resumeFromSavedServer: false,
           repeatUntilStopped: true,
@@ -9986,6 +10196,16 @@ ${lastServerListError}`
       }
 
       render();
+    });
+
+    surveyRewardsButton.addEventListener("click", event => {
+      event.stopPropagation();
+      // 실행 중이면 어느 지도 버튼을 눌러도 동일한 조사 중지 요청을 보낸다.
+      // 시작할 때만 보상 포함 플래그를 다음 지도조사 클릭에 전달한다.
+      if (!(state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running)) {
+        surveyButton.dataset.includeRewards = "true";
+      }
+      surveyButton.click();
     });
 
     resetButton.addEventListener("click", event => {
@@ -14872,8 +15092,12 @@ ${lastServerListError}`
 
     // V1.5부터는 TOPWAR.players()가 playerInfo/cityReward를 보존하므로 이것을 1차 소스로 사용한다.
     // 디버깅 시 TOPWAR.playersWithCityReward() 결과와 Finder 결과를 직접 비교할 수 있다.
-    if (typeof TOPWAR.players === "function") {
-      for (const player of TOPWAR.players()) {
+    if (typeof TOPWAR.playerValues === "function" || typeof TOPWAR.players === "function") {
+      // Map iterator를 직접 사용해 좌표마다 플레이어 전체 임시 배열을 만들지 않는다.
+      const playerSource = typeof TOPWAR.playerValues === "function"
+        ? TOPWAR.playerValues()
+        : TOPWAR.players();
+      for (const player of playerSource) {
         const row = normalizeEnrichedRewardPlayer(player, targetServerId);
         if (!row) continue;
         const key = rewardKey(row);
@@ -15068,7 +15292,7 @@ ${lastServerListError}`
         const currentPlayers = Number(TOPWAR.summary?.()?.players ?? 0);
         const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
         if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
-            currentPlayers > maxPlayersPerServer) {
+            currentPlayers >= maxPlayersPerServer) {
           const reason = `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`;
           console.warn(`[TopWar Player Guard] server=${serverId} players=${currentPlayers} - 보상조사 폐기, 다음 서버로 이동`);
 
