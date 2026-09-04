@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.17 - Raw CityReward Upload
+// @name         TopWar Unified Automation V2.14.9 - Integrated Map/Reward/Thief
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.17
-// @description  Unified TopWar map/thief/reward survey with per-server map/reward uploads and immediate thief uploads
+// @version      2.14.9
+// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with UID-based map movement detection
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -1263,13 +1263,7 @@
     const parsedPlayerInfo = parsePlayerInfo(rawPlayerInfo);
     const playerInfo = isPlainObject(parsedPlayerInfo) ? parsedPlayerInfo : {};
     const pointType = point?.pointType ?? null;
-    const rawServerId = point?.k ?? p.w ?? p.cMid ?? meta.serverId ?? null;
-    // 일부 901은 현재 서버를 숫자 0으로 표현한다. 0을 실제 서버번호로 저장하면
-    // 조사 대상 서버와 불일치하여 cityReward가 전부 탈락하므로 현재 조사 서버를 사용한다.
-    const activeSurveyServerId = state.ui?.serverSurvey?.current?.serverId ??
-      state.ui?.serverSurveyBatch?.current?.serverId ??
-      range()?.k ?? null;
-    const serverId = Number(rawServerId) > 0 ? rawServerId : activeSurveyServerId;
+    const serverId = point?.k ?? p.w ?? p.cMid ?? meta.serverId ?? null;
     const x = point?.x ?? null;
     const y = point?.y ?? null;
     // 기존 p.pid -> p.uid 우선순위는 그대로 유지하고, 없는 경우에만 원본의 다른 UID 후보를 사용한다.
@@ -1631,13 +1625,7 @@
       // detail.k는 패킷 메타값일 수 있으므로 point 자체의 서버 정보와 섞지 않는다.
       // point에 서버 정보가 실제로 있을 때만 저장하고, 없으면 수집 시 현재 조사 서버를 사용한다.
       const pointServerIdRaw = Number(point?.k ?? point?.p?.w ?? point?.p?.cMid);
-      const fallbackServerId = scanServerId ??
-        state.ui?.serverSurvey?.current?.serverId ??
-        state.ui?.serverSurveyBatch?.current?.serverId ??
-        range()?.k ?? null;
-      const pointServerId = Number.isFinite(pointServerIdRaw) && pointServerIdRaw > 0
-        ? pointServerIdRaw
-        : (Number(fallbackServerId) > 0 ? Number(fallbackServerId) : null);
+      const pointServerId = Number.isFinite(pointServerIdRaw) ? pointServerIdRaw : null;
       const id = point?.id ?? null;
 
       thieves.push({
@@ -1700,9 +1688,6 @@
       // 도둑은 이 수신 시점에 별도의 경량 네트워크 이벤트로 반드시 보존한다.
       // recentPackets가 16개를 초과해 오래된 901이 밀려나도 133 탐지는 사라지지 않는다.
       const capturedThiefEvent = capture901ThiefEvent(record, detail);
-
-      // 지도조사 중에는 별도의 지도 이동 루프를 실행하지 않고 동일한 901 패킷에서
-      // 도둑을 즉시 업로드한다. 좌표 이동 충돌을 피하면서 발견 즉시 전송하기 위한 경로다.
       const integratedSurvey = state.ui?.serverSurvey;
       if (
         integratedSurvey?.running === true &&
@@ -1713,29 +1698,17 @@
       ) {
         integratedSurvey.liveThiefKeys ??= new Set();
         const newThieves = capturedThiefEvent.thieves.filter(thief => {
-          const resolvedServerId = Number(thief.serverId) > 0
-            ? Number(thief.serverId)
-            : Number(integratedSurvey.current?.serverId);
-          const key = `${resolvedServerId}|${thief.id ?? ""}|${thief.x}|${thief.y}`;
+          const key = `${Number(thief.serverId ?? integratedSurvey.current?.serverId)}|${thief.id ?? ""}|${thief.x}|${thief.y}`;
           if (integratedSurvey.liveThiefKeys.has(key)) return false;
           integratedSurvey.liveThiefKeys.add(key);
           return true;
         });
-
         if (newThieves.length) {
-          const targetServerId = Number(
-            integratedSurvey.current?.serverId ??
-            capturedThiefEvent.scanServerId ??
-            capturedThiefEvent.packetServerId
-          );
+          const targetServerId = Number(integratedSurvey.current?.serverId ?? capturedThiefEvent.scanServerId ?? capturedThiefEvent.packetServerId);
           void window.TOPWAR.uploadDetectedThieves(targetServerId, newThieves, {
             detectedAt: new Date().toISOString(),
             newDetectedCount: newThieves.length,
-            scanProgress: {
-              mode: "map-survey-live",
-              moveIndex: Number(state.fullScan?.moveIndex ?? 0),
-              totalMoves: Number(state.fullScan?.totalMoves ?? 0)
-            }
+            scanProgress: { mode: "map-survey-live", moveIndex: Number(state.fullScan?.moveIndex ?? 0), totalMoves: Number(state.fullScan?.totalMoves ?? 0) }
           }).then(upload => {
             integratedSurvey.lastLiveThiefUpload = upload;
             state.watch133.lastLiveThiefUpload = upload;
@@ -1746,10 +1719,7 @@
         }
       }
 
-      const packetServerId = Number(detail?.k) > 0
-        ? detail.k
-        : (state.ui?.serverSurvey?.current?.serverId ?? state.ui?.serverSurveyBatch?.current?.serverId ?? range()?.k);
-      record.collected = collectPointList(detail.pointList, { time: record.time, c: packet.c, seq: packet.seq, serverId: packetServerId });
+      record.collected = collectPointList(detail.pointList, { time: record.time, c: packet.c, seq: packet.seq, serverId: detail?.k });
       if (state.debug.log901) console.log("[TopWar 901 collected]", {
         seq: packet.seq,
         pointList: detail.pointList.length,
@@ -4806,66 +4776,35 @@ TOPWAR.clearThiefQueue()
 
   function cleanupIntegratedSurveyResidue(options = {}) {
     const removedStorageKeys = [];
-    const obsoleteExactKeys = new Set([
-      // DataHub 전환 뒤 더 이상 소비되지 않는 구 GitHub 업로드 캐시/큐.
-      "TOPWAR_GITHUB_SHA_CACHE_V293",
-      "TOPWAR_FAST_COMPACT_HISTORY_QUEUE_V293",
-      "TOPWAR_FAST_GLOBAL_USER_INDEX_V293"
-    ]);
-    const obsoletePrefixes = [
-      "TOPWAR_FAST_SERVER_USER_INDEX_V293:"
-    ];
-
-    // 인증, UI 설정, 서버목록 캐시, 조사 순서 및 재개 포인터는 보존한다.
+    const obsoleteExactKeys = new Set(["TOPWAR_GITHUB_SHA_CACHE_V293", "TOPWAR_FAST_COMPACT_HISTORY_QUEUE_V293", "TOPWAR_FAST_GLOBAL_USER_INDEX_V293"]);
+    const obsoletePrefixes = ["TOPWAR_FAST_SERVER_USER_INDEX_V293:"];
     try {
       for (let index = localStorage.length - 1; index >= 0; index--) {
         const key = localStorage.key(index);
-        if (!key) continue;
-        if (obsoleteExactKeys.has(key) || obsoletePrefixes.some(prefix => key.startsWith(prefix))) {
+        if (key && (obsoleteExactKeys.has(key) || obsoletePrefixes.some(prefix => key.startsWith(prefix)))) {
           localStorage.removeItem(key);
           removedStorageKeys.push(key);
         }
       }
-    } catch (error) {
-      console.warn("[TopWar Integrated Survey] localStorage 잔존 데이터 정리 실패:", error);
-    }
-
-    // localStorage에 정상 저장된 재개 포인터의 sessionStorage 중복본만 제거한다.
+    } catch (error) { console.warn("[TopWar Integrated Survey] localStorage 잔존 데이터 정리 실패:", error); }
     try {
-      if (localStorage.getItem("TOPWAR_SERVER_SURVEY_RESUME_V1")) {
-        sessionStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1");
-      }
+      if (localStorage.getItem("TOPWAR_SERVER_SURVEY_RESUME_V1")) sessionStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1");
     } catch {}
-
     const thiefBuffer = state.thiefBuffer;
     if (thiefBuffer && options.keepLiveThiefEvents !== true) {
       thiefBuffer.events = [];
       thiefBuffer.activeTargetServerId = null;
-      if (thiefBuffer.stats) {
-        thiefBuffer.stats.lastCaptured = null;
-        thiefBuffer.stats.lastCollected = null;
-      }
+      if (thiefBuffer.stats) { thiefBuffer.stats.lastCaptured = null; thiefBuffer.stats.lastCollected = null; }
     }
-
-    // 완료된 비동기 공유 항목과 과거 서버의 중복방지 키는 다음 서버로 넘기지 않는다.
     if (Array.isArray(state.pendingThiefItems)) {
-      state.pendingThiefItems = state.pendingThiefItems.filter(item =>
-        item && !["shared", "failed", "expired", "removed"].includes(String(item.status || "").toLowerCase())
-      );
+      state.pendingThiefItems = state.pendingThiefItems.filter(item => item && !["shared", "failed", "expired", "removed"].includes(String(item.status || "").toLowerCase()));
     }
-    if (state.pendingThiefObjectKeys instanceof Set && !state.pendingThiefItems?.length) {
-      state.pendingThiefObjectKeys.clear();
-    }
-
+    if (state.pendingThiefObjectKeys instanceof Set && !state.pendingThiefItems?.length) state.pendingThiefObjectKeys.clear();
     pruneRecentBuffers({ packetLimit: 0, outgoingLimit: 0 });
     state.commandCount = new Map();
     state.worldObjectStores = null;
     state.mapCtrlCache = null;
-
-    console.log("[TopWar Integrated Survey] 잔존 데이터 정리 완료", {
-      phase: options.phase ?? "unknown",
-      removedStorageKeys: removedStorageKeys.length
-    });
+    console.log("[TopWar Integrated Survey] 잔존 데이터 정리 완료", { phase: options.phase ?? "unknown", removedStorageKeys: removedStorageKeys.length });
     return { ok: true, removedStorageKeys };
   }
 
@@ -7998,9 +7937,6 @@ TOPWAR.clearThiefQueue()
     }
 
     const surveyOptions = getDefaultSurveyOptions(serverId, options);
-
-    // 새 서버 수집 전에 이전 서버의 대형 참조와 더 이상 사용하지 않는 구 저장 캐시를 제거한다.
-    // DataHub 인증/실패 업로드 큐와 조사 재개 포인터는 cleanup 함수가 보존한다.
     cleanupIntegratedSurveyResidue({ phase: "server-start" });
 
     // 서버별 연속 조사에서 이전 서버 데이터가 섞이지 않도록 완전 초기화한다.
@@ -8033,7 +7969,6 @@ TOPWAR.clearThiefQueue()
       result: null,
       error: null
     };
-    ensureThiefBuffer().activeTargetServerId = serverId;
 
     state.fullScan.running = true;
     state.fullScan.stopRequested = false;
@@ -8082,22 +8017,14 @@ TOPWAR.clearThiefQueue()
           return result;
         }
 
-        // 보상 포함 지도조사는 지도 스캔이 이미 모은 playerMap/최근 901을 재사용한다.
-        // 별도 보상 스캐너가 지도를 다시 움직이지 않으므로 두 자동화의 좌표 충돌이 없다.
-        if (
-          surveyOptions.includeRewards === true &&
-          typeof TOPWAR.collectRewardsFromRecent901 === "function"
-        ) {
+        if (surveyOptions.includeRewards === true && typeof TOPWAR.collectRewardsFromRecent901 === "function") {
           try {
-            const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map
-              ? state.ui.serverSurvey.rewardMap
-              : new Map();
+            const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map ? state.ui.serverSurvey.rewardMap : new Map();
             state.ui.serverSurvey.rewardMap = rewardMap;
             result.stages.rewardCollect = TOPWAR.collectRewardsFromRecent901(serverId, rewardMap);
           } catch (error) {
             result.stages.rewardCollect = { ok: false, error: error?.message || String(error) };
             result.errors.push({ stage: "rewardCollect", message: error?.message || String(error) });
-            console.error("[TopWar Integrated Survey] 도시보상 수집 실패:", error);
           }
         }
       } else {
@@ -8226,35 +8153,16 @@ TOPWAR.clearThiefQueue()
           }
         }
 
-        // 지도와 보상은 서버 1개의 모든 수집이 끝난 export 단계에서 각각 업로드한다.
-        // 지도 업로드 실패가 보상 업로드를 막거나 그 반대가 되지 않도록 독립 처리한다.
-        if (
-          surveyOptions.includeRewards === true &&
-          typeof TOPWAR.uploadRewardServerResults === "function"
-        ) {
-          const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map
-            ? state.ui.serverSurvey.rewardMap
-            : new Map();
-          let locations = [...rewardMap.values()].sort((a, b) =>
-            Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0)
-          );
+        if (surveyOptions.includeRewards === true && typeof TOPWAR.uploadRewardServerResults === "function") {
+          const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map ? state.ui.serverSurvey.rewardMap : new Map();
+          const locations = [...rewardMap.values()].sort((a, b) => Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0));
           try {
-            // 901에서 관측된 cityReward 원본을 수정하지 않고 서버 완료 시 그대로 전송한다.
-            // endTimeMilli 기반 표시/만료 필터링은 FE가 담당한다.
-            result.rewardUpload = await TOPWAR.uploadRewardServerResults({
-              ok: true,
-              completed: true,
-              serverId,
-              scannedAt: nowIso(),
-              count: locations.length,
-              locations
-            });
+            result.rewardUpload = await TOPWAR.uploadRewardServerResults({ ok: true, completed: true, serverId, scannedAt: nowIso(), count: locations.length, locations });
             state.ui.serverSurvey.lastRewardUpload = result.rewardUpload;
           } catch (error) {
             result.rewardUpload = { ok: false, serverId, error: error?.message || String(error) };
             state.ui.serverSurvey.lastRewardUpload = result.rewardUpload;
             result.errors.push({ stage: "rewardUpload", message: error?.message || String(error) });
-            console.error("[TopWar Integrated Survey] 도시보상 DataHub 업로드 실패:", error);
           }
         }
 
@@ -8300,8 +8208,6 @@ TOPWAR.clearThiefQueue()
       state.ui.serverSurvey.result = slimServerSurveyResult(result);
       state.ui.serverSurvey.liveThiefKeys?.clear?.();
       state.ui.serverSurvey.rewardMap?.clear?.();
-
-      // 서버 결과를 가볍게 요약해 남긴 뒤 원본 패킷, 지도 객체, 도둑 이벤트 참조를 해제한다.
       cleanupIntegratedSurveyResidue({ phase: "server-finished" });
 
       console.log("[TopWar V2.6] 서버조사 종료:", result.summary ?? result);
@@ -10185,7 +10091,6 @@ ${lastServerListError}`
 
         const includeRewards = surveyButton.dataset.includeRewards === "true";
         delete surveyButton.dataset.includeRewards;
-
         surveyRunner.call(topwarApi || null, {
           serverIds,
           includeRewards,
@@ -10221,8 +10126,6 @@ ${lastServerListError}`
 
     surveyRewardsButton.addEventListener("click", event => {
       event.stopPropagation();
-      // 실행 중이면 어느 지도 버튼을 눌러도 동일한 조사 중지 요청을 보낸다.
-      // 시작할 때만 보상 포함 플래그를 다음 지도조사 클릭에 전달한다.
       if (!(state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running)) {
         surveyButton.dataset.includeRewards = "true";
       }
@@ -10828,10 +10731,7 @@ ${lastServerListError}`
   }
 
   function normalizeThiefLocation(obj, targetServerId, observedAt = null) {
-    const rawServerId = Number(obj?.serverId);
-    const serverId = Number.isFinite(rawServerId) && rawServerId > 0
-      ? rawServerId
-      : Number(targetServerId);
+    const serverId = Number(obj?.serverId ?? targetServerId);
     if (!Number.isFinite(serverId) || serverId !== Number(targetServerId)) return null;
 
     const x = obj?.x ?? null;
@@ -14974,48 +14874,6 @@ ${lastServerListError}`
     return value !== null && typeof value === "object" && !Array.isArray(value);
   }
 
-  function isUsableCityReward(value, nowMs = Date.now()) {
-    if (!isCityRewardObject(value) || Object.keys(value).length === 0) return false;
-
-    const flatEntries = [];
-    const visit = (node, path = "", depth = 0) => {
-      if (depth > 5 || node == null) return;
-      if (Array.isArray(node)) {
-        node.forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
-      } else if (typeof node === "object") {
-        Object.entries(node).forEach(([key, item]) => visit(item, path ? `${path}.${key}` : key, depth + 1));
-      } else {
-        flatEntries.push([path.toLowerCase(), node]);
-      }
-    };
-    visit(value);
-
-    const inactiveStatus = flatEntries.some(([path, raw]) =>
-      /(^|\.)(status|state|active|available|claimed)$/.test(path) &&
-      (/^(expired|inactive|claimed|closed|none|false)$/i.test(String(raw).trim()) || raw === false)
-    );
-    if (inactiveStatus) return false;
-
-    const expiryEntry = flatEntries.find(([path]) =>
-      /(^|\.)(expireat|expiresat|endat|endtime|endtimemilli|expiredtime|expiretime|deadline)$/.test(path)
-    );
-    if (expiryEntry) {
-      const raw = expiryEntry[1];
-      const numeric = Number(raw);
-      const expiryMs = Number.isFinite(numeric)
-        ? (numeric < 1000000000000 ? numeric * 1000 : numeric)
-        : Date.parse(String(raw));
-      if (Number.isFinite(expiryMs) && expiryMs <= nowMs) return false;
-    }
-
-    // 키만 있고 값이 전부 null/false/0/빈 문자열인 객체는 비활성 placeholder다.
-    return flatEntries.some(([, raw]) =>
-      raw === true ||
-      (typeof raw === "number" && Number.isFinite(raw) && raw > 0) ||
-      (typeof raw === "string" && raw.trim() !== "" && raw.trim() !== "0")
-    );
-  }
-
   function rewardTimestampMs(value) {
     if (value == null || value === "") return null;
     if (typeof value === "number") {
@@ -15080,8 +14938,7 @@ ${lastServerListError}`
   function rawPointServerId(point, detail, fallbackServerId) {
     const value = point?.k ?? point?.p?.w ?? point?.p?.cMid ?? detail?.k ?? fallbackServerId;
     const number = Number(value);
-    // k/w/cMid가 0이면 별도 서버가 아니라 현재 조사 서버를 뜻한다.
-    return Number.isFinite(number) && number > 0 ? number : Number(fallbackServerId);
+    return Number.isFinite(number) ? number : Number(fallbackServerId);
   }
 
   function rewardKey(row) {
@@ -15262,117 +15119,6 @@ ${lastServerListError}`
       cityReward: JSON.stringify(row.cityReward)
     })));
     return rows;
-  }
-
-  async function confirmCityRewardLocations(serverId, candidates, options = {}) {
-    const targetServerId = Number(serverId);
-    const source = Array.isArray(candidates) ? candidates : [];
-    const confirmed = [];
-    const rejected = [];
-
-    for (let index = 0; index < source.length; index++) {
-      if (typeof options.shouldStop === "function" && options.shouldStop()) break;
-
-      const candidate = source[index];
-      const x = Number(candidate?.x);
-      const y = Number(candidate?.y);
-      options.onProgress?.({ index: index + 1, total: source.length, x, y });
-
-      if (!Number.isFinite(x) || !Number.isFinite(y)) {
-        rejected.push({ candidate, reason: "invalid coordinate" });
-        continue;
-      }
-
-      const candidateUid = candidate?.uid != null ? String(candidate.uid) : null;
-      const candidatePointId = candidate?.pointId != null ? String(candidate.pointId) : null;
-      if (!candidateUid && !candidatePointId) {
-        rejected.push({ candidate, reason: "stable identity missing" });
-        continue;
-      }
-
-      const requiredConfirmations = Math.max(2, Number(options.requiredConfirmations ?? 2));
-      const confirmationRows = [];
-      let failureReason = null;
-
-      for (let attempt = 1; attempt <= requiredConfirmations; attempt++) {
-        if (typeof options.shouldStop === "function" && options.shouldStop()) break;
-        const confirmStartedMs = Date.now();
-        let moveResult = null;
-
-        try {
-          moveResult = await TOPWAR.moveMapToStableUnified(x, y, {
-            serverId: targetServerId,
-            afterMoveWait: options.afterMoveWait ?? 250,
-            wait901Timeout: options.wait901Timeout ?? 3000,
-            quietMs: options.quietMs ?? 450,
-            maxRetries: options.maxRetries ?? 2,
-            retryDelay: options.retryDelay ?? 350,
-            collectCache: false
-          });
-        } catch (error) {
-          failureReason = error?.message || String(error);
-          break;
-        }
-
-        if (!moveResult?.ok) {
-          failureReason = `confirmation move failed (${attempt}/${requiredConfirmations})`;
-          break;
-        }
-
-        const records = typeof TOPWAR.byC === "function" ? (TOPWAR.byC(901) || []) : [];
-        let rowForAttempt = null;
-        for (let recordIndex = records.length - 1; recordIndex >= 0 && !rowForAttempt; recordIndex--) {
-          const record = records[recordIndex];
-          const recordMs = Date.parse(String(record?.time ?? ""));
-          if (!Number.isFinite(recordMs) || recordMs < confirmStartedMs) continue;
-          const decoded = record?.packet?.decoded;
-          const detail = decoded?.parsedDetail ?? decoded?.detail ?? null;
-          if (!Array.isArray(detail?.pointList)) continue;
-
-          for (const point of detail.pointList) {
-            if (Number(point?.pointType) !== 1 || Number(point?.x) !== x || Number(point?.y) !== y) continue;
-            const row = normalizeRawRewardPoint(point, detail, targetServerId, record);
-            if (!row) continue;
-            const rowUid = row.uid != null ? String(row.uid) : null;
-            const rowPointId = row.pointId != null ? String(row.pointId) : null;
-            if (candidateUid && rowUid !== candidateUid) continue;
-            if (candidatePointId && rowPointId !== candidatePointId) continue;
-            rowForAttempt = row;
-            break;
-          }
-        }
-
-        if (!rowForAttempt) {
-          failureReason = `not present in fresh 901 (${attempt}/${requiredConfirmations})`;
-          break;
-        }
-        confirmationRows.push(rowForAttempt);
-        if (attempt < requiredConfirmations) await TOPWAR.sleep(Number(options.betweenConfirmationsMs ?? 700));
-      }
-
-      const fingerprints = new Set(confirmationRows.map(row => JSON.stringify(row.cityReward)));
-      if (confirmationRows.length === requiredConfirmations && fingerprints.size === 1) {
-        confirmed.push(confirmationRows.at(-1));
-      } else {
-        rejected.push({
-          candidate,
-          reason: failureReason || "reward changed between confirmations",
-          confirmations: confirmationRows.length,
-          requiredConfirmations
-        });
-      }
-    }
-
-    return {
-      ok: true,
-      serverId: targetServerId,
-      candidateCount: source.length,
-      confirmedCount: confirmed.length,
-      rejectedCount: rejected.length,
-      stopped: typeof options.shouldStop === "function" && options.shouldStop(),
-      locations: confirmed,
-      rejected
-    };
   }
 
   async function scanRewardServer(serverId, options = {}) {
@@ -16128,7 +15874,6 @@ ${lastServerListError}`
     stopRewardFinder,
     rewardFinderStatus,
     rewardFinderTable,
-    confirmCityRewardLocations,
     rewardTtlMs: REWARD_TTL_MS,
     pruneExpiredCityRewards() {
       const reward = ensureRewardState();
