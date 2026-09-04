@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.13 - CityReward Server Zero Fix
+// @name         TopWar Unified Automation V2.14.14 - Preserve Existing Rewards
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.13
+// @version      2.14.14
 // @description  Unified TopWar map/thief/reward survey with per-server map/reward uploads and immediate thief uploads
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -8255,14 +8255,17 @@ TOPWAR.clearThiefQueue()
               locations = Array.isArray(confirmation?.locations) ? confirmation.locations : [];
             }
 
-            result.rewardUpload = await TOPWAR.uploadRewardServerResults({
+            // /city-rewards/server는 서버 전체 스냅샷 경로다. 일부 후보 또는 0건을 보내면
+            // 이전에 정상 확인된 보상이 삭제될 수 있으므로 자동 교체 업로드를 하지 않는다.
+            // 백엔드에 명시적인 증분 upsert API가 추가되기 전까지 기존 결과 보존이 우선이다.
+            result.rewardUpload = {
               ok: true,
-              completed: true,
+              skipped: true,
+              preserveExisting: true,
               serverId,
-              scannedAt: nowIso(),
-              count: locations.length,
-              locations
-            });
+              detected: locations.length,
+              reason: "기존 보상 결과 보존: 전체 교체 업로드 생략"
+            };
             state.ui.serverSurvey.lastRewardUpload = result.rewardUpload;
           } catch (error) {
             result.rewardUpload = { ok: false, serverId, error: error?.message || String(error) };
@@ -15654,6 +15657,19 @@ ${lastServerListError}`
   async function uploadCompletedServer(serverResult) {
     if (!serverResult?.completed || !serverResult?.ok) {
       return { ok: false, skipped: true, reason: "server scan not completed" };
+    }
+
+    // 이 엔드포인트는 서버 단위 전체 교체일 수 있으므로 자동 조사에서는 기존 결과를
+    // 덮어쓰지 않는다. 관리자가 완전한 스냅샷임을 확인해 명시적으로 허용한 경우만 전송한다.
+    if (serverResult?.allowReplaceExisting !== true) {
+      return {
+        ok: true,
+        skipped: true,
+        preserveExisting: true,
+        serverId: Number(serverResult.serverId),
+        detected: Array.isArray(serverResult.locations) ? serverResult.locations.length : 0,
+        reason: "기존 보상 결과 보존: allowReplaceExisting 미지정"
+      };
     }
 
     const dataHubServerId = Number(serverResult.serverId);
