@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.12 - CityReward EndTimeMilli
+// @name         TopWar Unified Automation V2.14.13 - CityReward Server Zero Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.12
+// @version      2.14.13
 // @description  Unified TopWar map/thief/reward survey with per-server map/reward uploads and immediate thief uploads
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -1263,7 +1263,13 @@
     const parsedPlayerInfo = parsePlayerInfo(rawPlayerInfo);
     const playerInfo = isPlainObject(parsedPlayerInfo) ? parsedPlayerInfo : {};
     const pointType = point?.pointType ?? null;
-    const serverId = point?.k ?? p.w ?? p.cMid ?? meta.serverId ?? null;
+    const rawServerId = point?.k ?? p.w ?? p.cMid ?? meta.serverId ?? null;
+    // 일부 901은 현재 서버를 숫자 0으로 표현한다. 0을 실제 서버번호로 저장하면
+    // 조사 대상 서버와 불일치하여 cityReward가 전부 탈락하므로 현재 조사 서버를 사용한다.
+    const activeSurveyServerId = state.ui?.serverSurvey?.current?.serverId ??
+      state.ui?.serverSurveyBatch?.current?.serverId ??
+      range()?.k ?? null;
+    const serverId = Number(rawServerId) > 0 ? rawServerId : activeSurveyServerId;
     const x = point?.x ?? null;
     const y = point?.y ?? null;
     // 기존 p.pid -> p.uid 우선순위는 그대로 유지하고, 없는 경우에만 원본의 다른 UID 후보를 사용한다.
@@ -1731,7 +1737,10 @@
         }
       }
 
-      record.collected = collectPointList(detail.pointList, { time: record.time, c: packet.c, seq: packet.seq, serverId: detail?.k });
+      const packetServerId = Number(detail?.k) > 0
+        ? detail.k
+        : (state.ui?.serverSurvey?.current?.serverId ?? state.ui?.serverSurveyBatch?.current?.serverId ?? range()?.k);
+      record.collected = collectPointList(detail.pointList, { time: record.time, c: packet.c, seq: packet.seq, serverId: packetServerId });
       if (state.debug.log901) console.log("[TopWar 901 collected]", {
         seq: packet.seq,
         pointList: detail.pointList.length,
@@ -15082,7 +15091,8 @@ ${lastServerListError}`
   function rawPointServerId(point, detail, fallbackServerId) {
     const value = point?.k ?? point?.p?.w ?? point?.p?.cMid ?? detail?.k ?? fallbackServerId;
     const number = Number(value);
-    return Number.isFinite(number) ? number : Number(fallbackServerId);
+    // k/w/cMid가 0이면 별도 서버가 아니라 현재 조사 서버를 뜻한다.
+    return Number.isFinite(number) && number > 0 ? number : Number(fallbackServerId);
   }
 
   function rewardKey(row) {
