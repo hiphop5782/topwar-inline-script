@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9 - Integrated Map/Reward/Thief
+// @name         TopWar Unified Automation V2.14.9.2 - Live 901 Reward Capture
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9
+// @version      2.14.9.2
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with UID-based map movement detection
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -1263,7 +1263,10 @@
     const parsedPlayerInfo = parsePlayerInfo(rawPlayerInfo);
     const playerInfo = isPlainObject(parsedPlayerInfo) ? parsedPlayerInfo : {};
     const pointType = point?.pointType ?? null;
-    const serverId = point?.k ?? p.w ?? p.cMid ?? meta.serverId ?? null;
+    const rawServerId = point?.k ?? p.w ?? p.cMid;
+    // 일부 901은 현재 조사 서버를 0으로 보낸다. 0은 실제 서버번호가 아니므로
+    // 조사 루프가 전달한 서버번호를 사용해야 도시보상이 서버 불일치로 폐기되지 않는다.
+    const serverId = Number(rawServerId) > 0 ? rawServerId : (meta.serverId ?? null);
     const x = point?.x ?? null;
     const y = point?.y ?? null;
     // 기존 p.pid -> p.uid 우선순위는 그대로 유지하고, 없는 경우에만 원본의 다른 UID 후보를 사용한다.
@@ -1719,7 +1722,69 @@
         }
       }
 
-      record.collected = collectPointList(detail.pointList, { time: record.time, c: packet.c, seq: packet.seq, serverId: detail?.k });
+      const activeSurveyServerId = state.ui?.serverSurvey?.current?.serverId ??
+        state.ui?.serverSurveyBatch?.current?.serverId ??
+        range()?.k ?? null;
+      const collectedServerId = Number(detail?.k) > 0 ? detail.k : activeSurveyServerId;
+      record.collected = collectPointList(detail.pointList, {
+        time: record.time,
+        c: packet.c,
+        seq: packet.seq,
+        serverId: collectedServerId
+      });
+
+      // 지도+보상 조사에서는 901을 받은 바로 이 시점에 cityReward 원본을 별도 맵에 보존한다.
+      // 서버 완료 시 playerMap/최근 2개 패킷을 다시 검색하는 경로에만 의존하면 중간에 본
+      // 보상이 사라져 locations=[]로 업로드될 수 있다.
+      const rewardSurvey = state.ui?.serverSurvey;
+      if (rewardSurvey?.running === true && rewardSurvey?.includeRewards === true) {
+        rewardSurvey.rewardMap ??= new Map();
+        let capturedRewards = 0;
+        for (const point of detail.pointList) {
+          if (Number(point?.pointType) !== 1) continue;
+          const normalized = normalizeMapPoint(point, {
+            time: record.time,
+            c: packet.c,
+            seq: packet.seq,
+            serverId: collectedServerId
+          });
+          const cityReward = normalized?.cityReward;
+          if (cityReward === null || typeof cityReward !== "object" || Array.isArray(cityReward)) continue;
+          const serverId = Number(normalized?.serverId) > 0
+            ? Number(normalized.serverId)
+            : Number(collectedServerId);
+          if (!Number.isFinite(serverId) || serverId <= 0) continue;
+          const row = {
+            serverId,
+            x: normalized.x ?? point?.x ?? null,
+            y: normalized.y ?? point?.y ?? null,
+            uid: normalized.uid != null ? String(normalized.uid) : null,
+            username: normalized.username ?? normalized.nickname ?? null,
+            level: normalized.level ?? null,
+            allianceId: normalized.allianceId != null ? String(normalized.allianceId) : null,
+            allianceTag: normalized.allianceTag ?? null,
+            pointId: normalized.id ?? point?.id ?? null,
+            cityReward,
+            cityRewardSeenAt: record.time,
+            foundAt: record.time
+          };
+          const instanceId = cityReward?.instanceId != null ? String(cityReward.instanceId) : null;
+          const key = instanceId
+            ? `${serverId}:instance:${instanceId}`
+            : row.uid
+              ? `${serverId}:uid:${row.uid}`
+              : `${serverId}:coord:${row.x}:${row.y}`;
+          if (!rewardSurvey.rewardMap.has(key)) capturedRewards++;
+          rewardSurvey.rewardMap.set(key, row);
+        }
+        if (capturedRewards > 0) {
+          console.log("[TopWar Integrated Survey] 901 도시보상 즉시 누적:", {
+            serverId: collectedServerId,
+            added: capturedRewards,
+            total: rewardSurvey.rewardMap.size
+          });
+        }
+      }
       if (state.debug.log901) console.log("[TopWar 901 collected]", {
         seq: packet.seq,
         pointList: detail.pointList.length,
@@ -8021,7 +8086,9 @@ TOPWAR.clearThiefQueue()
           try {
             const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map ? state.ui.serverSurvey.rewardMap : new Map();
             state.ui.serverSurvey.rewardMap = rewardMap;
-            result.stages.rewardCollect = TOPWAR.collectRewardsFromRecent901(serverId, rewardMap);
+            result.stages.rewardCollect = rewardMap.size > 0
+              ? { mode: "live-901", added: 0, total: rewardMap.size, locations: [...rewardMap.values()] }
+              : TOPWAR.collectRewardsFromRecent901(serverId, rewardMap);
           } catch (error) {
             result.stages.rewardCollect = { ok: false, error: error?.message || String(error) };
             result.errors.push({ stage: "rewardCollect", message: error?.message || String(error) });
@@ -14938,7 +15005,7 @@ ${lastServerListError}`
   function rawPointServerId(point, detail, fallbackServerId) {
     const value = point?.k ?? point?.p?.w ?? point?.p?.cMid ?? detail?.k ?? fallbackServerId;
     const number = Number(value);
-    return Number.isFinite(number) ? number : Number(fallbackServerId);
+    return Number.isFinite(number) && number > 0 ? number : Number(fallbackServerId);
   }
 
   function rewardKey(row) {
