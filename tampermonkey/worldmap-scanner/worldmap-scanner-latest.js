@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.14 - Preserve Existing Rewards
+// @name         TopWar Unified Automation V2.14.17 - Raw CityReward Upload
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.14
+// @version      2.14.17
 // @description  Unified TopWar map/thief/reward survey with per-server map/reward uploads and immediate thief uploads
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -1631,7 +1631,13 @@
       // detail.k는 패킷 메타값일 수 있으므로 point 자체의 서버 정보와 섞지 않는다.
       // point에 서버 정보가 실제로 있을 때만 저장하고, 없으면 수집 시 현재 조사 서버를 사용한다.
       const pointServerIdRaw = Number(point?.k ?? point?.p?.w ?? point?.p?.cMid);
-      const pointServerId = Number.isFinite(pointServerIdRaw) ? pointServerIdRaw : null;
+      const fallbackServerId = scanServerId ??
+        state.ui?.serverSurvey?.current?.serverId ??
+        state.ui?.serverSurveyBatch?.current?.serverId ??
+        range()?.k ?? null;
+      const pointServerId = Number.isFinite(pointServerIdRaw) && pointServerIdRaw > 0
+        ? pointServerIdRaw
+        : (Number(fallbackServerId) > 0 ? Number(fallbackServerId) : null);
       const id = point?.id ?? null;
 
       thieves.push({
@@ -1707,7 +1713,10 @@
       ) {
         integratedSurvey.liveThiefKeys ??= new Set();
         const newThieves = capturedThiefEvent.thieves.filter(thief => {
-          const key = `${Number(thief.serverId ?? integratedSurvey.current?.serverId)}|${thief.id ?? ""}|${thief.x}|${thief.y}`;
+          const resolvedServerId = Number(thief.serverId) > 0
+            ? Number(thief.serverId)
+            : Number(integratedSurvey.current?.serverId);
+          const key = `${resolvedServerId}|${thief.id ?? ""}|${thief.x}|${thief.y}`;
           if (integratedSurvey.liveThiefKeys.has(key)) return false;
           integratedSurvey.liveThiefKeys.add(key);
           return true;
@@ -8024,6 +8033,7 @@ TOPWAR.clearThiefQueue()
       result: null,
       error: null
     };
+    ensureThiefBuffer().activeTargetServerId = serverId;
 
     state.fullScan.running = true;
     state.fullScan.stopRequested = false;
@@ -8229,43 +8239,16 @@ TOPWAR.clearThiefQueue()
             Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0)
           );
           try {
-            // 최초 수집 결과만으로 올리면 빈/만료 cityReward 객체가 오탐으로 남을 수 있다.
-            // 서버 업로드 직전에 후보 좌표를 최신 901로 다시 확인해 실제 존재하는 항목만 보낸다.
-            if (typeof TOPWAR.confirmCityRewardLocations === "function" && locations.length) {
-              state.ui.serverSurvey.current = {
-                phase: "rewardConfirm",
-                serverId,
-                index: 0,
-                total: locations.length
-              };
-              const confirmation = await TOPWAR.confirmCityRewardLocations(serverId, locations, {
-                shouldStop: shouldStopServerSurvey,
-                onProgress: progress => {
-                  state.ui.serverSurvey.current = {
-                    phase: "rewardConfirm",
-                    serverId,
-                    ...progress
-                  };
-                }
-              });
-              result.stages.rewardConfirm = confirmation;
-              if (confirmation?.stopped) {
-                throw new Error("도시보상 재확인 중 조사가 중지되어 전체 스냅샷 업로드를 생략했습니다.");
-              }
-              locations = Array.isArray(confirmation?.locations) ? confirmation.locations : [];
-            }
-
-            // /city-rewards/server는 서버 전체 스냅샷 경로다. 일부 후보 또는 0건을 보내면
-            // 이전에 정상 확인된 보상이 삭제될 수 있으므로 자동 교체 업로드를 하지 않는다.
-            // 백엔드에 명시적인 증분 upsert API가 추가되기 전까지 기존 결과 보존이 우선이다.
-            result.rewardUpload = {
+            // 901에서 관측된 cityReward 원본을 수정하지 않고 서버 완료 시 그대로 전송한다.
+            // endTimeMilli 기반 표시/만료 필터링은 FE가 담당한다.
+            result.rewardUpload = await TOPWAR.uploadRewardServerResults({
               ok: true,
-              skipped: true,
-              preserveExisting: true,
+              completed: true,
               serverId,
-              detected: locations.length,
-              reason: "기존 보상 결과 보존: 전체 교체 업로드 생략"
-            };
+              scannedAt: nowIso(),
+              count: locations.length,
+              locations
+            });
             state.ui.serverSurvey.lastRewardUpload = result.rewardUpload;
           } catch (error) {
             result.rewardUpload = { ok: false, serverId, error: error?.message || String(error) };
@@ -10845,7 +10828,10 @@ ${lastServerListError}`
   }
 
   function normalizeThiefLocation(obj, targetServerId, observedAt = null) {
-    const serverId = Number(obj?.serverId ?? targetServerId);
+    const rawServerId = Number(obj?.serverId);
+    const serverId = Number.isFinite(rawServerId) && rawServerId > 0
+      ? rawServerId
+      : Number(targetServerId);
     if (!Number.isFinite(serverId) || serverId !== Number(targetServerId)) return null;
 
     const x = obj?.x ?? null;
@@ -15041,7 +15027,7 @@ ${lastServerListError}`
   }
 
   function isFreshReward(row, nowMs = Date.now()) {
-    if (!row || !isUsableCityReward(row.cityReward, nowMs)) return false;
+    if (!row || !isCityRewardObject(row.cityReward)) return false;
     const seenMs = rewardTimestampMs(row.cityRewardSeenAt ?? row.foundAt);
     if (seenMs == null) return false;
     return nowMs - seenMs < REWARD_TTL_MS;
@@ -15112,7 +15098,7 @@ ${lastServerListError}`
 
     const playerInfo = parsePlayerInfo(point);
     const cityReward = playerInfo.cityReward;
-    if (!isUsableCityReward(cityReward)) return null;
+    if (!isCityRewardObject(cityReward)) return null;
 
     const p = point?.p || {};
     const x = point?.x ?? null;
@@ -15144,7 +15130,7 @@ ${lastServerListError}`
     if (Number(player.serverId) !== Number(targetServerId)) return null;
 
     const cityReward = player.cityReward;
-    if (!isUsableCityReward(cityReward)) return null;
+    if (!isCityRewardObject(cityReward)) return null;
     if (player.x == null || player.y == null) return null;
 
     return {
@@ -15657,19 +15643,6 @@ ${lastServerListError}`
   async function uploadCompletedServer(serverResult) {
     if (!serverResult?.completed || !serverResult?.ok) {
       return { ok: false, skipped: true, reason: "server scan not completed" };
-    }
-
-    // 이 엔드포인트는 서버 단위 전체 교체일 수 있으므로 자동 조사에서는 기존 결과를
-    // 덮어쓰지 않는다. 관리자가 완전한 스냅샷임을 확인해 명시적으로 허용한 경우만 전송한다.
-    if (serverResult?.allowReplaceExisting !== true) {
-      return {
-        ok: true,
-        skipped: true,
-        preserveExisting: true,
-        serverId: Number(serverResult.serverId),
-        detected: Array.isArray(serverResult.locations) ? serverResult.locations.length : 0,
-        reason: "기존 보상 결과 보존: allowReplaceExisting 미지정"
-      };
     }
 
     const dataHubServerId = Number(serverResult.serverId);
