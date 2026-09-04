@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9 - Integrated Map/Reward/Thief
+// @name         TopWar Unified Automation V2.14.12 - CityReward EndTimeMilli
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9
+// @version      2.14.12
 // @description  Unified TopWar map/thief/reward survey with per-server map/reward uploads and immediate thief uploads
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -8216,10 +8216,36 @@ TOPWAR.clearThiefQueue()
           const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map
             ? state.ui.serverSurvey.rewardMap
             : new Map();
-          const locations = [...rewardMap.values()].sort((a, b) =>
+          let locations = [...rewardMap.values()].sort((a, b) =>
             Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0)
           );
           try {
+            // 최초 수집 결과만으로 올리면 빈/만료 cityReward 객체가 오탐으로 남을 수 있다.
+            // 서버 업로드 직전에 후보 좌표를 최신 901로 다시 확인해 실제 존재하는 항목만 보낸다.
+            if (typeof TOPWAR.confirmCityRewardLocations === "function" && locations.length) {
+              state.ui.serverSurvey.current = {
+                phase: "rewardConfirm",
+                serverId,
+                index: 0,
+                total: locations.length
+              };
+              const confirmation = await TOPWAR.confirmCityRewardLocations(serverId, locations, {
+                shouldStop: shouldStopServerSurvey,
+                onProgress: progress => {
+                  state.ui.serverSurvey.current = {
+                    phase: "rewardConfirm",
+                    serverId,
+                    ...progress
+                  };
+                }
+              });
+              result.stages.rewardConfirm = confirmation;
+              if (confirmation?.stopped) {
+                throw new Error("도시보상 재확인 중 조사가 중지되어 전체 스냅샷 업로드를 생략했습니다.");
+              }
+              locations = Array.isArray(confirmation?.locations) ? confirmation.locations : [];
+            }
+
             result.rewardUpload = await TOPWAR.uploadRewardServerResults({
               ok: true,
               completed: true,
@@ -14950,6 +14976,48 @@ ${lastServerListError}`
     return value !== null && typeof value === "object" && !Array.isArray(value);
   }
 
+  function isUsableCityReward(value, nowMs = Date.now()) {
+    if (!isCityRewardObject(value) || Object.keys(value).length === 0) return false;
+
+    const flatEntries = [];
+    const visit = (node, path = "", depth = 0) => {
+      if (depth > 5 || node == null) return;
+      if (Array.isArray(node)) {
+        node.forEach((item, index) => visit(item, `${path}[${index}]`, depth + 1));
+      } else if (typeof node === "object") {
+        Object.entries(node).forEach(([key, item]) => visit(item, path ? `${path}.${key}` : key, depth + 1));
+      } else {
+        flatEntries.push([path.toLowerCase(), node]);
+      }
+    };
+    visit(value);
+
+    const inactiveStatus = flatEntries.some(([path, raw]) =>
+      /(^|\.)(status|state|active|available|claimed)$/.test(path) &&
+      (/^(expired|inactive|claimed|closed|none|false)$/i.test(String(raw).trim()) || raw === false)
+    );
+    if (inactiveStatus) return false;
+
+    const expiryEntry = flatEntries.find(([path]) =>
+      /(^|\.)(expireat|expiresat|endat|endtime|endtimemilli|expiredtime|expiretime|deadline)$/.test(path)
+    );
+    if (expiryEntry) {
+      const raw = expiryEntry[1];
+      const numeric = Number(raw);
+      const expiryMs = Number.isFinite(numeric)
+        ? (numeric < 1000000000000 ? numeric * 1000 : numeric)
+        : Date.parse(String(raw));
+      if (Number.isFinite(expiryMs) && expiryMs <= nowMs) return false;
+    }
+
+    // 키만 있고 값이 전부 null/false/0/빈 문자열인 객체는 비활성 placeholder다.
+    return flatEntries.some(([, raw]) =>
+      raw === true ||
+      (typeof raw === "number" && Number.isFinite(raw) && raw > 0) ||
+      (typeof raw === "string" && raw.trim() !== "" && raw.trim() !== "0")
+    );
+  }
+
   function rewardTimestampMs(value) {
     if (value == null || value === "") return null;
     if (typeof value === "number") {
@@ -14961,7 +15029,7 @@ ${lastServerListError}`
   }
 
   function isFreshReward(row, nowMs = Date.now()) {
-    if (!row || !isCityRewardObject(row.cityReward)) return false;
+    if (!row || !isUsableCityReward(row.cityReward, nowMs)) return false;
     const seenMs = rewardTimestampMs(row.cityRewardSeenAt ?? row.foundAt);
     if (seenMs == null) return false;
     return nowMs - seenMs < REWARD_TTL_MS;
@@ -15031,7 +15099,7 @@ ${lastServerListError}`
 
     const playerInfo = parsePlayerInfo(point);
     const cityReward = playerInfo.cityReward;
-    if (!isCityRewardObject(cityReward)) return null;
+    if (!isUsableCityReward(cityReward)) return null;
 
     const p = point?.p || {};
     const x = point?.x ?? null;
@@ -15063,7 +15131,7 @@ ${lastServerListError}`
     if (Number(player.serverId) !== Number(targetServerId)) return null;
 
     const cityReward = player.cityReward;
-    if (!isCityRewardObject(cityReward)) return null;
+    if (!isUsableCityReward(cityReward)) return null;
     if (player.x == null || player.y == null) return null;
 
     return {
@@ -15195,6 +15263,117 @@ ${lastServerListError}`
       cityReward: JSON.stringify(row.cityReward)
     })));
     return rows;
+  }
+
+  async function confirmCityRewardLocations(serverId, candidates, options = {}) {
+    const targetServerId = Number(serverId);
+    const source = Array.isArray(candidates) ? candidates : [];
+    const confirmed = [];
+    const rejected = [];
+
+    for (let index = 0; index < source.length; index++) {
+      if (typeof options.shouldStop === "function" && options.shouldStop()) break;
+
+      const candidate = source[index];
+      const x = Number(candidate?.x);
+      const y = Number(candidate?.y);
+      options.onProgress?.({ index: index + 1, total: source.length, x, y });
+
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        rejected.push({ candidate, reason: "invalid coordinate" });
+        continue;
+      }
+
+      const candidateUid = candidate?.uid != null ? String(candidate.uid) : null;
+      const candidatePointId = candidate?.pointId != null ? String(candidate.pointId) : null;
+      if (!candidateUid && !candidatePointId) {
+        rejected.push({ candidate, reason: "stable identity missing" });
+        continue;
+      }
+
+      const requiredConfirmations = Math.max(2, Number(options.requiredConfirmations ?? 2));
+      const confirmationRows = [];
+      let failureReason = null;
+
+      for (let attempt = 1; attempt <= requiredConfirmations; attempt++) {
+        if (typeof options.shouldStop === "function" && options.shouldStop()) break;
+        const confirmStartedMs = Date.now();
+        let moveResult = null;
+
+        try {
+          moveResult = await TOPWAR.moveMapToStableUnified(x, y, {
+            serverId: targetServerId,
+            afterMoveWait: options.afterMoveWait ?? 250,
+            wait901Timeout: options.wait901Timeout ?? 3000,
+            quietMs: options.quietMs ?? 450,
+            maxRetries: options.maxRetries ?? 2,
+            retryDelay: options.retryDelay ?? 350,
+            collectCache: false
+          });
+        } catch (error) {
+          failureReason = error?.message || String(error);
+          break;
+        }
+
+        if (!moveResult?.ok) {
+          failureReason = `confirmation move failed (${attempt}/${requiredConfirmations})`;
+          break;
+        }
+
+        const records = typeof TOPWAR.byC === "function" ? (TOPWAR.byC(901) || []) : [];
+        let rowForAttempt = null;
+        for (let recordIndex = records.length - 1; recordIndex >= 0 && !rowForAttempt; recordIndex--) {
+          const record = records[recordIndex];
+          const recordMs = Date.parse(String(record?.time ?? ""));
+          if (!Number.isFinite(recordMs) || recordMs < confirmStartedMs) continue;
+          const decoded = record?.packet?.decoded;
+          const detail = decoded?.parsedDetail ?? decoded?.detail ?? null;
+          if (!Array.isArray(detail?.pointList)) continue;
+
+          for (const point of detail.pointList) {
+            if (Number(point?.pointType) !== 1 || Number(point?.x) !== x || Number(point?.y) !== y) continue;
+            const row = normalizeRawRewardPoint(point, detail, targetServerId, record);
+            if (!row) continue;
+            const rowUid = row.uid != null ? String(row.uid) : null;
+            const rowPointId = row.pointId != null ? String(row.pointId) : null;
+            if (candidateUid && rowUid !== candidateUid) continue;
+            if (candidatePointId && rowPointId !== candidatePointId) continue;
+            rowForAttempt = row;
+            break;
+          }
+        }
+
+        if (!rowForAttempt) {
+          failureReason = `not present in fresh 901 (${attempt}/${requiredConfirmations})`;
+          break;
+        }
+        confirmationRows.push(rowForAttempt);
+        if (attempt < requiredConfirmations) await TOPWAR.sleep(Number(options.betweenConfirmationsMs ?? 700));
+      }
+
+      const fingerprints = new Set(confirmationRows.map(row => JSON.stringify(row.cityReward)));
+      if (confirmationRows.length === requiredConfirmations && fingerprints.size === 1) {
+        confirmed.push(confirmationRows.at(-1));
+      } else {
+        rejected.push({
+          candidate,
+          reason: failureReason || "reward changed between confirmations",
+          confirmations: confirmationRows.length,
+          requiredConfirmations
+        });
+      }
+    }
+
+    return {
+      ok: true,
+      serverId: targetServerId,
+      candidateCount: source.length,
+      confirmedCount: confirmed.length,
+      rejectedCount: rejected.length,
+      stopped: typeof options.shouldStop === "function" && options.shouldStop(),
+      locations: confirmed,
+      rejected
+    };
   }
 
   async function scanRewardServer(serverId, options = {}) {
@@ -15950,6 +16129,7 @@ ${lastServerListError}`
     stopRewardFinder,
     rewardFinderStatus,
     rewardFinderTable,
+    confirmCityRewardLocations,
     rewardTtlMs: REWARD_TTL_MS,
     pruneExpiredCityRewards() {
       const reward = ensureRewardState();
