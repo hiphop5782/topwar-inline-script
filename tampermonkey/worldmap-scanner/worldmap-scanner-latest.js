@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.2 - Live 901 Reward Capture
+// @name         TopWar Unified Automation V2.14.9.3 - Reward End-Time Validation
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.2
+// @version      2.14.9.3
 // @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with UID-based map movement detection
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -1765,6 +1765,9 @@
             allianceTag: normalized.allianceTag ?? null,
             pointId: normalized.id ?? point?.id ?? null,
             cityReward,
+            cityRewardCreatedAt: Number.isFinite(Number(cityReward?.endTimeMilli))
+              ? new Date(Number(cityReward.endTimeMilli) - 30 * 60 * 1000).toISOString()
+              : null,
             cityRewardSeenAt: record.time,
             foundAt: record.time
           };
@@ -8222,7 +8225,9 @@ TOPWAR.clearThiefQueue()
 
         if (surveyOptions.includeRewards === true && typeof TOPWAR.uploadRewardServerResults === "function") {
           const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map ? state.ui.serverSurvey.rewardMap : new Map();
-          const locations = [...rewardMap.values()].sort((a, b) => Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0));
+          const locations = [...rewardMap.values()]
+            .filter(row => typeof TOPWAR.isFreshCityReward !== "function" || TOPWAR.isFreshCityReward(row))
+            .sort((a, b) => Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0));
           try {
             result.rewardUpload = await TOPWAR.uploadRewardServerResults({ ok: true, completed: true, serverId, scannedAt: nowIso(), count: locations.length, locations });
             state.ui.serverSurvey.lastRewardUpload = result.rewardUpload;
@@ -14935,7 +14940,8 @@ ${lastServerListError}`
     return reward;
   }
 
-  const REWARD_TTL_MS = 33 * 60 * 1000;
+  const REWARD_DURATION_MS = 30 * 60 * 1000;
+  const REWARD_TTL_MS = REWARD_DURATION_MS;
 
   function isCityRewardObject(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -14953,6 +14959,8 @@ ${lastServerListError}`
 
   function isFreshReward(row, nowMs = Date.now()) {
     if (!row || !isCityRewardObject(row.cityReward)) return false;
+    const endMs = rewardTimestampMs(row.cityReward.endTimeMilli);
+    if (endMs != null) return nowMs < endMs;
     const seenMs = rewardTimestampMs(row.cityRewardSeenAt ?? row.foundAt);
     if (seenMs == null) return false;
     return nowMs - seenMs < REWARD_TTL_MS;
@@ -15044,6 +15052,9 @@ ${lastServerListError}`
       allianceTag: p?.a_tag ?? playerInfo?.a_tag ?? playerInfo?.allianceTag ?? null,
       pointId: point?.id ?? null,
       cityReward,
+      cityRewardCreatedAt: rewardTimestampMs(cityReward.endTimeMilli) != null
+        ? new Date(rewardTimestampMs(cityReward.endTimeMilli) - REWARD_DURATION_MS).toISOString()
+        : null,
       cityRewardSeenAt: packetRecord?.time ?? nowIso(),
       foundAt: packetRecord?.time ?? nowIso()
     };
@@ -15068,6 +15079,9 @@ ${lastServerListError}`
       allianceTag: player.allianceTag ?? null,
       pointId: player.pointId ?? player.id ?? null,
       cityReward,
+      cityRewardCreatedAt: rewardTimestampMs(cityReward.endTimeMilli) != null
+        ? new Date(rewardTimestampMs(cityReward.endTimeMilli) - REWARD_DURATION_MS).toISOString()
+        : null,
       cityRewardSeenAt: player.cityRewardSeenAt ?? player.time ?? null,
       foundAt: player.cityRewardSeenAt ?? player.time ?? nowIso()
     };
@@ -15935,6 +15949,7 @@ ${lastServerListError}`
   Object.assign(TOPWAR, {
     __cityRewardFinderV19Installed: true,
     parseRewardServerIds,
+    isFreshCityReward: isFreshReward,
     collectRewardsFromRecent901,
     scanCityRewardServer: scanRewardServer,
     runRewardFinder,
