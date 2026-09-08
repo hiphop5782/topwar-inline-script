@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.3 - Reward End-Time Validation
+// @name         TopWar Unified Automation V2.14.9.5 - Memory Gauge
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.3
-// @description  Unified TopWar map/thief/reward survey + RealPower ranking survey with UID-based map movement detection
+// @version      2.14.9.5
+// @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -820,6 +820,21 @@
         "与服务器连接失败",
         "サーバーとの接続に失敗しました"
       ]
+    },
+
+    memoryMonitor: {
+      enabled: true,
+      supported: typeof performance?.memory?.usedJSHeapSize === "number",
+      threshold: 0.9,
+      sampleIntervalMs: 10 * 1000,
+      repeatLogIntervalMs: 60 * 1000,
+      maxStoredLogs: 50,
+      timerId: null,
+      startedAt: null,
+      lastSample: null,
+      lastLoggedAt: 0,
+      overThreshold: false,
+      unsupportedLogged: false
     }
   };
 
@@ -2546,6 +2561,180 @@
     };
   }
 
+  const MEMORY_WARNING_STORAGE_KEY = "TOPWAR_MEMORY_WARNING_LOGS_V1";
+
+  function formatMemoryBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return null;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function getStoredMemoryWarnings() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(MEMORY_WARNING_STORAGE_KEY) || "[]");
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function getMemoryUsageSnapshot() {
+    const memory = performance?.memory;
+    if (!memory || !Number.isFinite(Number(memory.usedJSHeapSize)) || !Number.isFinite(Number(memory.jsHeapSizeLimit))) {
+      return {
+        supported: false,
+        sampledAt: new Date().toISOString(),
+        reason: "performance.memory is unavailable in this browser"
+      };
+    }
+
+    const usedBytes = Number(memory.usedJSHeapSize);
+    const totalBytes = Number(memory.totalJSHeapSize);
+    const limitBytes = Number(memory.jsHeapSizeLimit);
+    const ratio = limitBytes > 0 ? usedBytes / limitBytes : 0;
+    const survey = state.ui?.serverSurvey;
+    const batch = state.ui?.serverSurveyBatch;
+
+    return {
+      supported: true,
+      sampledAt: new Date().toISOString(),
+      ratio,
+      percent: Number((ratio * 100).toFixed(1)),
+      usedBytes,
+      used: formatMemoryBytes(usedBytes),
+      totalBytes,
+      total: formatMemoryBytes(totalBytes),
+      limitBytes,
+      limit: formatMemoryBytes(limitBytes),
+      automation: {
+        fullScanRunning: state.fullScan?.running === true,
+        fullScanPhase: state.fullScan?.phase ?? null,
+        surveyRunning: survey?.running === true,
+        surveyCurrent: survey?.current ?? null,
+        batchRunning: batch?.running === true,
+        batchCurrent: batch?.current ?? null,
+        watch133Running: state.watch133?.running === true
+      },
+      retained: {
+        players: state.playerMap?.size ?? 0,
+        alliances: state.allianceMap?.size ?? 0,
+        allianceRepresentatives: state.allianceRepresentativeMap?.size ?? 0,
+        members: state.memberMap?.size ?? 0,
+        allianceDetails: state.allianceDetailMap?.size ?? 0,
+        objects: state.objectMap?.size ?? 0,
+        recentPackets: state.recentPackets?.length ?? 0,
+        recentOutgoing: state.recentOutgoing?.length ?? 0,
+        thiefEvents: state.thiefBuffer?.events?.length ?? 0,
+        thiefQueue: state.thiefQueue?.length ?? 0,
+        pendingThiefShares: state.pendingThiefShares?.length ?? 0,
+        batchResults: batch?.results?.length ?? 0,
+        batchCycles: batch?.cycles?.length ?? 0
+      }
+    };
+  }
+
+  function persistMemoryWarning(snapshot) {
+    const monitor = state.memoryMonitor;
+    const logs = getStoredMemoryWarnings();
+    logs.push(snapshot);
+    const limit = Math.max(1, Number(monitor.maxStoredLogs) || 50);
+    if (logs.length > limit) logs.splice(0, logs.length - limit);
+    try {
+      localStorage.setItem(MEMORY_WARNING_STORAGE_KEY, JSON.stringify(logs));
+    } catch (error) {
+      topwarLogControl.original.warn("[TopWar Memory] 경고 로그 localStorage 저장 실패:", error);
+    }
+    return logs;
+  }
+
+  function sampleMemoryUsage(options = {}) {
+    const monitor = state.memoryMonitor;
+    const snapshot = getMemoryUsageSnapshot();
+    monitor.lastSample = snapshot;
+    monitor.supported = snapshot.supported;
+
+    if (!snapshot.supported) {
+      if (!monitor.unsupportedLogged || options.forceLog === true) {
+        monitor.unsupportedLogged = true;
+        topwarLogControl.original.warn("[TopWar Memory] 이 브라우저는 performance.memory를 제공하지 않아 JS 힙 감시를 사용할 수 없습니다.");
+      }
+      return snapshot;
+    }
+
+    const now = Date.now();
+    const isOver = snapshot.ratio >= Number(monitor.threshold || 0.9);
+    const shouldLog = options.forceLog === true || (isOver && (
+      !monitor.overThreshold || now - monitor.lastLoggedAt >= Number(monitor.repeatLogIntervalMs || 60000)
+    ));
+
+    if (shouldLog) {
+      snapshot.thresholdPercent = Number((Number(monitor.threshold || 0.9) * 100).toFixed(1));
+      snapshot.trigger = options.forceLog === true ? "manual" : (monitor.overThreshold ? "still-over-threshold" : "threshold-crossed");
+      persistMemoryWarning(snapshot);
+      monitor.lastLoggedAt = now;
+      topwarLogControl.original.warn(
+        `[TopWar Memory] JS 힙 ${snapshot.percent}% (${snapshot.used} / ${snapshot.limit})`,
+        snapshot
+      );
+    }
+
+    monitor.overThreshold = isOver;
+    return snapshot;
+  }
+
+  function memoryMonitorStatus() {
+    return {
+      ...state.memoryMonitor,
+      storedWarningCount: getStoredMemoryWarnings().length,
+      timerId: state.memoryMonitor.timerId ? "running" : null
+    };
+  }
+
+  function configureMemoryMonitor(options = {}) {
+    const monitor = state.memoryMonitor;
+    if (options.enabled != null) monitor.enabled = options.enabled === true;
+    if (Number.isFinite(Number(options.threshold))) {
+      monitor.threshold = Math.min(1, Math.max(0.01, Number(options.threshold)));
+    }
+    if (Number.isFinite(Number(options.sampleIntervalMs))) {
+      monitor.sampleIntervalMs = Math.max(1000, Number(options.sampleIntervalMs));
+    }
+    if (Number.isFinite(Number(options.repeatLogIntervalMs))) {
+      monitor.repeatLogIntervalMs = Math.max(1000, Number(options.repeatLogIntervalMs));
+    }
+    if (Number.isFinite(Number(options.maxStoredLogs))) {
+      monitor.maxStoredLogs = Math.max(1, Math.floor(Number(options.maxStoredLogs)));
+    }
+    return startMemoryMonitor();
+  }
+
+  function stopMemoryMonitor() {
+    const monitor = state.memoryMonitor;
+    if (monitor.timerId) clearInterval(monitor.timerId);
+    monitor.timerId = null;
+    return memoryMonitorStatus();
+  }
+
+  function startMemoryMonitor() {
+    const monitor = state.memoryMonitor;
+    stopMemoryMonitor();
+    if (!monitor.enabled) return memoryMonitorStatus();
+    monitor.startedAt = new Date().toISOString();
+    sampleMemoryUsage();
+    if (!monitor.supported) return memoryMonitorStatus();
+    monitor.timerId = setInterval(() => {
+      try { sampleMemoryUsage(); } catch (error) {
+        topwarLogControl.original.warn("[TopWar Memory] 메모리 샘플링 실패:", error);
+      }
+    }, monitor.sampleIntervalMs);
+    return memoryMonitorStatus();
+  }
+
+  function clearMemoryWarnings() {
+    try { localStorage.removeItem(MEMORY_WARNING_STORAGE_KEY); } catch {}
+    return [];
+  }
+
   function clearCollected(options = {}) {
     state.objectMap = new Map();
     state.objectsByType = {};
@@ -4131,6 +4320,14 @@ TOPWAR.clearThiefQueue()
 
     clearCollected,
     trimRuntimeMemory,
+    memoryUsage: getMemoryUsageSnapshot,
+    sampleMemoryUsage,
+    memoryMonitorStatus,
+    memoryWarningLogs: getStoredMemoryWarnings,
+    clearMemoryWarnings,
+    configureMemoryMonitor,
+    startMemoryMonitor,
+    stopMemoryMonitor,
     exportUnifiedMapData,
     exportPlayersOnly,
 
@@ -4209,6 +4406,7 @@ TOPWAR.clearThiefQueue()
   });
 
   startConnectionGuardMonitor();
+  startMemoryMonitor();
   setInterval(() => {
     try { trimRuntimeMemory(); } catch {}
   }, 30 * 1000);
@@ -8713,6 +8911,12 @@ TOPWAR.clearThiefQueue()
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
         <span>TOPWAR</span>
+        <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
+          <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
+            <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
+          </span>
+          <span id="tw26-memory-percent" style="min-width:31px;text-align:right;font-variant-numeric:tabular-nums;">--</span>
+        </span>
         <span id="tw26-fold" style="font-size:11px;color:#aaa;">접기</span>
       </div>
 
@@ -8789,7 +8993,7 @@ TOPWAR.clearThiefQueue()
       "left:-30px",
       "top:12px",
       "width:30px",
-      "height:44px",
+      "height:58px",
       "padding:0",
       "border:1px solid rgba(255,255,255,0.3)",
       "border-right:0",
@@ -8798,7 +9002,7 @@ TOPWAR.clearThiefQueue()
       "color:#fff",
       "font-size:14px",
       "font-weight:800",
-      "line-height:44px",
+      "line-height:1",
       "text-align:center",
       "cursor:pointer",
       "box-shadow:-3px 3px 10px rgba(0,0,0,0.3)",
@@ -8814,15 +9018,63 @@ TOPWAR.clearThiefQueue()
       panelOpened = localStorage.getItem(PANEL_STORAGE_KEY) === "true";
     } catch {}
 
+    function memoryGaugeModel() {
+      const snapshot = state.memoryMonitor?.lastSample || TOPWAR.memoryUsage?.();
+      if (!snapshot?.supported) return { percent: null, width: 0, color: "#777", text: "--" };
+      const percent = Math.max(0, Math.min(100, Number(snapshot.percent) || 0));
+      return {
+        percent,
+        width: percent,
+        color: percent >= 90 ? "#ff5252" : percent >= 75 ? "#ffb300" : "#42b883",
+        text: `${percent.toFixed(0)}%`,
+        title: `JavaScript 힙 ${snapshot.used} / ${snapshot.limit}`
+      };
+    }
+
+    function renderMemoryGauge() {
+      const gauge = memoryGaugeModel();
+      const fill = panel.querySelector("#tw26-memory-fill");
+      const percent = panel.querySelector("#tw26-memory-percent");
+      const headerGauge = panel.querySelector("#tw26-memory-gauge");
+      const miniFill = panel.querySelector("#tw26-mini-memory-fill");
+      const miniPercent = panel.querySelector("#tw26-mini-memory-percent");
+      if (fill) {
+        fill.style.width = `${gauge.width}%`;
+        fill.style.background = gauge.color;
+      }
+      if (percent) {
+        percent.textContent = gauge.text;
+        percent.style.color = gauge.color;
+      }
+      if (headerGauge) headerGauge.title = gauge.title || "JavaScript 힙 메모리 정보를 지원하지 않는 브라우저입니다";
+      if (miniFill) {
+        miniFill.style.width = `${gauge.width}%`;
+        miniFill.style.background = gauge.color;
+      }
+      if (miniPercent) {
+        miniPercent.textContent = gauge.text;
+        miniPercent.style.color = gauge.color;
+      }
+      slideToggleButton.title = `${panelOpened ? "자동화 패널 숨기기" : "자동화 패널 열기"} · ${gauge.title || "메모리 정보 없음"}`;
+    }
+
     function updatePanelVisibility() {
       panel.style.transform = panelOpened
         ? "translateX(0)"
         : `translateX(calc(100% + ${PANEL_RIGHT_GAP}px))`;
 
-      slideToggleButton.textContent = panelOpened ? "▶" : "◀";
-      slideToggleButton.title = panelOpened ? "자동화 패널 숨기기" : "자동화 패널 열기";
-      slideToggleButton.setAttribute("aria-label", slideToggleButton.title);
+      slideToggleButton.innerHTML = `
+        <span style="display:flex;height:100%;flex-direction:column;align-items:center;justify-content:center;gap:6px;">
+          <span style="font-size:13px;line-height:1;">${panelOpened ? "▶" : "◀"}</span>
+          <span style="display:block;width:20px;height:4px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.18);">
+            <span id="tw26-mini-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
+          </span>
+          <span id="tw26-mini-memory-percent" style="font-size:8px;line-height:1;font-variant-numeric:tabular-nums;color:#aaa;">--</span>
+        </span>
+      `;
       slideToggleButton.setAttribute("aria-expanded", String(panelOpened));
+      renderMemoryGauge();
+      slideToggleButton.setAttribute("aria-label", slideToggleButton.title);
 
       try {
         localStorage.setItem(PANEL_STORAGE_KEY, String(panelOpened));
@@ -9927,6 +10179,7 @@ TOPWAR.clearThiefQueue()
 
     function render() {
       ensureState();
+      renderMemoryGauge();
 
       const watch = state.watch133 || {};
       const survey = state.ui.serverSurvey || {};
