@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.18 - Forced Top100 Season Survey
+// @name         TopWar Unified Automation V2.14.9.22 - Mandatory Fresh Season Survey
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.18
+// @version      2.14.9.22
 // @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -378,6 +378,26 @@
     if (!response.ok) {
       const error = new Error(`DataHub HTTP ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
       error.status = response.status;
+      error.responseBody = body;
+      error.requestType = row.type;
+      error.queueKey = row.queueKey;
+      console.error("[TopWar DataHub] request rejected:", {
+        status: response.status,
+        type: row.type,
+        queueKey: row.queueKey,
+        requestId: row.requestId,
+        response: body,
+        seasonalSummary: row.type === "serverList" ? {
+          kind: row.payload?.kind,
+          schemaVersion: row.payload?.schemaVersion,
+          seasons: Object.keys(row.payload?.seasons || {}),
+          totalServers: row.payload?.totalServers,
+          allServers: row.payload?.allServers?.length,
+          automationServerIds: row.payload?.automationServerIds?.length,
+          mapServerIds: row.payload?.mapServerIds?.length,
+          mapExcludedServerIds: row.payload?.mapExcludedServerIds?.length
+        } : null
+      });
       throw error;
     }
     return body;
@@ -404,7 +424,9 @@
             status,
             type: row.type,
             queueKey: row.queueKey,
-            requestId: row.requestId
+            requestId: row.requestId,
+            error: error?.message,
+            response: error?.responseBody
           });
           continue;
         }
@@ -4992,16 +5014,17 @@ TOPWAR.clearThiefQueue()
 
       const allServers = [...new Set(Object.values(seasons).flatMap(item => item.servers))]
         .sort((a, b) => a - b);
-      const automationServerIds = [...new Set(
-        Object.values(seasons)
-          .filter(item => item.excludedFromAutomation !== true)
-          .flatMap(item => item.servers)
-      )].sort((a, b) => a - b);
+      const entryIds = new Set(Object.values(seasons)
+        .filter(item => item.excludedFromAutomation === true)
+        .flatMap(item => item.servers));
+      const specialIds = new Set(Object.values(seasons)
+        .flatMap(item => [...(item.groups?.aurora || []), ...(item.groups?.eternalLand || [])]));
+      const automationServerIds = allServers.filter(id => !entryIds.has(id));
       const mapServerIds = [...new Set(
         Object.values(seasons)
           .filter(item => item.excludedFromAutomation !== true)
           .flatMap(item => item.groups?.normal || [])
-      )].sort((a, b) => a - b);
+      )].filter(id => !entryIds.has(id) && !specialIds.has(id)).sort((a, b) => a - b);
       const mapExcludedServerIds = allServers.filter(id => !mapServerIds.includes(id));
       if (!allServers.length) throw new Error("시즌별 서버 목록에서 서버 번호를 찾지 못했습니다.");
       return {
@@ -5106,7 +5129,7 @@ TOPWAR.clearThiefQueue()
           subgroups[groupName][subgroupId] = sortIds(ids);
         }
       }
-      const servers = [groups.normal, groups.aurora, groups.eternalLand].flat();
+      const servers = [...new Set([groups.normal, groups.aurora, groups.eternalLand].flat())];
       seasons[seasonName] = {
         count: servers.length,
         servers,
@@ -5115,13 +5138,17 @@ TOPWAR.clearThiefQueue()
         excludedFromAutomation: season?.excludedFromAutomation === true
       };
     }
-    const allServers = Object.values(seasons).flatMap(season => season.servers);
-    const automationServerIds = Object.values(seasons)
+    const allServers = [...new Set(Object.values(seasons).flatMap(season => season.servers))];
+    const entryIds = new Set(Object.values(seasons)
+      .filter(season => season.excludedFromAutomation === true)
+      .flatMap(season => season.servers));
+    const specialIds = new Set(Object.values(seasons)
+      .flatMap(season => [...(season.groups?.aurora || []), ...(season.groups?.eternalLand || [])]));
+    const automationServerIds = allServers.filter(id => !entryIds.has(id));
+    const mapServerIds = [...new Set(Object.values(seasons)
       .filter(season => season.excludedFromAutomation !== true)
-      .flatMap(season => season.servers);
-    const mapServerIds = Object.values(seasons)
-      .filter(season => season.excludedFromAutomation !== true)
-      .flatMap(season => season.groups?.normal || []);
+      .flatMap(season => season.groups?.normal || []))]
+      .filter(id => !entryIds.has(id) && !specialIds.has(id));
     const mapAllowed = new Set(mapServerIds.map(String));
     return {
       schemaVersion: 4,
@@ -9852,10 +9879,13 @@ TOPWAR.clearThiefQueue()
       try {
         survey = await TOPWAR.loadRemoteServerList?.({
           force: true,
-          allowCacheOnFail: true,
+          allowCacheOnFail: false,
           uploadToServer: true,
           debug: true
         });
+        if (!survey?.seasons || survey.cached === true || survey.stale === true) {
+          throw new Error("Top100 시작 전 최신 시즌 패널 조사가 완료되지 않았습니다.");
+        }
       } catch (error) {
         lastServerListError = error?.message || String(error);
         throw error;
@@ -9863,12 +9893,13 @@ TOPWAR.clearThiefQueue()
         serverListLoading = false;
         render();
       }
-      survey ||= TOPWAR.getCachedRemoteServerList?.();
       const allIds = parseServerIdsStrict(survey?.allServers || []);
+      if (!allIds.length) {
+        throw new Error("Top100 시작 전 시즌 패널 조사 결과가 비어 있습니다.");
+      }
       const ordered = applyServerOrder(allIds, getServerOrderMode());
-      console.log("[TopWar V2.14.9.18 UI] Top100 전체 서버 선택:", {
+      console.log("[TopWar V2.14.9.22 UI] 최신 시즌 분류 서버 조사 완료:", {
         count: ordered.length,
-        entryAndSpecialIncluded: true,
         first: ordered.slice(0, 20)
       });
       return ordered;
@@ -18274,19 +18305,15 @@ function initializeAllServerQueue(options = {}) {
   const requestedIds = Array.isArray(options.serverIds)
     ? options.serverIds.map(Number).filter(Number.isFinite)
     : [];
-  // Top100은 지도를 열지 않으므로 엔트리/오로라/영원의 땅을 포함한 전체 서버가 대상이다.
-  const seasonIds = window.TOPWAR?.getCachedRemoteServerList?.()?.allServers ?? [];
-  const sourceIds = requestedIds.length ? requestedIds : seasonIds;
-  const servers = sourceIds.length
-    ? orderRealPowerServers(createQueueFromServerIds(sourceIds), { ...options, serverOrderMode: mode })
+  // Top100의 전체 원본은 시즌 이전 대상 목록이 아니라 WorldServerListPanel.m_data이다.
+  const servers = requestedIds.length
+    ? orderRealPowerServers(createQueueFromServerIds(requestedIds), { ...options, serverOrderMode: mode })
     : orderRealPowerServers(getAllServers2(), { ...options, serverOrderMode: mode });
   const queue = saveServerQueue(servers, {
     status: "ready",
     source: requestedIds.length
-      ? `seasonal-or-explicit-server-ids:${mode}`
-      : seasonIds.length
-        ? `seasonal-server-cache:${mode}`
-        : `WorldServerListPanel.m_data:${mode}`,
+      ? `WorldServerListPanel.m_data-passed:${mode}`
+      : `WorldServerListPanel.m_data:${mode}`,
     allServers: true,
     serverOrderMode: mode,
     total: servers.length,
@@ -25237,12 +25264,23 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     const normalized = ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
 
-    // Top100은 실제 지도를 조사하지 않으므로 모든 시즌/그룹 서버를 포함한다.
+    // 시즌 패널은 분류/인기순 데이터를 갱신하기 위해 조사한다.
+    // Top100 대상 자체는 반드시 WorldServerListPanel.m_data 전체에서 가져온다.
+    let seasonalIds = [];
     let serverIds = [];
     try {
-      serverIds = await tw?.resolveTop100ServerIds?.() ||
+      seasonalIds = await tw?.resolveTop100ServerIds?.() ||
         tw?.getCachedRemoteServerList?.()?.allServers ||
         [];
+      const rows = rp()?.getAllServers2?.() || [];
+      serverIds = rows
+        .map(row => Number(row?.serverNumber ?? row?.serverId ?? row?.server))
+        .filter(id => Number.isFinite(id) && id > 0);
+      console.log("[REALPOWER Unified UI] Top100 전체 서버 목록:", {
+        worldServerCount: serverIds.length,
+        seasonalServerCount: seasonalIds.length,
+        source: "WorldServerListPanel.m_data"
+      });
     }
     catch (error) { console.warn("[REALPOWER Unified UI] 시즌별 서버목록 준비 실패:", error); }
 
@@ -25272,7 +25310,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     const { mode: serverOrderMode, serverIds } = await resolveSharedServerOrderMode();
     if (!serverIds.length) {
-      alert("시즌별 서버목록을 읽지 못했습니다. 월드맵에서 서버 목록 창을 연 뒤 다시 시도하세요.");
+      alert("전체 서버목록을 읽지 못했습니다. 월드맵에서 서버 목록 창을 연 뒤 다시 시도하세요.");
       return;
     }
 
@@ -25301,7 +25339,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     const { mode: serverOrderMode, serverIds } = await resolveSharedServerOrderMode();
     if (!serverIds.length) {
-      alert("시즌별 서버목록을 읽지 못했습니다. 월드맵에서 서버 목록 창을 연 뒤 다시 시도하세요.");
+      alert("전체 서버목록을 읽지 못했습니다. 월드맵에서 서버 목록 창을 연 뒤 다시 시도하세요.");
       return;
     }
     try { topwar()?.clearCollected?.({ keepWatch: true }); } catch {}
