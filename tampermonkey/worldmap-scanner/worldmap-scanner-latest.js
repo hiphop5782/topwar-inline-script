@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.22 - Mandatory Fresh Season Survey
+// @name         TopWar Unified Automation V2.14.9.23 - GitHub Map Lists / Top100 Season Survey
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.22
+// @version      2.14.9.23
 // @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -4627,18 +4627,16 @@ TOPWAR.clearThiefQueue()
 
   ensureState();
 
-  // 서버 목록의 원본은 게임 내 TransferServerListPanelNew에서 시즌별로 직접 수집합니다.
-  // 기존 소비처 호환을 위해 시즌별 객체와 함께 평탄화한 serverIds 배열도 계속 저장합니다.
+  // 일반 자동화(보상조회/지도조사/지도+보상)의 최초 서버 목록은 아래 GitHub JSON만 사용합니다.
+  // 게임 내 TransferServerListPanelNew 시즌 조사는 Top100 시작 경로에서만 호출합니다.
   // 중요: @grant none을 유지해야 TopWar 페이지 컨텍스트의 window.NWorldController/WebSocket을 정상적으로 볼 수 있습니다.
-  const REMOTE_SERVER_LIST_DEFAULT_URL = "https://cdn.jsdelivr.net/gh/hiphop5782/topwar-webutil-vite/src/assets/json/servers/servers-popular.json";
-  const REMOTE_SERVER_LIST_FALLBACK_URLS = [
-    REMOTE_SERVER_LIST_DEFAULT_URL,
-    "https://cdn.jsdelivr.net/gh/hiphop5782/topwar-webutil-vite@main/src/assets/json/servers/servers-popular.json",
-    "https://cdn.jsdelivr.net/gh/hiphop5782/topwar-webutil-vite@master/src/assets/json/servers/servers-popular.json",
-    "https://raw.githubusercontent.com/hiphop5782/topwar-webutil-vite/main/src/assets/json/servers/servers-popular.json",
-    "https://raw.githubusercontent.com/hiphop5782/topwar-webutil-vite/master/src/assets/json/servers/servers-popular.json"
-  ];
-  const REMOTE_SERVER_LIST_CACHE_KEY = "TOPWAR_SEASON_SERVER_LIST_CACHE_V7";
+  const REMOTE_SERVER_LIST_DEFAULT_URL = "https://raw.githubusercontent.com/hiphop5782/topwar-json/main/servers/servers-object-compact.json";
+  const REMOTE_SERVER_FILES = Object.freeze({
+    normal: "servers-object.json",
+    popular: "servers-object-popular.json",
+    compact: "servers-object-compact.json"
+  });
+  const REMOTE_SERVER_LIST_CACHE_KEY = "TOPWAR_GITHUB_SERVER_LIST_CACHE_V1";
 
   function findSeasonSurveyNodeByName(root, target) {
     if (!root) return null;
@@ -5084,9 +5082,9 @@ TOPWAR.clearThiefQueue()
     const safeIds = parseServerIdsStrict(survey?.mapServerIds || []);
     if (serverIds == null) return safeIds;
     const requested = parseServerIdsStrict(serverIds);
-    // 실제 지도 기능은 시즌 분류를 확인할 수 없으면 실행하지 않는다.
-    // 직접 입력으로 엔트리/오로라/영원의 땅 서버가 우회되는 것도 차단한다.
-    if (!survey?.seasons) return [];
+    // 실제 지도 기능은 GitHub 기준 허용 목록이 없으면 실행하지 않는다.
+    // 직접 입력으로도 엔트리/오로라/영원의 땅 서버를 우회할 수 없다.
+    if (!safeIds.length) return [];
     const allowed = new Set(safeIds.map(String));
     const filtered = requested.filter(id => allowed.has(String(id)));
     const excluded = requested.filter(id => !allowed.has(String(id)));
@@ -5251,6 +5249,61 @@ TOPWAR.clearThiefQueue()
     return result;
   }
 
+  function buildGithubAutomationServerList(data, options = {}) {
+    const allServers = extractServerIdsFromRemoteJson(data);
+    const excluded = new Set();
+    const visited = new WeakSet();
+    const idKeys = ["serverId", "serverID", "server_id", "serverNo", "serverNO", "server_no", "sid", "server", "serverNumber", "server_number", "s"];
+    const excludedLabel = /(엔트리|entry|오로라|aurora|영원의\s*땅|eternal\s*land)/i;
+
+    function inspect(node, keyedServerId = null, depth = 0) {
+      if (!node || typeof node !== "object" || depth > 12 || visited.has(node)) return;
+      visited.add(node);
+      if (Array.isArray(node)) {
+        for (const item of node) inspect(item, null, depth + 1);
+        return;
+      }
+
+      const directId = idKeys.map(key => parseServerId(node[key])).find(Boolean) || parseServerId(keyedServerId);
+      if (directId) {
+        // 한 서버 행의 분류값만 검사한다. 상위 전체 객체를 문자열화해 다른 서버의
+        // 특수 시즌 표기가 정상 서버에 전파되는 일을 막는다.
+        const classification = Object.entries(node)
+          .filter(([key, value]) =>
+            /(season|group|type|category|area|land|name|label|title|status|serverType)/i.test(key) &&
+            (typeof value === "string" || typeof value === "number")
+          )
+          .map(([, value]) => String(value))
+          .join(" ");
+        if (excludedLabel.test(classification)) excluded.add(directId);
+      }
+
+      for (const [key, value] of Object.entries(node)) {
+        inspect(value, /^\d+$/.test(key) ? key : null, depth + 1);
+      }
+    }
+
+    inspect(data);
+    const mapServerIds = options.preFiltered === true
+      ? allServers.slice()
+      : allServers.filter(id => !excluded.has(id));
+    if (!allServers.length) throw new Error("서버 JSON에서 서버 번호를 찾지 못했습니다.");
+    return {
+      ok: true,
+      source: options.source || "github:hiphop5782/topwar-json/servers",
+      fetchedAt: nowIso(),
+      allServers,
+      totalServers: allServers.length,
+      count: allServers.length,
+      automationServerIds: mapServerIds.slice(),
+      automationServerCount: mapServerIds.length,
+      mapServerIds,
+      mapServerCount: mapServerIds.length,
+      mapExcludedServerIds: allServers.filter(id => excluded.has(id)),
+      serverIds: mapServerIds.slice()
+    };
+  }
+
   function readCachedRemoteServerList() {
     try {
       const cached = JSON.parse(localStorage.getItem(REMOTE_SERVER_LIST_CACHE_KEY) || "null");
@@ -5401,31 +5454,87 @@ TOPWAR.clearThiefQueue()
     throw new Error(errors.join(" / ") || "remote request failed");
   }
 
+  function githubServerFileUrls(fileName) {
+    return [
+      `https://raw.githubusercontent.com/hiphop5782/topwar-json/main/servers/${fileName}`,
+      `https://cdn.jsdelivr.net/gh/hiphop5782/topwar-json@main/servers/${fileName}`,
+      `https://api.github.com/repos/hiphop5782/topwar-json/contents/servers/${fileName}?ref=main`
+    ];
+  }
+
+  async function fetchGithubServerFile(fileName, options = {}) {
+    const errors = [];
+    for (const url of githubServerFileUrls(fileName)) {
+      try {
+        return { data: await fetchRemoteServerJson(url, options), url };
+      } catch (error) {
+        errors.push(`${url}: ${error?.message || String(error)}`);
+      }
+    }
+    throw new Error(errors.join(" / ") || `${fileName} 로드 실패`);
+  }
+
   async function loadRemoteServerList(options = {}) {
     const maxAgeMs = Number(options.maxAgeMs ?? 5 * 60 * 1000);
     const cached = readCachedRemoteServerList();
 
     if (!options.force && cached?.fetchedAt && Date.now() - Date.parse(cached.fetchedAt) < maxAgeMs) {
-      console.log("[TopWar] 시즌별 서버목록 캐시 사용:", cached);
+      console.log("[TopWar] GitHub 서버목록 캐시 사용:", cached);
       return { ...cached, ok: true, cached: true };
     }
 
+    const errors = [];
     try {
-      const data = await surveySeasonServerList(options);
+      // compact가 일반 자동화의 유일한 허용 집합이다.
+      const compact = await fetchGithubServerFile(REMOTE_SERVER_FILES.compact, options);
+      const compactData = buildGithubAutomationServerList(compact.data, {
+        preFiltered: true,
+        source: `github:hiphop5782/topwar-json/servers/${REMOTE_SERVER_FILES.compact}`
+      });
+      const allowed = new Set(compactData.mapServerIds.map(String));
+
+      // 인기순 파일도 compact와 교차하므로 특수 시즌 서버가 다시 들어올 수 없다.
+      let popularIds = [];
+      try {
+        const popular = await fetchGithubServerFile(REMOTE_SERVER_FILES.popular, options);
+        popularIds = extractServerIdsFromRemoteJson(popular.data)
+          .filter(id => allowed.has(String(id)));
+      } catch (error) {
+        errors.push(`${REMOTE_SERVER_FILES.popular}: ${error?.message || String(error)}`);
+      }
+      const popularSeen = new Set(popularIds.map(String));
+      const serverIds = popularIds.concat(compactData.mapServerIds.filter(id => !popularSeen.has(String(id))));
+
+      // 전체 파일은 제외 목록/상태 표시를 보강하는 용도이며 실패해도 compact 작업은 계속한다.
+      let allServers = compactData.mapServerIds.slice();
+      try {
+        const normal = await fetchGithubServerFile(REMOTE_SERVER_FILES.normal, options);
+        allServers = extractServerIdsFromRemoteJson(normal.data);
+      } catch (error) {
+        errors.push(`${REMOTE_SERVER_FILES.normal}: ${error?.message || String(error)}`);
+      }
+
+      const data = {
+        ...compactData,
+        url: compact.url,
+        allServers,
+        totalServers: allServers.length,
+        serverIds,
+        automationServerIds: serverIds.slice(),
+        mapExcludedServerIds: allServers.filter(id => !allowed.has(String(id))),
+        supportingFiles: { ...REMOTE_SERVER_FILES },
+        warnings: errors.slice()
+      };
       writeCachedRemoteServerList(data);
       state.remoteServerList = data;
-      window.transferSurvey = data;
-      if (options.uploadToServer !== false) {
-        try {
-          data.serverUpload = await uploadSeasonServerListToDataHub(data, options);
-        } catch (uploadError) {
-          data.serverUpload = { ok: false, error: uploadError?.message || String(uploadError) };
-          console.warn("[TopWar] 시즌별 서버목록은 저장했지만 DataHub 전송에 실패했습니다:", uploadError);
-        }
-        writeCachedRemoteServerList(data);
-      }
-      console.log("[TopWar] 시즌별 서버목록 조사 완료:", data);
+      console.log("[TopWar] GitHub 서버목록 로드 완료:", data);
       return data;
+    } catch (error) {
+      errors.push(`${REMOTE_SERVER_FILES.compact}: ${error?.message || String(error)}`);
+    }
+
+    try {
+      throw new Error(errors.join(" / ") || "GitHub 서버목록 로드 실패");
     } catch (error) {
       if (cached?.serverIds?.length && options.allowCacheOnFail !== false) {
         const fallback = {
@@ -5433,10 +5542,10 @@ TOPWAR.clearThiefQueue()
           ok: true,
           cached: true,
           stale: true,
-          errors: [{ source: "world-transfer-season-survey", message: error?.message || String(error) }]
+          errors: [{ source: "github-server-list", message: error?.message || String(error) }]
         };
         state.remoteServerList = fallback;
-        console.warn("[TopWar] 시즌별 서버목록 조사 실패 - 기존 캐시 사용:", fallback);
+        console.warn("[TopWar] GitHub 서버목록 로드 실패 - 기존 캐시 사용:", fallback);
         return fallback;
       }
       throw error;
@@ -5472,7 +5581,7 @@ TOPWAR.clearThiefQueue()
       totalServers: cached?.totalServers ?? cached?.serverIds?.length ?? 0,
       seasons: cached?.seasons ?? {}
     };
-    console.log("[TopWar] 시즌별 서버목록 상태:", status);
+    console.log("[TopWar] GitHub 서버목록 상태:", status);
     return status;
   }
 
@@ -9877,14 +9986,12 @@ TOPWAR.clearThiefQueue()
       render();
       let survey;
       try {
-        survey = await TOPWAR.loadRemoteServerList?.({
-          force: true,
-          allowCacheOnFail: false,
-          uploadToServer: true,
-          debug: true
-        });
-        if (!survey?.seasons || survey.cached === true || survey.stale === true) {
+        survey = await TOPWAR.surveySeasonServerList?.({ debug: true });
+        if (!survey?.seasons) {
           throw new Error("Top100 시작 전 최신 시즌 패널 조사가 완료되지 않았습니다.");
+        }
+        if (typeof TOPWAR.uploadSeasonServerListToDataHub === "function") {
+          survey.serverUpload = await TOPWAR.uploadSeasonServerListToDataHub(survey);
         }
       } catch (error) {
         lastServerListError = error?.message || String(error);
