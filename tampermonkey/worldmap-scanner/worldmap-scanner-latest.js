@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.23 - GitHub Map Lists / Top100 Season Survey
+// @name         TopWar Unified Automation V2.14.9.24 - Configurable Scanner Roles
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.23
+// @version      2.14.9.24
 // @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -9646,6 +9646,17 @@ TOPWAR.clearThiefQueue()
           <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" name="tw26-server-order" value="random">랜덤으로</label>
         </div>
 
+        <div id="tw26-scanner-role" style="
+          display:grid;grid-template-columns:1.2fr .8fr 1fr;gap:5px;
+          margin-top:7px;padding:6px;border-radius:7px;background:rgba(255,255,255,0.04);
+          color:#bbb;font-size:10px;
+        ">
+          <select id="tw26-scanner-role-select" title="이 조사기의 담당 역할" style="height:29px;border:1px solid rgba(255,255,255,.15);border-radius:6px;background:#292929;color:#eee;font-size:10px;padding:0 5px;"></select>
+          <input id="tw26-unpopular-threshold" type="number" min="1" max="100" value="80" title="최근 7일 활성 인원이 이 값보다 적으면 비인기" style="min-width:0;height:29px;box-sizing:border-box;border:1px solid rgba(255,255,255,.15);border-radius:6px;background:#292929;color:#eee;font-size:10px;padding:0 5px;" />
+          <input id="tw26-popular-scanner-count" type="number" min="1" max="32" value="6" title="인기 서버를 나눠 맡을 조사기 수" style="min-width:0;height:29px;box-sizing:border-box;border:1px solid rgba(255,255,255,.15);border-radius:6px;background:#292929;color:#eee;font-size:10px;padding:0 5px;" />
+          <span style="grid-column:1 / -1;color:#888;">역할 · 비인기 기준(명) · 인기 조사기 수</span>
+        </div>
+
         <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px;">
           <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">보상탐색</button>
           <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">지도조사</button>
@@ -9805,6 +9816,9 @@ TOPWAR.clearThiefQueue()
     const fold = panel.querySelector("#tw26-fold");
     const serverInput = panel.querySelector("#tw26-server");
     const serverOrderInputs = [...panel.querySelectorAll('input[name="tw26-server-order"]')];
+    const scannerRoleSelect = panel.querySelector("#tw26-scanner-role-select");
+    const unpopularThresholdInput = panel.querySelector("#tw26-unpopular-threshold");
+    const popularScannerCountInput = panel.querySelector("#tw26-popular-scanner-count");
     const dataHubScannerIdInput = panel.querySelector("#tw26-datahub-scanner-id");
     const githubTokenInput = panel.querySelector("#tw26-github-token");
     const thiefButton = panel.querySelector("#tw26-thief");
@@ -9834,6 +9848,105 @@ TOPWAR.clearThiefQueue()
     let lastThiefUploadTest = null;
 
     const SERVER_ORDER_STORAGE_KEY = "TOPWAR_AUTOMATION_SERVER_ORDER";
+    const SCANNER_ROLE_STORAGE_KEY = "TOPWAR_AUTOMATION_SCANNER_ROLE_V1";
+    const UNPOPULAR_THRESHOLD_STORAGE_KEY = "TOPWAR_AUTOMATION_UNPOPULAR_THRESHOLD_V1";
+    const POPULAR_SCANNER_COUNT_STORAGE_KEY = "TOPWAR_AUTOMATION_POPULAR_SCANNER_COUNT_V1";
+    let activityServerRowsCache = null;
+    let activityServerRowsFetchedAt = 0;
+    let lastRoleFilteredIds = [];
+
+    function clampInteger(value, min, max, fallback) {
+      const number = Math.floor(Number(value));
+      return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
+    }
+
+    function getUnpopularThreshold() {
+      return clampInteger(unpopularThresholdInput?.value, 1, 100, 80);
+    }
+
+    function getPopularScannerCount() {
+      return clampInteger(popularScannerCountInput?.value, 1, 32, 6);
+    }
+
+    function rebuildScannerRoleOptions(preferredRole = null) {
+      const count = getPopularScannerCount();
+      const saved = preferredRole || scannerRoleSelect?.value || (() => {
+        try { return localStorage.getItem(SCANNER_ROLE_STORAGE_KEY); } catch { return null; }
+      })() || "unpopular";
+      scannerRoleSelect.innerHTML = [
+        `<option value="unpopular">비인기 서버</option>`,
+        ...Array.from({ length: count }, (_, index) =>
+          `<option value="popular-${index + 1}">인기 서버 ${index + 1}</option>`
+        )
+      ].join("");
+      scannerRoleSelect.value = [...scannerRoleSelect.options].some(option => option.value === saved)
+        ? saved
+        : "unpopular";
+      try { localStorage.setItem(SCANNER_ROLE_STORAGE_KEY, scannerRoleSelect.value); } catch {}
+    }
+
+    function stableServerHash(serverId) {
+      let hash = 2166136261;
+      for (const char of String(serverId)) {
+        hash ^= char.charCodeAt(0);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    }
+
+    async function loadActivityServerRows(options = {}) {
+      if (!options.force && activityServerRowsCache && Date.now() - activityServerRowsFetchedAt < 60 * 60 * 1000) {
+        return activityServerRowsCache;
+      }
+      const urls = [
+        "https://raw.githubusercontent.com/hiphop5782/topwar-json/main/power/serverData.json",
+        "https://cdn.jsdelivr.net/gh/hiphop5782/topwar-json@main/power/serverData.json"
+      ];
+      const errors = [];
+      for (const url of urls) {
+        try {
+          const data = await fetchRemoteServerJson(url, options);
+          if (!Array.isArray(data)) throw new Error("serverData.json root is not an array");
+          activityServerRowsCache = data;
+          activityServerRowsFetchedAt = Date.now();
+          return data;
+        } catch (error) {
+          errors.push(`${url}: ${error?.message || String(error)}`);
+        }
+      }
+      throw new Error(errors.join(" / ") || "power/serverData.json 로드 실패");
+    }
+
+    function active7dPlayerCount(serverData, referenceMs = Date.now()) {
+      const cutoff = Math.floor(referenceMs / 1000) - 7 * 24 * 60 * 60;
+      return (Array.isArray(serverData?.playerList) ? serverData.playerList : []).filter(player => {
+        const raw = Math.max(Number(player?.lastRequest || 0), Number(player?.lastLogin || 0));
+        const activeAt = raw >= 1000000000000 ? Math.floor(raw / 1000) : raw;
+        return player?.online === true || player?.isOnline === true || activeAt >= cutoff;
+      }).length;
+    }
+
+    async function filterServerIdsByScannerRole(serverIds) {
+      const requested = parseServerIdsStrict(serverIds);
+      const rows = await loadActivityServerRows();
+      const activityByServer = new Map(rows.map(row => [
+        Number(row?.serverNumber ?? row?.serverId ?? row?.server),
+        active7dPlayerCount(row)
+      ]));
+      const threshold = getUnpopularThreshold();
+      const role = scannerRoleSelect.value || "unpopular";
+      const unpopular = requested.filter(id => activityByServer.has(id) && activityByServer.get(id) < threshold);
+      const popular = requested.filter(id => !activityByServer.has(id) || activityByServer.get(id) >= threshold);
+      if (role === "unpopular") {
+        lastRoleFilteredIds = unpopular.slice();
+        return unpopular;
+      }
+
+      const roleIndex = clampInteger(String(role).split("-")[1], 1, getPopularScannerCount(), 1) - 1;
+      const scannerCount = getPopularScannerCount();
+      lastRoleFilteredIds = popular.filter(id => stableServerHash(id) % scannerCount === roleIndex);
+      return lastRoleFilteredIds.slice();
+    }
 
     function normalizeServerOrderMode(value) {
       const mode = String(value || "").trim().toLowerCase();
@@ -9907,6 +10020,7 @@ TOPWAR.clearThiefQueue()
 
     function displayServerIds() {
       const explicit = explicitInputServerIds();
+      if (!explicit.length && lastRoleFilteredIds.length) return lastRoleFilteredIds.slice();
       const base = explicit.length
         ? explicit
         : (TOPWAR.getCachedRemoteServerList?.()?.serverIds ?? []);
@@ -9975,7 +10089,16 @@ TOPWAR.clearThiefQueue()
     async function resolveMapSurveyServerIds() {
       await ensureRemoteServerListLoaded();
       const ids = await resolveSurveyServerIds();
-      return TOPWAR.mapSurveyServerIds?.(ids) ?? ids;
+      const mapIds = TOPWAR.mapSurveyServerIds?.(ids) ?? ids;
+      const filtered = await filterServerIdsByScannerRole(mapIds);
+      console.log("[TopWar Scanner Role] 담당 서버 필터링:", {
+        role: scannerRoleSelect.value,
+        unpopularThreshold: getUnpopularThreshold(),
+        popularScannerCount: getPopularScannerCount(),
+        before: mapIds.length,
+        after: filtered.length
+      });
+      return filtered;
     }
 
     async function resolveTop100ServerIds() {
@@ -10018,6 +10141,19 @@ TOPWAR.clearThiefQueue()
     })();
     setServerOrderMode(initialServerOrderMode);
 
+    try {
+      unpopularThresholdInput.value = String(clampInteger(
+        localStorage.getItem(UNPOPULAR_THRESHOLD_STORAGE_KEY), 1, 100, 80
+      ));
+      popularScannerCountInput.value = String(clampInteger(
+        localStorage.getItem(POPULAR_SCANNER_COUNT_STORAGE_KEY), 1, 32, 6
+      ));
+    } catch {
+      unpopularThresholdInput.value = "80";
+      popularScannerCountInput.value = "6";
+    }
+    rebuildScannerRoleOptions();
+
     serverOrderInputs.forEach(input => {
       input.addEventListener("change", event => {
         event.stopPropagation();
@@ -10026,6 +10162,31 @@ TOPWAR.clearThiefQueue()
           render();
         }
       });
+    });
+
+    scannerRoleSelect.addEventListener("change", event => {
+      event.stopPropagation();
+      lastRoleFilteredIds = [];
+      try { localStorage.setItem(SCANNER_ROLE_STORAGE_KEY, scannerRoleSelect.value); } catch {}
+      render();
+    });
+
+    unpopularThresholdInput.addEventListener("change", event => {
+      event.stopPropagation();
+      lastRoleFilteredIds = [];
+      unpopularThresholdInput.value = String(getUnpopularThreshold());
+      try { localStorage.setItem(UNPOPULAR_THRESHOLD_STORAGE_KEY, unpopularThresholdInput.value); } catch {}
+      render();
+    });
+
+    popularScannerCountInput.addEventListener("change", event => {
+      event.stopPropagation();
+      lastRoleFilteredIds = [];
+      const previousRole = scannerRoleSelect.value;
+      popularScannerCountInput.value = String(getPopularScannerCount());
+      try { localStorage.setItem(POPULAR_SCANNER_COUNT_STORAGE_KEY, popularScannerCountInput.value); } catch {}
+      rebuildScannerRoleOptions(previousRole);
+      render();
     });
 
     // UI/후속 add-on/RealPower에서 동일한 서버 선택 규칙을 재사용한다.
@@ -10988,6 +11149,11 @@ TOPWAR.clearThiefQueue()
         input.disabled = anyAutomationRunning;
         input.parentElement.style.opacity = input.disabled ? "0.55" : "1";
       });
+      for (const input of [scannerRoleSelect, unpopularThresholdInput, popularScannerCountInput]) {
+        if (!input) continue;
+        input.disabled = anyAutomationRunning;
+        input.style.opacity = input.disabled ? "0.55" : "1";
+      }
 
       const thiefMulti = watch.multiServer || {};
 
@@ -11007,13 +11173,14 @@ TOPWAR.clearThiefQueue()
           <span style="white-space:nowrap;color:${disconnected ? "#ff7777" : "#8fd6a8"}">${disconnected ? "연결 오류" : "정상"}</span>
         </div>
         <div style="margin-top:2px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-          서버 ${shownServerIds.length ? `${shownServerIds.length}개` : "-"} · ${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤" : "인기순"} · GitHub ${tokenStatus.configured ? "✓" : "미설정"} · 플레이어 ${state.playerMap?.size ?? 0}
+          서버 ${shownServerIds.length ? `${shownServerIds.length}개` : "-"} · ${scannerRoleSelect.value === "unpopular" ? `비인기(<${getUnpopularThreshold()}명)` : `${scannerRoleSelect.options[scannerRoleSelect.selectedIndex]?.text || scannerRoleSelect.value}`} · ${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤" : "인기순"} · GitHub ${tokenStatus.configured ? "✓" : "미설정"} · 플레이어 ${state.playerMap?.size ?? 0}
         </div>
       `;
 
       if (detailStatus) {
         detailStatus.innerHTML = `
           대상 서버: <b>${formatServerIdsForStatus(shownServerIds)}</b><br>
+          조사기 역할: <b>${scannerRoleSelect.options[scannerRoleSelect.selectedIndex]?.text || scannerRoleSelect.value}</b> / 비인기 &lt; ${getUnpopularThreshold()}명 / 인기 조사기 ${getPopularScannerCount()}대<br>
           선택 기준: <b>${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤으로" : "인기순으로"}</b><br>
           서버목록: ${serverListLoading ? "시즌별 추출 중" : remoteServerList?.serverIds?.length ? `시즌 통합 ${remoteServerList.serverIds.length}개` : usingRemoteServerList ? "시즌별 자동추출" : "직접입력"}${lastServerListError ? ` / 오류: ${lastServerListError}` : ""}<br>
           연결: ${disconnected ? "실패" : "정상"}${connection.reason ? ` / ${connection.reason}` : ""}<br>
