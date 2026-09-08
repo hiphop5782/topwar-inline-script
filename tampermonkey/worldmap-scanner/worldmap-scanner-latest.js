@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.5 - Memory Gauge
+// @name         TopWar Unified Automation V2.14.9.9 - Thief Upload Guard
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.5
+// @version      2.14.9.9
 // @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -9,6 +9,8 @@
 // @match        https://*.topwarapp.com/*
 // @run-at       document-start
 // @grant        none
+// @updateURL    https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/tampermonkey/worldmap-scanner/worldmap-scanner-automation.js
+// @downloadURL  https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/tampermonkey/worldmap-scanner/worldmap-scanner-automation.js
 // ==/UserScript==
 
 /* ============================================================================
@@ -1357,7 +1359,18 @@
     }
 
     normalized.hasCityRewardField = !!cityRewardSource?.found;
-    normalized.cityReward = normalized.hasCityRewardField ? cityRewardSource.value : undefined;
+    if (normalized.hasCityRewardField && typeof cityRewardSource.value === "string") {
+      try {
+        const parsedCityReward = JSON.parse(cityRewardSource.value);
+        normalized.cityReward = parsedCityReward && typeof parsedCityReward === "object" && !Array.isArray(parsedCityReward)
+          ? parsedCityReward
+          : cityRewardSource.value;
+      } catch {
+        normalized.cityReward = cityRewardSource.value;
+      }
+    } else {
+      normalized.cityReward = normalized.hasCityRewardField ? cityRewardSource.value : undefined;
+    }
     normalized.cityRewardPath = cityRewardSource?.path ?? null;
 
     // 원본의 미지 필드는 편의상 최상위에도 추가한다.
@@ -8423,8 +8436,8 @@ TOPWAR.clearThiefQueue()
 
         if (surveyOptions.includeRewards === true && typeof TOPWAR.uploadRewardServerResults === "function") {
           const rewardMap = state.ui.serverSurvey.rewardMap instanceof Map ? state.ui.serverSurvey.rewardMap : new Map();
+          // 이번 조사에서 실제로 발견한 내역은 조사 종료 시각에 만료됐더라도 결과에서 제거하지 않는다.
           const locations = [...rewardMap.values()]
-            .filter(row => typeof TOPWAR.isFreshCityReward !== "function" || TOPWAR.isFreshCityReward(row))
             .sort((a, b) => Number(a?.x ?? 0) - Number(b?.x ?? 0) || Number(a?.y ?? 0) - Number(b?.y ?? 0));
           try {
             result.rewardUpload = await TOPWAR.uploadRewardServerResults({ ok: true, completed: true, serverId, scannedAt: nowIso(), count: locations.length, locations });
@@ -9559,7 +9572,6 @@ TOPWAR.clearThiefQueue()
       // GitHub 즉시 업로드 시 이 셀들에 속하는 기존 좌표 중 이번 회차에서
       // 다시 관측되지 않은 도둑만 점진적으로 제거한다.
       const confirmedThiefScanCells = new Set();
-      let lastThiefProgressUploadConfirmedCount = 0;
       let moveIndex = 0;
       let failCount = 0;
 
@@ -9737,10 +9749,9 @@ TOPWAR.clearThiefQueue()
             return !liveUploadedThiefKeys.has(key);
           });
 
-          const confirmedSinceLastUpload =
-            confirmedThiefScanCells.size - lastThiefProgressUploadConfirmedCount;
-          const shouldUploadThiefProgress =
-            newThieves.length > 0 || confirmedSinceLastUpload >= 10;
+          // 중간 즉시 업로드는 새 도둑이 실제로 발견된 경우에만 수행한다.
+          // 빈 결과를 이용한 기존 좌표 정리는 서버 전체 스캔 완료 시 최종 업로드에서 한 번만 처리한다.
+          const shouldUploadThiefProgress = newThieves.length > 0;
 
           if (shouldUploadThiefProgress && options.githubUpload !== false) {
             try {
@@ -9779,7 +9790,6 @@ TOPWAR.clearThiefQueue()
               });
 
               if (liveUpload?.ok) {
-                lastThiefProgressUploadConfirmedCount = confirmedThiefScanCells.size;
                 for (const obj of newThieves) {
                   const key = obj?.objectKey ??
                     (obj?.id != null
@@ -15196,23 +15206,37 @@ ${lastServerListError}`
   const REWARD_DURATION_MS = 30 * 60 * 1000;
   const REWARD_TTL_MS = REWARD_DURATION_MS;
 
+  function normalizeCityReward(value) {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return null;
+    try {
+      const parsed = JSON.parse(value);
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
   function isCityRewardObject(value) {
-    return value !== null && typeof value === "object" && !Array.isArray(value);
+    return normalizeCityReward(value) !== null;
   }
 
   function rewardTimestampMs(value) {
     if (value == null || value === "") return null;
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) return null;
-      return value < 1000000000000 ? value * 1000 : value;
+    const numeric = typeof value === "number"
+      ? value
+      : (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim()) ? Number(value.trim()) : NaN);
+    if (Number.isFinite(numeric)) {
+      return numeric < 1000000000000 ? numeric * 1000 : numeric;
     }
     const ms = Date.parse(String(value));
     return Number.isFinite(ms) ? ms : null;
   }
 
   function isFreshReward(row, nowMs = Date.now()) {
-    if (!row || !isCityRewardObject(row.cityReward)) return false;
-    const endMs = rewardTimestampMs(row.cityReward.endTimeMilli);
+    const cityReward = normalizeCityReward(row?.cityReward);
+    if (!row || !cityReward) return false;
+    const endMs = rewardTimestampMs(cityReward.endTimeMilli ?? cityReward.endTime ?? cityReward.expireTimeMilli ?? cityReward.expireTime);
     if (endMs != null) return nowMs < endMs;
     const seenMs = rewardTimestampMs(row.cityRewardSeenAt ?? row.foundAt);
     if (seenMs == null) return false;
@@ -15236,8 +15260,14 @@ ${lastServerListError}`
     let removed = 0;
 
     for (const player of state.playerMap.values()) {
-      const reward = player?.cityReward ?? player?.playerInfo?.cityReward;
-      if (!isCityRewardObject(reward)) continue;
+      const reward = normalizeCityReward(player?.cityReward ?? player?.playerInfo?.cityReward);
+      if (!reward) continue;
+
+      const endMs = rewardTimestampMs(reward.endTimeMilli ?? reward.endTime ?? reward.expireTimeMilli ?? reward.expireTime);
+      if (endMs != null && nowMs < endMs) {
+        player.cityReward = reward;
+        continue;
+      }
 
       const seenMs = rewardTimestampMs(player.cityRewardSeenAt ?? player.time);
       if (seenMs != null && nowMs - seenMs < REWARD_TTL_MS) continue;
@@ -15282,8 +15312,8 @@ ${lastServerListError}`
     if (Number(serverId) !== Number(targetServerId)) return null;
 
     const playerInfo = parsePlayerInfo(point);
-    const cityReward = playerInfo.cityReward;
-    if (!isCityRewardObject(cityReward)) return null;
+    const cityReward = normalizeCityReward(playerInfo.cityReward ?? point?.p?.cityReward ?? point?.cityReward ?? point?.r?.cityReward);
+    if (!cityReward) return null;
 
     const p = point?.p || {};
     const x = point?.x ?? null;
@@ -15317,8 +15347,8 @@ ${lastServerListError}`
     if (!player || Number(player.pointType) !== 1) return null;
     if (Number(player.serverId) !== Number(targetServerId)) return null;
 
-    const cityReward = player.cityReward;
-    if (!isCityRewardObject(cityReward)) return null;
+    const cityReward = normalizeCityReward(player.cityReward ?? player.playerInfo?.cityReward);
+    if (!cityReward) return null;
     if (player.x == null || player.y == null) return null;
 
     return {
@@ -15345,7 +15375,6 @@ ${lastServerListError}`
     const output = destinationMap instanceof Map ? destinationMap : reward.currentRewards;
     const nowMs = Date.now();
     const expiredPlayerRewardsRemoved = prunePlayerMapCityRewards(nowMs);
-    const expiredRemoved = pruneRewardMap(output, nowMs);
     let added = 0;
 
     // V1.5부터는 TOPWAR.players()가 playerInfo/cityReward를 보존하므로 이것을 1차 소스로 사용한다.
@@ -15385,11 +15414,10 @@ ${lastServerListError}`
       }
     }
 
-    const expiredRemovedAfterCollect = pruneRewardMap(output, Date.now());
-
     return {
       added,
-      expiredRemoved: expiredRemoved + expiredRemovedAfterCollect,
+      // output은 이번 조사 세션의 발견 기록이다. 유효시간 판정으로 여기서 삭제하지 않는다.
+      expiredRemoved: 0,
       expiredPlayerRewardsRemoved,
       total: output.size,
       locations: [...output.values()]
@@ -15412,8 +15440,6 @@ ${lastServerListError}`
   function rewardFinderStatus() {
     const reward = ensureRewardState();
     prunePlayerMapCityRewards();
-    pruneRewardMap(reward.currentRewards);
-    pruneRewardMap(reward.allSessionRewards);
     reward.totalFound = reward.allSessionRewards?.size ?? reward.totalFound;
     const result = {
       ttlMinutes: REWARD_TTL_MS / 60000,
@@ -15440,7 +15466,6 @@ ${lastServerListError}`
   function rewardFinderTable() {
     const reward = ensureRewardState();
     prunePlayerMapCityRewards();
-    pruneRewardMap(reward.allSessionRewards);
     const rows = [...(reward.allSessionRewards?.values?.() || [])];
     console.table(rows.map((row, index) => ({
       index,
@@ -15700,9 +15725,9 @@ ${lastServerListError}`
       .filter(row => Number(row?.serverId) !== serverId)
       .filter(row => isFreshReward(row));
 
+    // 현재 서버는 이번 조사에서 직접 관측한 결과이므로 조사 도중 시간이 지났다는 이유로 버리지 않는다.
     const current = (serverResult?.locations || [])
-      .filter(row => Number(row?.serverId) === serverId)
-      .filter(row => isFreshReward(row));
+      .filter(row => Number(row?.serverId) === serverId);
 
     const locations = [...new Map(
       [...untouched, ...current].map(row => [rewardKey(row), row])
@@ -15924,9 +15949,8 @@ ${lastServerListError}`
             session.completedServers = reward.completedServers.slice();
 
             for (const row of result.locations || []) {
-              if (isFreshReward(row)) reward.allSessionRewards.set(rewardKey(row), row);
+              reward.allSessionRewards.set(rewardKey(row), row);
             }
-            pruneRewardMap(reward.allSessionRewards);
             reward.totalFound = reward.allSessionRewards.size;
 
             reward.current = {
@@ -16222,19 +16246,18 @@ ${lastServerListError}`
     installRewardFinderButton: installRewardButton
   });
 
-  // 메모리상의 cityReward는 1분마다 TTL을 검사한다. 플레이어 정보 자체는 삭제하지 않는다.
+  // 원본 playerMap 캐시는 1분마다 30분 TTL을 적용한다.
+  // currentRewards/allSessionRewards는 이번 조사에서 발견한 이력이므로 자동 정리하지 않는다.
   const rewardTtlCleanupTimer = setInterval(() => {
     const reward = ensureRewardState();
     const playerRewardsRemoved = prunePlayerMapCityRewards();
-    const currentRemoved = pruneRewardMap(reward.currentRewards);
-    const sessionRemoved = pruneRewardMap(reward.allSessionRewards);
     reward.totalFound = reward.allSessionRewards.size;
 
-    if (playerRewardsRemoved || currentRemoved || sessionRemoved) {
+    if (playerRewardsRemoved) {
       console.log(`[TopWar Reward Finder] ${REWARD_TTL_MS / 60000}분 TTL 정리`, {
         playerRewardsRemoved,
-        currentRemoved,
-        sessionRemoved
+        retainedCurrentSurvey: reward.currentRewards.size,
+        retainedSessionHistory: reward.allSessionRewards.size
       });
     }
   }, 60 * 1000);
