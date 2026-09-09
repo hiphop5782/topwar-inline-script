@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.24 - Configurable Scanner Roles
+// @name         TopWar Unified Automation V2.14.9.29 - Configurable Scanner Roles
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.24
+// @version      2.14.9.29
 // @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -4818,7 +4818,8 @@ TOPWAR.clearThiefQueue()
     let currentSubgroup = fallbackSubgroup;
 
     function walk(node) {
-      if (!node) return;
+      // Ignore hidden templates and inactive pooled rows; keep the original traversal.
+      if (!node || node.active === false || node.activeInHierarchy === false) return;
       const labelText = String(node.getComponent?.(cc.Label)?.string || "").trim();
       const marker = serverGroupFromText(`${node.name || ""} ${labelText}`);
       if (marker) currentGroup = marker;
