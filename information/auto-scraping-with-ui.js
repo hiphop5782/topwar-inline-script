@@ -3,7 +3,7 @@
 
     /*
      * ============================================================
-     * TopWar Appearance Manager v0.3
+     * TopWar Appearance Manager v0.4.8
      * ============================================================
      *
      * 대상
@@ -46,16 +46,22 @@
      */
 
 
-    const VERSION = '0.3.0';
+    const VERSION = '0.4.8';
 
 
     /* ============================================================
      * 이전 버전 제거
      * ============================================================ */
 
+    if (['0.4.6', '0.4.7'].includes(window.TopWarAppearanceManager?.version)) {
+        console.error('기존 버전의 리소스 해제 함수를 실행하지 않았습니다. 게임 페이지를 새로고침하고 v0.4.8을 실행하세요.');
+        return;
+    }
+    const priorCastleCatalog = (window.TopWarAppearanceManager?.state?.items?.castle || [])
+        .map(item => ({ id: item.id, name: item.name }));
     try {
         window.TopWarAppearanceManager?.destroy?.();
-    } catch {}
+    } catch (error) { console.warn(error.message); return; }
 
     document
         .getElementById('tw-appearance-manager')
@@ -286,21 +292,9 @@
 
 
     function getTexture(sf) {
-
-        try {
-
-            return (
-                sf?.getTexture?.() ||
-                sf?._texture ||
-                null
-            );
-
-        } catch {
-
-            return null;
-        }
+        try { const texture = sf?.getTexture?.(); if (texture) return texture; } catch {}
+        try { return sf?._texture || sf?.texture || null; } catch { return null; }
     }
-
 
     function getTextureUrl(sf) {
 
@@ -580,6 +574,179 @@
      * SpriteFrame → Canvas
      * ============================================================ */
 
+    // Shared game assets remain retained for this page session. Reinstalling the
+    // manager reuses the set, so it neither adds duplicate refs nor releases live assets.
+    const retainedImageAssets = window.__twAppearanceRetainedAssets || new Set();
+    window.__twAppearanceRetainedAssets = retainedImageAssets;
+    const itemCanvases = new WeakMap();
+    function retainImageAsset(asset) {
+        if (asset && !retainedImageAssets.has(asset) && typeof asset.addRef === 'function') {
+            asset.addRef();
+            retainedImageAssets.add(asset);
+        }
+        return asset;
+    }
+    function retainFrame(frame) {
+        retainImageAsset(getTexture(frame));
+        return retainImageAsset(frame);
+    }
+    function findCachedFrame(path) {
+        const name = path.split('/').pop();
+        const matches = [];
+        cc.assetManager?.assets?.forEach(asset => {
+            if (asset instanceof cc.SpriteFrame && frameReady(asset) && asset.name === name) matches.push(asset);
+        });
+        // A basename match is usable only when unambiguous.
+        return matches.length === 1 ? retainFrame(matches[0]) : null;
+    }
+    const imageLoads = new Map();
+    let imageLoadCount = 0;
+    const imageLoadQueue = [];
+
+    async function limitImageLoad(task) {
+        if (imageLoadCount >= 4) await new Promise(resolve => imageLoadQueue.push(resolve));
+        else imageLoadCount++;
+        try { return await task(); }
+        finally {
+            const next = imageLoadQueue.shift();
+            if (next) next();
+            else imageLoadCount--;
+        }
+    }
+
+    function frameReady(sf) {
+        const texture = getTexture(sf);
+        return Boolean(texture && texture.loaded !== false && texture.width > 0 && texture.height > 0);
+    }
+
+    function loadFrameResource(path) {
+        if (imageLoads.has(path)) return imageLoads.get(path);
+        const promise = limitImageLoad(async () => {
+            const bundles = [];
+            cc.assetManager?.bundles?.forEach(bundle => bundles.push(bundle));
+            if (cc.resources && !bundles.includes(cc.resources)) bundles.push(cc.resources);
+            for (const bundle of bundles) {
+                const cached = bundle.get?.(path, cc.SpriteFrame);
+                if (frameReady(cached)) return retainFrame(cached);
+            }
+            const namedFrame = findCachedFrame(path);
+            if (namedFrame) return namedFrame;
+            const owners = bundles.filter(bundle => {
+                try { return Boolean(bundle.getInfoWithPath?.(path, cc.SpriteFrame)); }
+                catch { return false; }
+            });
+            // Use registered bundles; resources/loadRes is the compatibility fallback.
+            const loaders = owners.map(bundle => done => bundle.load(path, cc.SpriteFrame, done));
+            if (!loaders.length && cc.resources?.load) loaders.push(done => cc.resources.load(path, cc.SpriteFrame, done));
+            if (!loaders.length && cc.loader?.loadRes) loaders.push(done => cc.loader.loadRes(path, cc.SpriteFrame, done));
+            let error = new Error(`리소스 로더 또는 경로를 찾지 못함: ${path}`);
+            for (const load of loaders) {
+                try {
+                    return await new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => reject(new Error(`이미지 로드 시간 초과: ${path}`)), 15000);
+                        const done = (err, sf) => {
+                            clearTimeout(timeout);
+                            if (err || !frameReady(sf)) reject(err || new Error(`텍스처 없는 리소스: ${path}`));
+                            else resolve(retainFrame(sf));
+                        };
+                        try { load(done); } catch (err) { done(err); }
+                    });
+                } catch (err) { error = err; }
+            }
+            throw error;
+        });
+        imageLoads.set(path, promise);
+        promise.catch(() => { if (imageLoads.get(path) === promise) imageLoads.delete(path); });
+        return promise;
+    }
+
+    async function ensureItemFrame(item) {
+        // The node may now point at a different SpriteFrame than the scan-time placeholder.
+        const current = getSpriteFrame(item.node);
+        let frame = frameReady(item.sf) ? retainFrame(item.sf) : frameReady(current) ? retainFrame(current) : null;
+        if (!frame) {
+            const cfg = item.config || findConfig(item.category, item.id, item.itemRoot,
+                findController(item.category, findCategoryRoot(item.category)));
+            const paths = [...new Set((item.category === 'castle'
+                ? [cfg?.pic, cfg?.pic_new]
+                : item.category === 'armyLine' ? [cfg?.icon] : [cfg?.pic])
+                .filter(value => typeof value === 'string' && value.trim())
+                .map(value => value.trim()))];
+            item.imageLoadPaths = paths;
+            const failures = [];
+            for (const path of paths) {
+                try { frame = await loadFrameResource(path); item.imageSourcePath = path; break; }
+                catch (error) { failures.push(`${path}: ${error.message || error}`); }
+            }
+            if (!frame) throw new Error(failures.join(' | ') || '로드된 텍스처와 설정 이미지 경로가 모두 없습니다.');
+        }
+        item.sf = frame;
+        item.spriteFrame = frame.name || item.spriteFrame || '';
+        item.textureUrl = getTextureUrl(frame);
+        item.imageLoadError = null;
+        return frame;
+    }
+
+    async function itemToCanvas(item) {
+        if (itemCanvases.has(item)) return itemCanvases.get(item);
+        const promise = (async () => {
+            const frame = await ensureItemFrame(item);
+            const canvas = await spriteFrameToCanvas(frame);
+            // Surface origin/canvas errors now, before caching a success.
+            canvas.toDataURL('image/png');
+            return canvas;
+        })();
+        itemCanvases.set(item, promise);
+        promise.catch(() => { if (itemCanvases.get(item) === promise) itemCanvases.delete(item); });
+        return promise;
+    }
+
+    async function readTextureSource(sf) {
+        const texture = getTexture(sf);
+        if (!texture) throw new Error('SpriteFrame의 텍스처가 아직 로드되지 않았습니다.');
+        const candidates = [];
+        try { candidates.push(texture.getHtmlElementObj?.()); } catch {}
+        candidates.push(texture._nativeAsset, texture._image);
+        for (const source of candidates) {
+            if (!source) continue;
+            const width = source.naturalWidth || source.width;
+            const height = source.naturalHeight || source.height;
+            if (!(width > 0 && height > 0)) continue;
+            try {
+                // Test CanvasImageSource compatibility and origin access before using it.
+                const probe = document.createElement('canvas');
+                probe.width = probe.height = 1;
+                const ctx = probe.getContext('2d');
+                ctx.drawImage(source, 0, 0, 1, 1);
+                ctx.getImageData(0, 0, 1, 1);
+                return { atlas: source, width, height, sourceType: 'loaded-element' };
+            } catch { /* Try the next source, then the URL. */ }
+        }
+        // Dynamic render textures may have neither a native image nor a URL.
+        if (typeof texture.readPixels === 'function' && texture.width > 0 && texture.height > 0) {
+            const width = texture.width, height = texture.height;
+            const pixels = texture.readPixels();
+            if (pixels && pixels.length === width * height * 4) {
+                const atlas = document.createElement('canvas');
+                atlas.width = width; atlas.height = height;
+                const ctx = atlas.getContext('2d');
+                const data = ctx.createImageData(width, height);
+                const stride = width * 4;
+                for (let y = 0; y < height; y++) {
+                    data.data.set(pixels.subarray((height - 1 - y) * stride, (height - y) * stride), y * stride);
+                }
+                ctx.putImageData(data, 0, 0);
+                return { atlas, width, height, sourceType: 'render-texture' };
+            }
+        }
+        const url = getTextureUrl(sf);
+        if (url) {
+            const atlas = await loadImage(normalizeTextureUrl(url));
+            return { atlas, width: atlas.naturalWidth, height: atlas.naturalHeight, sourceType: 'url' };
+        }
+        throw new Error('텍스처는 있지만 읽을 수 있는 이미지·픽셀·URL이 없습니다. export-report.json의 imageFailures를 확인하세요.');
+    }
+
     async function spriteFrameToCanvas(sf) {
 
         if (!sf)
@@ -591,17 +758,7 @@
         const info =
             getSpriteInfo(sf);
 
-        if (!info?.fullTextureUrl)
-            throw new Error(
-                'Texture URL 없음'
-            );
-
-
-        const atlas =
-            await loadImage(
-                info.fullTextureUrl
-            );
-
+        const { atlas, width: atlasWidth, height: atlasHeight } = await readTextureSource(sf);
 
         const bounds =
             getUVBounds(sf);
@@ -622,13 +779,13 @@
             sx =
                 Math.round(
                     bounds.minX *
-                    atlas.naturalWidth
+                    atlasWidth
                 );
 
             sy =
                 Math.round(
                     bounds.minY *
-                    atlas.naturalHeight
+                    atlasHeight
                 );
 
             sw =
@@ -637,7 +794,7 @@
                         bounds.maxX -
                         bounds.minX
                     ) *
-                    atlas.naturalWidth
+                    atlasWidth
                 );
 
             sh =
@@ -646,7 +803,7 @@
                         bounds.maxY -
                         bounds.minY
                     ) *
-                    atlas.naturalHeight
+                    atlasHeight
                 );
 
         } else {
@@ -988,75 +1145,34 @@
     }
 
 
-    function detectDisplayName(
-        itemRoot,
-        id
-    ) {
-
-        if (!itemRoot)
-            return '';
-
-
-        const labels =
-            collectLabels(
-                itemRoot
-            );
-
-
-        const ignored =
-            new Set([
-                String(id),
-                'NEW',
-                'New'
-            ]);
-
-
-        const candidates =
-            labels.filter(
-                text => {
-
-                    if (
-                        !text ||
-                        ignored.has(text)
-                    ) {
-                        return false;
-                    }
-
-                    if (
-                        /^\d+$/.test(text)
-                    ) {
-                        return false;
-                    }
-
-                    if (
-                        /^\+?\d+(\.\d+)?%?$/
-                            .test(text)
-                    ) {
-                        return false;
-                    }
-
-                    return true;
-                }
-            );
-
-
-        candidates.sort(
-            (a, b) =>
-                b.length -
-                a.length
-        );
-
-
-        return (
-            candidates[0] ||
-            ''
-        );
+    function detectDisplayName(itemRoot, id, cfg) {
+        if (!itemRoot) return '';
+        const rejected = /^(?:현재 사용|사용 중|사용중|장착 중|장착중|미보유|보유 중|NEW|New|Equipped|In use|Currently used|使用中|装備中)$/i;
+        const read = node => {
+            const label = node?.getComponent?.(cc.Label);
+            const text = String(label?.string || '').trim();
+            return text && text !== String(id) && !rejected.test(text) ? text : '';
+        };
+        let translated = '';
+        // Prefer a label explicitly bound to the config's localization key.
+        if (cfg?.name) walk(itemRoot, node => {
+            if (translated) return;
+            if ((node._components || []).some(comp => comp?.langKey === cfg.name)) {
+                translated = read(node);
+            }
+        });
+        if (translated) return translated;
+        // Known list name node, independent of label length and traversal order.
+        const direct = read(itemRoot.getChildByName?.('name'));
+        if (direct) return direct;
+        let named = '';
+        walk(itemRoot, node => {
+            if (!named && /^(?:name|nameLabel|labelName|skinName|skinNameLabel)$/i.test(node.name || '')) {
+                named = read(node);
+            }
+        });
+        return named;
     }
-
-
-    /* ============================================================
-     * Config 탐색
-     * ============================================================ */
 
     function looksLikeConfig(obj) {
 
@@ -1257,243 +1373,6 @@
         return null;
     }
 
-
-    function findController(
-        category,
-        root
-    ) {
-
-        if (
-            state.controllers[
-                category
-            ]
-        ) {
-
-            return state.controllers[
-                category
-            ];
-        }
-
-
-        let result = null;
-
-
-        walk(
-            root,
-            node => {
-
-                if (result)
-                    return;
-
-
-                for (
-                    const comp
-                    of node._components || []
-                ) {
-
-                    const proto =
-                        Object.getPrototypeOf(
-                            comp
-                        );
-
-                    const has =
-                        name =>
-                            typeof comp[
-                                name
-                            ] ===
-                            'function' ||
-                            typeof proto?.[
-                                name
-                            ] ===
-                            'function';
-
-
-                    if (
-                        category === 'castle' &&
-                        has('getSkinCfg') &&
-                        has(
-                            'refreshBuffContent'
-                        )
-                    ) {
-
-                        result = comp;
-                        return;
-                    }
-
-
-                    if (
-                        category ===
-                            'armyLine' &&
-                        has('initcontent') &&
-                        has(
-                            'refreshBuffContent'
-                        )
-                    ) {
-
-                        result = comp;
-                        return;
-                    }
-
-
-                    if (
-                        category ===
-                            'cityEffect' &&
-                        has(
-                            'initEffectContent'
-                        ) &&
-                        has(
-                            'refreshBuffContent'
-                        )
-                    ) {
-
-                        result = comp;
-                        return;
-                    }
-
-
-                    if (
-                        category ===
-                            'castleHalo' &&
-                        has(
-                            'initHaloCfg'
-                        ) &&
-                        has(
-                            'addBuffItemToParent'
-                        )
-                    ) {
-
-                        result = comp;
-                        return;
-                    }
-                }
-            }
-        );
-
-
-        if (result) {
-
-            state.controllers[
-                category
-            ] = result;
-        }
-
-
-        return result;
-    }
-
-
-    function findConfig(
-        category,
-        id,
-        itemRoot,
-        controller
-    ) {
-
-        /*
-         * 기지 외관은 getSkinCfg 직접 사용
-         */
-
-        if (
-            category === 'castle' &&
-            controller?.getSkinCfg
-        ) {
-
-            try {
-
-                const cfg =
-                    controller.getSkinCfg(
-                        Number(id)
-                    );
-
-                if (cfg)
-                    return cfg;
-
-            } catch {}
-        }
-
-
-        /*
-         * CastleHalo는 _dataList에 cfg가 존재하는 구조
-         */
-
-        if (
-            category ===
-                'castleHalo' &&
-            Array.isArray(
-                controller?._dataList
-            )
-        ) {
-
-            for (
-                const entry
-                of controller._dataList
-            ) {
-
-                const cfg =
-                    entry?.cfg ||
-                    entry;
-
-                if (
-                    cfg &&
-                    idEqual(
-                        cfg.id,
-                        id
-                    )
-                ) {
-
-                    return cfg;
-                }
-            }
-        }
-
-
-        /*
-         * 아이템 Component 내부 config 탐색
-         */
-
-        if (itemRoot) {
-
-            for (
-                const comp
-                of itemRoot._components || []
-            ) {
-
-                const cfg =
-                    findConfigInObject(
-                        comp,
-                        id
-                    );
-
-                if (cfg)
-                    return cfg;
-            }
-        }
-
-
-        /*
-         * Controller 내부 fallback
-         */
-
-        if (controller) {
-
-            const cfg =
-                findConfigInObject(
-                    controller,
-                    id
-                );
-
-            if (cfg)
-                return cfg;
-        }
-
-
-        return null;
-    }
-
-
-    /* ============================================================
-     * Plain JSON 변환
-     * ============================================================ */
 
     function sanitizeObject(
         value,
@@ -1784,283 +1663,244 @@
     }
 
 
-    async function tryLocalizedBuffs(
-        category,
-        controller,
-        cfg
-    ) {
-
-        if (
-            !controller ||
-            !cfg ||
-            typeof controller
-                .refreshBuffContent !==
-                'function'
-        ) {
-
-            return null;
-        }
-
-
-        /*
-         * 예전 기지용 Exporter가 살아있다면
-         * 검증된 구현 우선 사용
-         */
-
-        if (
-            category === 'castle' &&
-            window.TopWarSkinExporter
-                ?.getBuff
-        ) {
-
-            try {
-
-                const result =
-                    await window
-                        .TopWarSkinExporter
-                        .getBuff(
-                            Number(
-                                cfg.id
-                            )
-                        );
-
-                if (result)
-                    return result;
-
-            } catch {}
-        }
-
-
-        const oldUse =
-            controller
-                .useBuffContent;
-
-        const oldOwn =
-            controller
-                .ownBuffContent;
-
-
-        const useTemp =
-            createTempBuffNode();
-
-        const ownTemp =
-            createTempBuffNode();
-
-
-        const saved = {
-
-            _curHaloCfg:
-                controller
-                    ._curHaloCfg,
-
-            _currId:
-                controller
-                    ._currId,
-
-            _effectId:
-                controller
-                    ._effectId,
-
-            _skinId:
-                controller
-                    ._skinId
-        };
-
-
-        try {
-
-            controller
-                .useBuffContent =
-                useTemp.content;
-
-            controller
-                .ownBuffContent =
-                ownTemp.content;
-
-
-            if (
-                category ===
-                'castleHalo'
-            ) {
-
-                controller
-                    ._curHaloCfg =
-                    cfg;
-            }
-
-
-            if (
-                category ===
-                'cityEffect'
-            ) {
-
-                controller
-                    ._effectId =
-                    Number(
-                        cfg.id
-                    );
-            }
-
-
-            if (
-                category ===
-                'armyLine'
-            ) {
-
-                controller
-                    ._currId =
-                    Number(
-                        cfg.id
-                    );
-            }
-
-
-            /*
-             * armyLine / cityEffect 계열은 cfg 파라미터를
-             * 받는 구현도 있으므로 함수 length 확인
-             */
-
-            if (
-                controller
-                    .refreshBuffContent
-                    .length >= 1
-            ) {
-
-                controller
-                    .refreshBuffContent(
-                        cfg
-                    );
-
-            } else {
-
-                controller
-                    .refreshBuffContent();
-            }
-
-
-            /*
-             * Cocos destroy / instantiate 반영 한 프레임 대기
-             */
-
-            await new Promise(
-                resolve =>
-                    requestAnimationFrame(
-                        () =>
-                            requestAnimationFrame(
-                                resolve
-                            )
-                    )
-            );
-
-
-            return {
-
-                equipText:
-                    readBuffChildren(
-                        useTemp.content
-                    ),
-
-                ownText:
-                    readBuffChildren(
-                        ownTemp.content
-                    )
-            };
-
-
-        } catch (e) {
-
-            return null;
-
-
-        } finally {
-
-            controller
-                .useBuffContent =
-                oldUse;
-
-            controller
-                .ownBuffContent =
-                oldOwn;
-
-
-            controller
-                ._curHaloCfg =
-                saved._curHaloCfg;
-
-            controller
-                ._currId =
-                saved._currId;
-
-            controller
-                ._effectId =
-                saved._effectId;
-
-            controller
-                ._skinId =
-                saved._skinId;
-
-
-            try {
-                useTemp.parent.destroy();
-            } catch {}
-
-            try {
-                ownTemp.parent.destroy();
-            } catch {}
-        }
-    }
-
-
-    function mergeBuffData(
-        raw,
-        rendered
-    ) {
-
-        return raw.map(
-            (item, index) => {
-
-                const text =
-                    rendered?.[
-                        index
-                    ] || '';
-
-
-                const parts =
-                    splitBuffText(
-                        text
-                    );
-
-
-                return {
-
-                    buffId:
-                        item.buffId,
-
-                    rawValue:
-                        item.rawValue,
-
-                    detail:
-                        item.detail,
-
-                    name:
-                        parts.name,
-
-                    value:
-                        parts.value,
-
-                    text,
-
-                    raw:
-                        item.raw
-                };
-            }
+    function findController(category, root) {
+        const matches = comp => comp && (
+            category === 'castle' ? typeof comp.getSkinCfg === 'function' && typeof comp.refreshBuffContent === 'function' :
+            category === 'armyLine' ? typeof comp.initcontent === 'function' && typeof comp.onSelectChange === 'function' :
+            category === 'cityEffect' ? typeof comp.initEffectContent === 'function' && typeof comp.onSelectChange === 'function' :
+            typeof comp.initHaloCfg === 'function' && typeof comp.addBuffItemToParent === 'function'
         );
+        let found = null;
+        // The castle controller lives ABOVE skinNode, not inside its subtree.
+        for (let node = root; node && !found; node = node.parent) {
+            found = (node._components || []).find(matches) || null;
+        }
+        if (!found) walk(root, node => {
+            if (!found) found = (node._components || []).find(matches) || null;
+        });
+        if (!found && category === 'castle' && matches(window.__towerController)) found = window.__towerController;
+        if (found) state.controllers[category] = found;
+        return found;
+    }
+
+    function validConfig(cfg, id) {
+        return cfg && idEqual(cfg.id, id) && typeof cfg.equip_buff === 'string' && typeof cfg.own_buff === 'string';
+    }
+
+    function captureTableConfig(category, id, controller) {
+        // Verified game functions fetch the public table row before assigning these fields.
+        // Run ONLY that prefix on an isolated receiver and stop at the assignment.
+        // No selection changes, live controller writes, UI updates or network calls.
+        const fields = { armyLine: '_skincfg', cityEffect: '_effectCfg', castleHalo: '_curHaloCfg' };
+        const field = fields[category];
+        const method = category === 'castleHalo' ? 'selectHaloId' : 'onSelectChange';
+        const fn = controller?.[method];
+        if (!field || typeof fn !== 'function') return null;
+        const source = Function.prototype.toString.call(fn);
+        if (!source.includes('getTableDataById') || !source.includes(field)) return null;
+        let captured = null;
+        const stop = {};
+        const receiver = Object.assign(Object.create(null), {
+            content: { childrenCount: 1, children: [{ name: String(id) }] },
+            selectIdx: 0, _skinId: Number(id), _effectId: Number(id), _curHaloId: Number(id),
+        });
+        const probe = new Proxy(receiver, {
+            get(target, key) {
+                if (Object.prototype.hasOwnProperty.call(target, key)) return target[key];
+                throw new Error(`Config lookup prefix changed: ${category}.${String(key)}`);
+            },
+            set(target, key, value) {
+                if (key === field && value != null) {
+                    if (validConfig(value, id)) captured = value;
+                    throw stop;
+                }
+                target[key] = value;
+                return true;
+            },
+        });
+        try { fn.call(probe, category === 'castleHalo' ? Number(id) : false); }
+        catch (error) { if (error !== stop) warn('Config lookup:', category, id, error.message); }
+        return captured;
+    }
+
+    function findConfig(category, id, itemRoot, controller) {
+        if (category === 'castle' && controller?.getSkinCfg) {
+            try {
+                const cfg = controller.getSkinCfg(Number(id), false);
+                if (validConfig(cfg, id)) return cfg;
+            } catch (error) { warn('getSkinCfg:', id, error.message); }
+        }
+        if (category === 'castleHalo') {
+            for (const entry of controller?._dataList || []) {
+                const cfg = entry?.cfg || entry;
+                if (validConfig(cfg, id)) return cfg;
+            }
+        }
+        const captured = captureTableConfig(category, id, controller);
+        if (captured) return captured;
+        for (const comp of itemRoot?._components || []) {
+            const cfg = findConfigInObject(comp, id);
+            if (validConfig(cfg, id)) return cfg;
+        }
+        return null;
+    }
+
+    const localizedBuffCache = new Map();
+
+    async function renderOneBuff(raw) {
+        const halo = findController('castleHalo', findCategoryRoot('castleHalo'));
+        if (!halo?.buffItem || typeof halo.addBuffItemToParent !== 'function') {
+            throw new Error('기지 오라 탭을 한 번 열어 효과 설명 렌더러를 로드한 뒤 다시 시도하세요.');
+        }
+        const temp = createTempBuffNode();
+        try {
+            // The game's common EFFECTBUFF decoder handles localization and value_type.
+            // One buff at a time prevents skipped IDs from shifting text onto another buff.
+            halo.addBuffItemToParent.call({ buffItem: halo.buffItem }, [raw.raw], temp.content);
+            const child = temp.content.children?.[0];
+            const component = child?.getComponent?.('BuffLabelComponent');
+            const labels = component?.labelArr;
+            const name = String(labels?.[0]?.string || '').trim();
+            const value = String(labels?.[1]?.string || '').trim();
+            if (!name) {
+                return { ...raw, name: '', value: '', text: '', resolved: false,
+                    resolutionError: '공통 EFFECTBUFF 렌더러에서 설명을 얻지 못함' };
+            }
+            return { ...raw, name, value, text: [name, value].filter(Boolean).join(' '), resolved: true };
+        } finally {
+            temp.parent.destroy();
+        }
+    }
+
+    async function decodeBuffs(value) {
+        const result = [];
+        for (const raw of parseBuffString(value)) {
+            if (!Number.isFinite(raw.buffId) || !Number.isFinite(raw.rawValue)) {
+                throw new Error(`잘못된 효과 데이터: ${raw.raw}`);
+            }
+            if (!localizedBuffCache.has(raw.raw)) {
+                const promise = renderOneBuff(raw).catch(error => { localizedBuffCache.delete(raw.raw); throw error; });
+                localizedBuffCache.set(raw.raw, promise);
+            }
+            result.push({ ...await localizedBuffCache.get(raw.raw) });
+        }
+        return result;
+    }
+
+    function filterDisplayedOwnBuffs(category, id, value) {
+        const suppressed = [];
+        const parts = String(value || '').split('|').filter(Boolean).filter(part => {
+            // Exact exception present in the supplied castle refreshBuffContent source.
+            if (category === 'castle' && Number(id) === 1790000 && Number(part.split(',')[0]) === 990432) {
+                suppressed.push({ field: 'ownBuff', buffId: 990432, raw: part,
+                    reason: '게임의 크리스탈 오두막 보유 효과 표시 제외 조건' });
+                return false;
+            }
+            return true;
+        });
+        return { value: parts.join('|'), suppressed };
+    }
+
+    async function buildExportRecord(item) {
+        const controller = findController(item.category, findCategoryRoot(item.category));
+        const cfg = findConfig(item.category, item.id, item.itemRoot, controller);
+        if (!cfg) throw new Error(`${item.categoryName} ${item.name} (${item.id}): 공용 설정 조회 실패`);
+        item.config = cfg;
+        item.controller = controller;
+        // Resolve before serializing metadata; image failures remain separately reported.
+        try { await itemToCanvas(item); }
+        catch (error) { item.imageLoadError = String(error.message || error); }
+        let own = cfg.own_buff;
+        let ownBuffSourceId = cfg.id;
+        // Verified castle behavior: variants can inherit the base skin's collection effects.
+        if (item.category === 'castle' && own === '' && cfg.change_group) {
+            const inherited = findConfig('castle', cfg.change_group, null, controller);
+            if (!inherited) throw new Error(`보유 효과 원본 조회 실패: ${cfg.change_group}`);
+            own = inherited.own_buff;
+            ownBuffSourceId = inherited.id;
+        }
+        return {
+            id: /^\d+$/.test(item.id) ? Number(item.id) : item.id,
+            name: detectDisplayName(item.itemRoot, item.id, cfg) || item.name || cfg.displayName || cfg.name || '', nameKey: cfg.name || '', image: item.image, spriteFrame: item.spriteFrame,
+            equipBuff: await decodeBuffs(cfg.equip_buff),
+            ownBuff: await decodeBuffs(filterDisplayedOwnBuffs(item.category, cfg.id, own).value),
+            suppressedEffects: filterDisplayedOwnBuffs(item.category, cfg.id, own).suppressed,
+            ownBuffSourceId, raw: sanitizeObject(cfg),
+        };
+    }
+
+    function diagnoseCatalog() {
+        const root = findCategoryRoot('castle');
+        const controller = findController('castle', root);
+        const children = controller?.castleContent?.children || [];
+        const listIds = children.map(node => node.name).filter(name => /^\d+$/.test(name || ''));
+        const poolIds = Object.values(controller?._SkinItemPool || {}).map(node => node?.name).filter(name => /^\d+$/.test(name || ''));
+        const exportedIds = (state.items.castle || []).map(item => String(item.id));
+        const data = { version: VERSION, rootFound: Boolean(root), controllerFound: Boolean(controller),
+            listNodeCount: children.length, listIds, poolIds, exportedIds,
+            distinctListCount: new Set(listIds).size, collectedCount: exportedIds.length,
+            missingFromExport: [...new Set([...listIds,...poolIds])].filter(id => !exportedIds.includes(id)) };
+        console.log('[TopWarAppearance] 기지 목록 진단', data);
+        return data;
+    }
+
+    function diagnose() {
+        const result = Object.keys(CATEGORY).map(key => {
+            const controller = findController(key, findCategoryRoot(key));
+            const items = state.items[key];
+            const missing = items.filter(item => !findConfig(key, item.id, item.itemRoot, controller));
+            return { category: CATEGORY[key].name, controllerFound: Boolean(controller),
+                items: items.length, configFound: items.length - missing.length,
+                missingIds: missing.map(item => item.id) };
+        });
+        console.table(result.map(({ missingIds, ...row }) => ({ ...row, missing: missingIds.length })));
+        return result;
     }
 
 
-    /* ============================================================
-     * 카테고리 스캔
-     * ============================================================ */
+    function completeCastleCatalog(controller, result) {
+        const byId = new Map(result.map(item => [String(item.id), item]));
+        const roots = new Map();
+        // The list item ID exists before its icon/SpriteFrame finishes loading.
+        for (const node of controller?.castleContent?.children || []) {
+            if (/^\d+$/.test(node.name || '')) roots.set(String(node.name), node);
+        }
+        for (const node of Object.values(controller?._SkinItemPool || {})) {
+            if (/^\d+$/.test(node?.name || '')) roots.set(String(node.name), node);
+        }
+        const previous = [...priorCastleCatalog, ...(state.items.castle || [])];
+        const candidates = new Map(previous.map(item => [String(item.id), { id: String(item.id), previous: item }]));
+        for (const [id, node] of roots) candidates.set(id, { id, node });
+        for (const { id, node, previous: old } of candidates.values()) {
+            if (byId.has(id)) continue;
+            const config = findConfig('castle', id, node || null, controller);
+            if (!config) continue;
+            const icon = node ? findNodeByNames(node, CATEGORY.castle.iconNames) : null;
+            const sf = getSpriteFrame(icon);
+            const info = getSpriteInfo(sf);
+            byId.set(id, {
+                category: 'castle', categoryName: CATEGORY.castle.name, folder: 'castle', id,
+                name: detectDisplayName(node, id, config) || old?.name || config.displayName || config.name || '',
+                nameKey: config.name || '', image: 'images/' + id + '.png',
+                spriteFrame: info?.name || '', rotated: info?.rotated || false,
+                textureUrl: info?.textureUrl || '', sf, node: icon, itemRoot: node || null,
+                controller, config, path: 'castleContent/' + id,
+            });
+        }
+        return [...byId.values()];
+    }
+
+    async function settleCastleCatalog() {
+        let count = -1, stable = 0;
+        // Allow the game's frame-task list construction to finish before export.
+        for (let attempt = 0; attempt < 24; attempt++) {
+            const current = scanCategory('castle').length;
+            stable = current === count ? stable + 1 : 0;
+            count = current;
+            if (stable >= 4 && current > 0) return;
+            await new Promise(resolve => setTimeout(resolve, 250));
+        }
+    }
 
     function scanCategory(key) {
 
@@ -2076,14 +1916,13 @@
 
         if (!root) {
 
-            state.items[key] =
-                [];
+            // A temporarily closed tab must not erase an already collected category.
 
             warn(
                 `${cfg.name}: 노드가 로드되지 않았습니다.`
             );
 
-            return [];
+            return state.items[key] || [];
         }
 
 
@@ -2094,7 +1933,7 @@
             );
 
 
-        const result = [];
+        let result = [];
         const seen = new Set();
 
 
@@ -2145,8 +1984,7 @@
                         node
                     );
 
-                if (!sf)
-                    return;
+                if (!sf && key !== 'castle' && key !== 'armyLine') return;
 
 
                 const id =
@@ -2157,10 +1995,8 @@
                     );
 
 
-                const spriteInfo =
-                    getSpriteInfo(
-                        sf
-                    );
+                if (id === '') return;
+                const spriteInfo = getSpriteInfo(sf) || { name: '', rotated: false, textureUrl: '' };
 
 
                 const unique =
@@ -2195,7 +2031,8 @@
                 const displayName =
                     detectDisplayName(
                         itemRoot,
-                        id
+                        id,
+                        rawConfig
                     );
 
 
@@ -2251,6 +2088,8 @@
             }
         );
 
+
+        if (key === 'castle') result = completeCastleCatalog(controller, result);
 
         result.sort(
             (a, b) => {
@@ -2317,154 +2156,6 @@
 
     /* ============================================================
      * 최종 JSON Record 생성
-     * ============================================================ */
-
-    async function buildExportRecord(
-        item
-    ) {
-
-        const cfg =
-            item.config;
-
-
-        const equipRaw =
-            parseBuffString(
-                cfg?.equip_buff
-            );
-
-
-        const ownRaw =
-            parseBuffString(
-                cfg?.own_buff
-            );
-
-
-        let localized =
-            null;
-
-
-        if (
-            cfg &&
-            (
-                equipRaw.length ||
-                ownRaw.length
-            )
-        ) {
-
-            localized =
-                await tryLocalizedBuffs(
-                    item.category,
-                    item.controller,
-                    cfg
-                );
-        }
-
-
-        const equipText =
-            localized
-                ?.equipText ||
-            localized
-                ?.equip ||
-            [];
-
-
-        const ownText =
-            localized
-                ?.ownText ||
-            localized
-                ?.own ||
-            [];
-
-
-        /*
-         * 기존 exporter 결과 형식 대응
-         */
-
-        const normalizeRendered =
-            value => {
-
-                if (
-                    !Array.isArray(value)
-                ) {
-                    return [];
-                }
-
-                return value.map(
-                    x => {
-
-                        if (
-                            typeof x ===
-                            'string'
-                        ) {
-                            return x;
-                        }
-
-
-                        return (
-                            x?.text ||
-                            [
-                                x?.name,
-                                x?.value
-                            ]
-                                .filter(Boolean)
-                                .join(' ')
-                        );
-                    }
-                );
-            };
-
-
-        return {
-
-            id:
-                /^\d+$/.test(
-                    item.id
-                )
-                    ? Number(
-                        item.id
-                    )
-                    : item.id,
-
-            name:
-                item.name,
-
-            nameKey:
-                item.nameKey,
-
-            image:
-                item.image,
-
-            spriteFrame:
-                item.spriteFrame,
-
-            equipBuff:
-                mergeBuffData(
-                    equipRaw,
-                    normalizeRendered(
-                        equipText
-                    )
-                ),
-
-            ownBuff:
-                mergeBuffData(
-                    ownRaw,
-                    normalizeRendered(
-                        ownText
-                    )
-                ),
-
-            raw:
-                cfg
-                    ? sanitizeObject(
-                        cfg
-                    )
-                    : null
-        };
-    }
-
-
-    /* ============================================================
-     * JSZip Loader
      * ============================================================ */
 
     async function ensureJSZip() {
@@ -2594,7 +2285,9 @@
              * 최신 목록으로 다시 스캔
              */
 
+            localizedBuffCache.clear();
             scanAll();
+            await settleCastleCatalog();
 
 
             const missing =
@@ -2653,6 +2346,9 @@
                     categories: {}
                 };
 
+
+            const unresolvedEffects = [];
+            const imageFailures = [];
 
             let totalImages =
                 0;
@@ -2722,52 +2418,24 @@
                         );
 
                     } catch (e) {
-
-                        console.warn(
-                            '데이터 생성 실패',
-                            item,
-                            e
-                        );
-
-
-                        records.push({
-
-                            id:
-                                item.id,
-
-                            name:
-                                item.name,
-
-                            nameKey:
-                                item.nameKey,
-
-                            image:
-                                item.image,
-
-                            spriteFrame:
-                                item.spriteFrame,
-
-                            equipBuff: [],
-
-                            ownBuff: [],
-
-                            raw:
-                                item.config
-                                    ? sanitizeObject(
-                                        item.config
-                                    )
-                                    : null,
-
-                            exportError:
-                                String(
-                                    e?.message ||
-                                    e
-                                )
-                        });
+                        throw new Error(item.name + ': ' + (e.message || e));
                     }
                 }
 
 
+
+
+                for (const record of records) {
+                    for (const field of ['equipBuff', 'ownBuff']) {
+                        for (const buff of record[field]) {
+                            if (buff.resolved === false) unresolvedEffects.push({
+                                category: category.folder, id: record.id, name: record.name,
+                                field, buffId: buff.buffId, rawValue: buff.rawValue,
+                                detail: buff.detail, raw: buff.raw, reason: buff.resolutionError,
+                            });
+                        }
+                    }
+                }
                 categoryFolder.file(
                     'data.json',
 
@@ -2865,9 +2533,7 @@
                     try {
 
                         const canvas =
-                            await spriteFrameToCanvas(
-                                item.sf
-                            );
+                            await itemToCanvas(item);
 
 
                         const blob =
@@ -2896,6 +2562,14 @@
 
 
                     } catch (e) {
+                        const texture = getTexture(item.sf);
+                        imageFailures.push({ category: category.folder, id: item.id, name: item.name,
+                            spriteFrame: item.spriteFrame, reason: String(e.message || e),
+                            attemptedPaths: item.imageLoadPaths || [], sourcePath: item.imageSourcePath || null,
+                            frameRetained: retainedImageAssets.has(item.sf), frameValid: item.sf?.isValid,
+                            frameRefCount: item.sf?.refCount, texturePresent: Boolean(texture),
+                            width: texture?.width, height: texture?.height,
+                            textureUrl: getTextureUrl(item.sf), hasReadPixels: typeof texture?.readPixels === 'function' });
 
                         console.warn(
                             '이미지 실패',
@@ -2926,6 +2600,17 @@
                     );
 
 
+            index.unresolvedEffectCount = unresolvedEffects.length;
+            index.imageFailureCount = imageFailures.length;
+            rootFolder.file('export-report.json', JSON.stringify({
+                exporterVersion: VERSION, generatedAt: index.generatedAt,
+                unresolvedEffectCount: unresolvedEffects.length, unresolvedEffects,
+                imageFailureCount: imageFailures.length, imageFailures,
+                castleCatalog: diagnoseCatalog(),
+            }, null, 2));
+            if (unresolvedEffects.length) {
+                warn('설명 미해석 효과: 원본 데이터는 보존했습니다. export-report.json을 확인하세요.', unresolvedEffects);
+            }
             rootFolder.file(
                 'index.json',
 
@@ -3010,7 +2695,7 @@
 
 
             setStatus(
-                `완료 - ${index.total}개 / apperance.zip`
+                `완료 - ${index.total}개 / 설명 미해석 ${unresolvedEffects.length}건 / 이미지 실패 ${imageFailures.length}건 / apperance.zip`
             );
 
 
@@ -3069,9 +2754,7 @@
         try {
 
             const canvas =
-                await spriteFrameToCanvas(
-                    item.sf
-                );
+                await itemToCanvas(item);
 
 
             const blob =
@@ -3992,9 +3675,7 @@
         try {
 
             const canvas =
-                await spriteFrameToCanvas(
-                    item.sf
-                );
+                await itemToCanvas(item);
 
 
             const img =
@@ -4171,9 +3852,7 @@
             );
 
 
-            spriteFrameToCanvas(
-                item.sf
-            )
+            itemToCanvas(item)
                 .then(
                     canvas => {
 
@@ -4183,7 +3862,13 @@
                             );
                     }
                 )
-                .catch(() => {});
+                .catch(error => {
+                    img.hidden = true;
+                    imageCell.textContent = '이미지 실패';
+                    imageCell.title = String(error?.message || error);
+                    imageCell.style.fontSize = '11px';
+                    imageCell.style.color = '#ffb4a9';
+                });
         }
 
 
@@ -4459,6 +4144,29 @@
 
         exportZip,
 
+        diagnose,
+        diagnoseCatalog,
+
+        async diagnoseImages(category = state.category) {
+            const rows = [];
+            for (const item of state.items[category] || []) {
+                try {
+                    const canvas = await itemToCanvas(item);
+                    canvas.toDataURL('image/png');
+                } catch (error) {
+                    const texture = getTexture(item.sf);
+                    rows.push({ category, id: item.id, name: item.name,
+                        spriteFrame: item.spriteFrame, reason: String(error.message || error),
+                        textureUrl: getTextureUrl(item.sf), width: texture?.width, height: texture?.height,
+                        hasReadPixels: typeof texture?.readPixels === 'function',
+                        hasNativeAsset: Boolean(texture?._nativeAsset),
+                        hasOriginalFrame: Boolean(item.sf?._original) });
+                }
+            }
+            console.table(rows);
+            return rows;
+        },
+
         async getData(
             category
         ) {
@@ -4513,7 +4221,10 @@
 
 
         destroy() {
-
+            if (state.exporting || imageLoadCount > 0) {
+                throw new Error('이미지 로딩 또는 ZIP 생성이 끝난 뒤 관리자를 닫거나 교체하세요.');
+            }
+            // Never release shared game textures when removing this overlay.
             root.remove();
 
             document
@@ -4549,6 +4260,7 @@
 TopWarAppearanceManager 사용 가능
 
 TopWarAppearanceManager.scan()
+TopWarAppearanceManager.diagnose()
 
 TopWarAppearanceManager.exportZip()
 
