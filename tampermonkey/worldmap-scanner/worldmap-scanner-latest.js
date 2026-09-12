@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.34 - Synchronized Season Group Collection
+// @name         TopWar Unified Automation V2.14.9.35 - Synchronized Season Group Collection
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.34
+// @version      2.14.9.35
 // @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -9984,6 +9984,7 @@ TOPWAR.clearThiefQueue()
         try { return localStorage.getItem(SCANNER_ROLE_STORAGE_KEY); } catch { return null; }
       })() || "unpopular";
       scannerRoleSelect.innerHTML = [
+        `<option value="all">전체 (필터 없음)</option>`,
         `<option value="unpopular">비인기 서버</option>`,
         ...Array.from({ length: count }, (_, index) =>
           `<option value="popular-${index + 1}">인기 서버 ${index + 1}</option>`
@@ -10038,6 +10039,10 @@ TOPWAR.clearThiefQueue()
 
     async function filterServerIdsByScannerRole(serverIds) {
       const requested = parseServerIdsStrict(serverIds);
+      if (scannerRoleSelect.value === "all") {
+        lastRoleFilteredIds = requested.slice();
+        return lastRoleFilteredIds.slice();
+      }
       const rows = await loadActivityServerRows();
       const activityByServer = new Map(rows.map(row => [
         Number(row?.serverNumber ?? row?.serverId ?? row?.server),
@@ -11373,7 +11378,9 @@ TOPWAR.clearThiefQueue()
         const serverIds = await resolveMapSurveyServerIds();
 
         if (!serverIds.length) {
-          alert(lastServerListError
+          alert(explicitInputServerIds().length
+            ? "입력한 서버 중 현재 지도 대상 및 담당 필터에 해당하는 서버가 없습니다. 역할을 전체 (필터 없음)로 선택하거나 서버 목록을 확인하세요."
+            : lastServerListError
             ? `popular 서버목록을 읽지 못했습니다. 직접 서버번호를 입력하세요.
 
 ${lastServerListError}`
@@ -11424,7 +11431,9 @@ ${lastServerListError}`
         const serverIds = await resolveMapSurveyServerIds();
 
         if (!serverIds.length) {
-          alert(lastServerListError
+          alert(explicitInputServerIds().length
+            ? "입력한 서버 중 현재 지도 대상 및 담당 필터에 해당하는 서버가 없습니다. 역할을 전체 (필터 없음)로 선택하거나 서버 목록을 확인하세요."
+            : lastServerListError
             ? `GitHub 서버목록을 읽지 못했습니다. 직접 서버번호를 입력하세요.
 
 ${lastServerListError}`
