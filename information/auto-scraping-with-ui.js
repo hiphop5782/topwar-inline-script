@@ -5,7 +5,7 @@
 
     /* ============================================================
      * TopWar Navigation Controller
-     * v0.8.5
+     * v0.8.6
      *
      * 상태
      * - BASE
@@ -21,10 +21,10 @@
      * WORLD_MINIMAP은 내부 중간 상태
      * ============================================================ */
 
-    const VERSION = '0.8.5';
+    const VERSION = '0.8.6';
 
-    const UI_ID = 'topwar-nav-v085';
-    const STYLE_ID = 'topwar-nav-v085-style';
+    const UI_ID = 'topwar-nav-v086';
+    const STYLE_ID = 'topwar-nav-v086-style';
 
     const WATCH_INTERVAL = 250;
 
@@ -4526,7 +4526,7 @@
      * ============================================================ */
 
 
-    const VERSION = '0.8.5';
+    const VERSION = '0.8.6';
 
 
     const TAB_ORDER = [
@@ -6428,7 +6428,7 @@ function inspectCurrentProfileItems() {
      *   window.TOPWAR_CHARACTER_SALE_DATA
      * ============================================================ */
 
-    const SALE_SCHEMA_VERSION = '0.8.5';
+    const SALE_SCHEMA_VERSION = '0.8.6';
 
     const SALE_PROGRESS_ITEMS = Object.freeze([
         { key: 'profileBasic', label: '프로필 기본 정보', implemented: true },
@@ -8808,9 +8808,6 @@ function inspectCurrentProfileItems() {
         let visibleSince =
             0;
 
-        let lastNode =
-            null;
-
 
         while (
             !disposed &&
@@ -8855,11 +8852,14 @@ function inspectCurrentProfileItems() {
             }
 
 
-            if (
-                ready &&
-                node ===
-                    lastNode
-            ) {
+            /*
+             * Cocos 가상/동적 UI는 화면이 유지되는 동안에도 같은 이름의
+             * Node 객체 자체를 교체할 수 있다.
+             *
+             * 따라서 객체 identity가 아니라 "동일 의미의 화면이 계속 준비됨"
+             * 상태만 안정 시간 동안 유지되면 준비 완료로 판정한다.
+             */
+            if (ready) {
 
                 if (!visibleSince) {
 
@@ -8874,27 +8874,18 @@ function inspectCurrentProfileItems() {
                     minVisibleMs
                 ) {
 
-                    return node;
+                    /*
+                     * 안정 시간이 지난 시점의 최신 live node를 반환한다.
+                     */
+                    return (
+                        findActiveNodeByName(
+                            name
+                        ) ||
+                        node
+                    );
                 }
 
-            } else if (
-                ready
-            ) {
-
-                /*
-                 * 같은 이름의 다른 노드가 교체된 경우에도
-                 * 안정 시간을 처음부터 다시 계산한다.
-                 */
-                lastNode =
-                    node;
-
-                visibleSince =
-                    Date.now();
-
             } else {
-
-                lastNode =
-                    null;
 
                 visibleSince =
                     0;
@@ -12759,7 +12750,11 @@ function inspectCurrentProfileItems() {
                     0,
                 skipped:
                     0,
+                unknown:
+                    0,
                 failed:
+                    0,
+                equippedHeroCount:
                     0
             },
             awakening: {
@@ -12769,7 +12764,11 @@ function inspectCurrentProfileItems() {
                     0,
                 skipped:
                     0,
+                unknown:
+                    0,
                 failed:
+                    0,
+                awakenedHeroCount:
                     0
             }
         };
@@ -13178,7 +13177,7 @@ function inspectCurrentProfileItems() {
                             baseEligible:
                                 awakeningBaseEligible,
                             requirement:
-                                '5성 · 120레벨 · 특성 4개 모두 최대치 · 장착 스킬 5레벨 이상',
+                                '5성 · 120레벨 · 특성 데이터 존재 · 장착 스킬 5레벨 이상',
                             maxEquippedSkillLevel
                         }
                     };
@@ -13219,13 +13218,17 @@ function inspectCurrentProfileItems() {
                                     collectCurrentHeroTraits({
                                         ...options,
                                         maxRetries:
-                                            options.maxRetries ??
-                                            3
+                                            options.traitMaxRetries ??
+                                            1
                                     }),
                                 {
+                                    /*
+                                     * 특성 UI readiness를 수정했으므로
+                                     * 실패 시 무의미한 4회 반복 대신 최대 2회만 시도.
+                                     */
                                     maxRetries:
-                                        options.maxRetries ??
-                                        3,
+                                        options.traitMaxRetries ??
+                                        1,
                                     retryDelay:
                                         options.retryDelay ??
                                         350,
@@ -13300,41 +13303,82 @@ function inspectCurrentProfileItems() {
 
 
                     /*
-                     * 타이탄/각성 후속 조사는 특성이 단순히 존재하는지만
-                     * 확인하지 않는다.
+                     * 특성 판정은 3상태로 분리한다.
                      *
-                     * 총 4개의 특성이 모두 존재하고,
-                     * 각 특성 progress가 current/max 기준으로 모두 최대치일 때만
-                     * 후속 고비용 조사를 수행한다.
+                     * 1) KNOWN + 데이터 있음
+                     * 2) KNOWN + 실제로 비어 있음
+                     * 3) UNKNOWN = 특성 수집 자체 실패
+                     *
+                     * UNKNOWN을 "특성 0개"로 오판하면 실제 타이탄/각성 보유 영웅을
+                     * 전부 0개로 만들어버리므로 절대 empty로 취급하지 않는다.
                      */
-                    const traitCompletion =
-                        inspectTraitCompletion(
-                            trait
-                        );
-
-
-                    const traitHasData =
-                        traitCompletion.actualCount >
-                        0;
-
-
-                    const traitAllMaxed =
-                        traitCompletion.allFull ===
+                    const traitKnown =
+                        trait?.ok ===
                         true;
 
 
+                    const traitCompletion =
+                        traitKnown
+                            ? inspectTraitCompletion(
+                                trait
+                              )
+                            : {
+                                expectedCount:
+                                    4,
+                                actualCount:
+                                    null,
+                                hasAllFour:
+                                    null,
+                                allFull:
+                                    null,
+                                fullCount:
+                                    null,
+                                items:
+                                    []
+                              };
+
+
+                    const traitHasData =
+                        traitKnown &&
+                        Number(
+                            traitCompletion.actualCount
+                        ) >
+                            0;
+
+
+                    const traitAllMaxed =
+                        traitKnown &&
+                        traitCompletion.allFull ===
+                            true;
+
+
+                    /*
+                     * 타이탄: 특성 4개 모두 MAX
+                     */
                     const titanEligible =
                         traitEligible &&
+                        traitKnown &&
                         traitAllMaxed;
 
 
+                    /*
+                     * 각성: 특성이 비어있지 않고 + 장착 스킬 5레벨 이상.
+                     * 특성 4개 MAX 조건은 각성에는 적용하지 않는다.
+                     */
                     const awakeningEligible =
                         awakeningBaseEligible &&
-                        traitAllMaxed;
+                        traitKnown &&
+                        traitHasData;
+
+
+                    eligibility.trait.known =
+                        traitKnown;
 
 
                     eligibility.trait.hasData =
-                        traitHasData;
+                        traitKnown
+                            ? traitHasData
+                            : null;
 
 
                     eligibility.trait.completion =
@@ -13342,15 +13386,23 @@ function inspectCurrentProfileItems() {
 
 
                     eligibility.trait.allMaxed =
-                        traitAllMaxed;
+                        traitKnown
+                            ? traitAllMaxed
+                            : null;
 
 
                     eligibility.titan.eligible =
                         titanEligible;
 
 
+                    eligibility.titan.traitKnown =
+                        traitKnown;
+
+
                     eligibility.titan.traitAllMaxed =
-                        traitAllMaxed;
+                        traitKnown
+                            ? traitAllMaxed
+                            : null;
 
 
                     eligibility.titan.traitCompletion =
@@ -13361,8 +13413,14 @@ function inspectCurrentProfileItems() {
                         awakeningEligible;
 
 
-                    eligibility.awakening.traitAllMaxed =
-                        traitAllMaxed;
+                    eligibility.awakening.traitKnown =
+                        traitKnown;
+
+
+                    eligibility.awakening.traitHasData =
+                        traitKnown
+                            ? traitHasData
+                            : null;
 
 
                     eligibility.awakening.traitCompletion =
@@ -13379,35 +13437,65 @@ function inspectCurrentProfileItems() {
 
                     if (!titanEligible) {
 
-                        titan = {
-                            ok: true,
-                            available: false,
-                            skipped: true,
-                            reason:
-                                !traitEligible
-                                    ? '타이탄 조건 미충족: 5성 · 120레벨 필요'
-                                    : (
-                                        !traitHasData
-                                            ? '타이탄 조사 스킵: 특성 데이터가 비어 있음'
-                                            : (
-                                                traitCompletion.actualCount !==
-                                                    4
-                                                    ? `타이탄 조사 스킵: 특성이 ${traitCompletion.actualCount}/4개`
-                                                    : `타이탄 조사 스킵: 특성 최대치 ${traitCompletion.fullCount}/4개`
-                                              )
-                                      ),
-                            eligibility: {
-                                star:
-                                    heroStar,
-                                level:
-                                    heroLevel,
-                                traitHasData,
-                                traitAllMaxed,
-                                traitCompletion
-                            },
-                            slots: [],
-                            attempts: []
-                        };
+                        if (
+                            traitEligible &&
+                            !traitKnown
+                        ) {
+
+                            titan = {
+                                ok: false,
+                                available: null,
+                                skipped: false,
+                                unknown: true,
+                                blocked: true,
+                                reason:
+                                    '타이탄 판정 불가: 특성 수집 실패',
+                                eligibility: {
+                                    star:
+                                        heroStar,
+                                    level:
+                                        heroLevel,
+                                    traitKnown:
+                                        false,
+                                    traitCompletion
+                                },
+                                slots: [],
+                                attempts: []
+                            };
+
+                        } else {
+
+                            titan = {
+                                ok: true,
+                                available: false,
+                                skipped: true,
+                                reason:
+                                    !traitEligible
+                                        ? '타이탄 조건 미충족: 5성 · 120레벨 필요'
+                                        : (
+                                            !traitHasData
+                                                ? '타이탄 조사 스킵: 특성 데이터가 비어 있음'
+                                                : (
+                                                    traitCompletion.actualCount !==
+                                                        4
+                                                        ? `타이탄 조사 스킵: 특성이 ${traitCompletion.actualCount}/4개`
+                                                        : `타이탄 조사 스킵: 특성 최대치 ${traitCompletion.fullCount}/4개`
+                                                  )
+                                          ),
+                                eligibility: {
+                                    star:
+                                        heroStar,
+                                    level:
+                                        heroLevel,
+                                    traitKnown,
+                                    traitHasData,
+                                    traitAllMaxed,
+                                    traitCompletion
+                                },
+                                slots: [],
+                                attempts: []
+                            };
+                        }
 
                     } else {
 
@@ -13455,7 +13543,15 @@ function inspectCurrentProfileItems() {
                     }
 
 
-                    if (!titan.ok) {
+                    if (
+                        titan.unknown ===
+                        true
+                    ) {
+
+                        summary.titan.unknown +=
+                            1;
+
+                    } else if (!titan.ok) {
 
                         summary.titan.failed +=
                             1;
@@ -13480,6 +13576,19 @@ function inspectCurrentProfileItems() {
 
                         summary.titan.available +=
                             1;
+
+
+                        if (
+                            Number(
+                                titan.equippedCount ||
+                                0
+                            ) >
+                            0
+                        ) {
+
+                            summary.titan.equippedHeroCount +=
+                                1;
+                        }
                     }
 
 
@@ -13510,44 +13619,69 @@ function inspectCurrentProfileItems() {
 
                     if (!awakeningEligible) {
 
-                        awakening = {
-                            ok: true,
-                            available: false,
-                            skipped: true,
-                            reason:
-                                !traitEligible
-                                    ? '각성 조건 미충족: 5성 · 120레벨 필요'
-                                    : (
-                                        !traitHasData
-                                            ? '각성 조사 스킵: 특성 데이터가 비어 있음'
-                                            : (
-                                                !traitAllMaxed
-                                                    ? (
-                                                        traitCompletion.actualCount !==
-                                                            4
-                                                            ? `각성 조사 스킵: 특성이 ${traitCompletion.actualCount}/4개`
-                                                            : `각성 조사 스킵: 특성 최대치 ${traitCompletion.fullCount}/4개`
-                                                      )
-                                                    : '각성 조건 미충족: 장착 스킬 5레벨 이상 필요'
-                                              )
-                                      ),
-                            eligibility: {
-                                star:
-                                    heroStar,
+                        if (
+                            traitEligible &&
+                            !traitKnown
+                        ) {
+
+                            awakening = {
+                                ok: false,
+                                available: null,
+                                skipped: false,
+                                unknown: true,
+                                blocked: true,
+                                reason:
+                                    '각성 판정 불가: 특성 수집 실패',
+                                eligibility: {
+                                    star:
+                                        heroStar,
+                                    level:
+                                        heroLevel,
+                                    traitKnown:
+                                        false,
+                                    traitCompletion,
+                                    maxEquippedSkillLevel
+                                },
                                 level:
-                                    heroLevel,
-                                traitHasData,
-                                traitAllMaxed,
-                                traitCompletion,
-                                maxEquippedSkillLevel
-                            },
-                            level:
-                                null,
-                            skills:
-                                [],
-                            attempts:
-                                []
-                        };
+                                    null,
+                                skills:
+                                    [],
+                                attempts:
+                                    []
+                            };
+
+                        } else {
+
+                            awakening = {
+                                ok: true,
+                                available: false,
+                                skipped: true,
+                                reason:
+                                    !traitEligible
+                                        ? '각성 조건 미충족: 5성 · 120레벨 필요'
+                                        : (
+                                            !traitHasData
+                                                ? '각성 조사 스킵: 특성 데이터가 비어 있음'
+                                                : '각성 조건 미충족: 장착 스킬 5레벨 이상 필요'
+                                          ),
+                                eligibility: {
+                                    star:
+                                        heroStar,
+                                    level:
+                                        heroLevel,
+                                    traitKnown,
+                                    traitHasData,
+                                    traitCompletion,
+                                    maxEquippedSkillLevel
+                                },
+                                level:
+                                    null,
+                                skills:
+                                    [],
+                                attempts:
+                                    []
+                            };
+                        }
 
                     } else {
 
@@ -13595,7 +13729,15 @@ function inspectCurrentProfileItems() {
                     }
 
 
-                    if (!awakening.ok) {
+                    if (
+                        awakening.unknown ===
+                        true
+                    ) {
+
+                        summary.awakening.unknown +=
+                            1;
+
+                    } else if (!awakening.ok) {
 
                         summary.awakening.failed +=
                             1;
@@ -13620,6 +13762,37 @@ function inspectCurrentProfileItems() {
 
                         summary.awakening.available +=
                             1;
+
+
+                        const awakened =
+                            Number(
+                                awakening.level ||
+                                0
+                            ) >
+                                0
+                            ||
+                            (
+                                awakening.skills ||
+                                []
+                            ).some(
+                                skill =>
+                                    Number(
+                                        skill?.currentStage ||
+                                        0
+                                    ) >
+                                    0
+                            );
+
+
+                        awakening.awakened =
+                            awakened;
+
+
+                        if (awakened) {
+
+                            summary.awakening.awakenedHeroCount +=
+                                1;
+                        }
                     }
 
 
@@ -13964,7 +14137,11 @@ function inspectCurrentProfileItems() {
                 0 &&
             summary.titan.failed ===
                 0 &&
+            summary.titan.unknown ===
+                0 &&
             summary.awakening.failed ===
+                0 &&
+            summary.awakening.unknown ===
                 0;
 
 
@@ -21194,7 +21371,7 @@ function inspectCurrentProfileItems() {
     }
 
     const api = {
-        integrationVersion: '0.8.5',
+        integrationVersion: '0.8.6',
         hideGameButton, restoreGameButton, removeGameAction,
         getHiddenGameButtons: () => Object.fromEntries(hiddenGameButtons),
         listGameButtons,
