@@ -5,7 +5,7 @@
 
     /* ============================================================
      * TopWar Navigation Controller
-     * v0.8.6
+     * v0.9.3
      *
      * 상태
      * - BASE
@@ -21,10 +21,10 @@
      * WORLD_MINIMAP은 내부 중간 상태
      * ============================================================ */
 
-    const VERSION = '0.8.6';
+    const VERSION = '0.9.3';
 
-    const UI_ID = 'topwar-nav-v086';
-    const STYLE_ID = 'topwar-nav-v086-style';
+    const UI_ID = 'topwar-nav-v093';
+    const STYLE_ID = 'topwar-nav-v093-style';
 
     const WATCH_INTERVAL = 250;
 
@@ -4526,7 +4526,7 @@
      * ============================================================ */
 
 
-    const VERSION = '0.8.6';
+    const VERSION = '0.9.3';
 
 
     const TAB_ORDER = [
@@ -6428,7 +6428,7 @@ function inspectCurrentProfileItems() {
      *   window.TOPWAR_CHARACTER_SALE_DATA
      * ============================================================ */
 
-    const SALE_SCHEMA_VERSION = '0.8.6';
+    const SALE_SCHEMA_VERSION = '0.9.3';
 
     const SALE_PROGRESS_ITEMS = Object.freeze([
         { key: 'profileBasic', label: '프로필 기본 정보', implemented: true },
@@ -10334,136 +10334,360 @@ function inspectCurrentProfileItems() {
     }
 
 
-    async function collectCurrentHeroTraits(
-        options = {}
-    ) {
+    function findCurrentTraitPanel() {
 
-        const toggle =
-            await selectHeroDetailToggle(
-                'toggle3',
-                options
+        const named =
+            findActiveNodeByName(
+                'HeroStrengthenPanelNew'
             );
 
 
         if (
-            toggle.available ===
-            false
+            named &&
+            saleNodeIsVisiblyActive(
+                named
+            )
         ) {
 
-            return {
-                ok: true,
-                available:
-                    false,
-                reason:
-                    '특성 탭 없음',
-                items:
-                    []
-            };
+            const hasTalentNode =
+                !!findDescendantByName(
+                    named,
+                    'HeroTalentNode'
+                );
+
+            const hasTalentItem =
+                saleFindNodes(
+                    named,
+                    node =>
+                        node.name ===
+                        'heroTalentItem'
+                ).length >
+                0;
+
+
+            if (
+                hasTalentNode ||
+                hasTalentItem
+            ) {
+
+                return named;
+            }
         }
 
 
-        if (!toggle.ok) {
+        let found =
+            null;
 
-            return {
-                ok: false,
-                available:
-                    true,
-                reason:
-                    '특성 탭 선택 실패'
-            };
+
+        walk(
+            scene(),
+            node => {
+
+                if (
+                    found ||
+                    !isActive(
+                        node
+                    )
+                )
+                    return;
+
+
+                const name =
+                    String(
+                        node?.name ||
+                        ''
+                    );
+
+
+                if (
+                    !/panel|popup|content|talent/i
+                        .test(
+                            name
+                        )
+                )
+                    return;
+
+
+                const hasTalentNode =
+                    !!findDescendantByName(
+                        node,
+                        'HeroTalentNode'
+                    );
+
+                const hasTalentItem =
+                    saleFindNodes(
+                        node,
+                        child =>
+                            child.name ===
+                            'heroTalentItem'
+                    ).length >
+                    0;
+
+
+                if (
+                    hasTalentNode ||
+                    hasTalentItem
+                ) {
+
+                    found =
+                        node;
+                }
+            }
+        );
+
+
+        return found;
+    }
+
+
+    async function waitForCurrentTraitPanel(
+        options = {}
+    ) {
+
+        const timeout =
+            Math.max(
+                300,
+                Number(
+                    options.timeout ??
+                    2600
+                )
+            );
+
+        const stableMs =
+            Math.max(
+                0,
+                Number(
+                    options.stableMs ??
+                    250
+                )
+            );
+
+        const deadline =
+            Date.now() +
+            timeout;
+
+
+        let readySince =
+            0;
+
+
+        while (
+            !disposed &&
+            Date.now() <
+                deadline
+        ) {
+
+            const panel =
+                findCurrentTraitPanel();
+
+
+            if (panel) {
+
+                if (!readySince)
+                    readySince =
+                        Date.now();
+
+
+                if (
+                    Date.now() -
+                    readySince >=
+                    stableMs
+                ) {
+
+                    return (
+                        findCurrentTraitPanel() ||
+                        panel
+                    );
+                }
+
+            } else {
+
+                readySince =
+                    0;
+            }
+
+
+            await saleSleep(
+                80
+            );
         }
 
 
-        const talentRoot =
-            await saleWaitForNode(
-                'HeroDetailTalent2024',
-                {
-                    timeout:
+        return null;
+    }
+
+
+    async function collectCurrentHeroTraits(
+        options = {}
+    ) {
+
+        /*
+         * 진단 결과:
+         * - HeroStrengthenPanelNew가 이미 열린 상태일 수 있음
+         * - 내부 HeroTalentNode / heroTalentItem이 실제 특성 데이터의 근거
+         *
+         * 따라서:
+         * 1) 이미 열린 특성 패널이 있으면 즉시 재사용
+         * 2) 없을 때만 toggle3 -> detailBtn 실행
+         * 3) 패널 이름 단독이 아니라 특성 내용 노드로 최종 판정
+         */
+        let panel =
+            findCurrentTraitPanel();
+
+
+        let openedByCollector =
+            false;
+
+
+        if (!panel) {
+
+            const toggle =
+                await selectHeroDetailToggle(
+                    'toggle3',
+                    options
+                );
+
+
+            if (
+                toggle.available ===
+                false
+            ) {
+
+                return {
+                    ok: true,
+                    available:
+                        false,
+                    reason:
+                        '특성 탭 없음',
+                    items:
+                        []
+                };
+            }
+
+
+            if (!toggle.ok) {
+
+                return {
+                    ok: false,
+                    available:
+                        true,
+                    reason:
+                        '특성 탭 선택 실패'
+                };
+            }
+
+
+            const detailDeadline =
+                Date.now() +
+                Math.max(
+                    800,
+                    Number(
                         options.tabVisibleTimeout ??
-                        2200,
+                        2200
+                    )
+                );
 
-                    minVisibleMs:
-                        options.screenVisibleStableMs ??
-                        SALE_VISIBLE_STABLE_MS
+
+            let detailButton =
+                null;
+
+
+            while (
+                !disposed &&
+                Date.now() <
+                    detailDeadline
+            ) {
+
+                /*
+                 * toggle3 전환 직후 패널이 이미 열렸다면
+                 * detailBtn을 다시 누르지 않고 바로 사용.
+                 */
+                panel =
+                    findCurrentTraitPanel();
+
+
+                if (panel)
+                    break;
+
+
+                detailButton =
+                    findHeroDetailButton({
+                        name:
+                            'detailBtn',
+                        handler:
+                            'detailsClick'
+                    });
+
+
+                if (detailButton)
+                    break;
+
+
+                await saleSleep(
+                    100
+                );
+            }
+
+
+            if (
+                !panel &&
+                !detailButton
+            ) {
+
+                return {
+                    ok: false,
+                    available:
+                        true,
+                    detailAvailable:
+                        false,
+                    reason:
+                        '특성 detailBtn(detailsClick) 확인 실패',
+                    items:
+                        []
+                };
+            }
+
+
+            if (!panel) {
+
+                const pressed =
+                    await pressGameButton(
+                        detailButton.id,
+                        {
+                            waitMs:
+                                350
+                        }
+                    );
+
+
+                if (!pressed?.ok) {
+
+                    return {
+                        ok: false,
+                        available:
+                            true,
+                        reason:
+                            pressed?.reason ||
+                            '특성 세부 사항 진입 실패'
+                    };
                 }
-            );
 
 
-        if (!talentRoot) {
+                openedByCollector =
+                    true;
 
-            return {
-                ok: false,
-                available:
-                    true,
-                reason:
-                    '특성 탭 화면이 안정적으로 표시되지 않음'
-            };
+
+                panel =
+                    await waitForCurrentTraitPanel({
+                        timeout:
+                            options.panelTimeout ??
+                            2800,
+                        stableMs:
+                            options.traitPanelStableMs ??
+                            250
+                    });
+            }
         }
-
-
-        const detailButton =
-            findHeroDetailButton({
-                name:
-                    'detailBtn',
-                handler:
-                    'detailsClick',
-                pathIncludes:
-                    'HeroDetailTalent2024'
-            });
-
-
-        if (!detailButton) {
-
-            return {
-                ok: true,
-                available:
-                    true,
-                detailAvailable:
-                    false,
-                reason:
-                    '특성 세부 사항 버튼 없음',
-                items:
-                    []
-            };
-        }
-
-
-        const pressed =
-            await pressGameButton(
-                detailButton.id,
-                {
-                    waitMs:
-                        220
-                }
-            );
-
-
-        if (!pressed?.ok) {
-
-            return {
-                ok: false,
-                available:
-                    true,
-                reason:
-                    pressed?.reason ||
-                    '특성 세부 사항 진입 실패'
-            };
-        }
-
-
-        const panel =
-            await saleWaitForNode(
-                'HeroStrengthenPanelNew',
-                {
-                    timeout:
-                        options.panelTimeout ??
-                        2600,
-
-                    minVisibleMs:
-                        options.screenVisibleStableMs ??
-                        SALE_VISIBLE_STABLE_MS
-                }
-            );
 
 
         if (!panel) {
@@ -10473,7 +10697,7 @@ function inspectCurrentProfileItems() {
                 available:
                     true,
                 reason:
-                    'HeroStrengthenPanelNew 확인 실패'
+                    '특성 패널 확인 실패: HeroTalentNode/heroTalentItem 없음'
             };
         }
 
@@ -10692,28 +10916,33 @@ function inspectCurrentProfileItems() {
 
         } finally {
 
-            await closeSalePanelByName(
-                'HeroStrengthenPanelNew',
-                {
-                    timeout:
-                        options.closeTimeout ??
-                        2200
-                }
-            );
+            if (
+                openedByCollector
+            ) {
+
+                await closeSalePanelByName(
+                    'HeroStrengthenPanelNew',
+                    {
+                        timeout:
+                            options.closeTimeout ??
+                            2200
+                    }
+                );
 
 
-            await saleWaitForNode(
-                'HeroDetailPopup2024',
-                {
-                    timeout:
-                        options.returnVisibleTimeout ??
-                        1800,
+                await saleWaitForNode(
+                    'HeroDetailPopup2024',
+                    {
+                        timeout:
+                            options.returnVisibleTimeout ??
+                            1800,
 
-                    minVisibleMs:
-                        options.returnVisibleStableMs ??
-                        450
-                }
-            );
+                        minVisibleMs:
+                            options.returnVisibleStableMs ??
+                            450
+                    }
+                );
+            }
         }
 
 
@@ -12629,6 +12858,37 @@ function inspectCurrentProfileItems() {
     }
 
 
+    /*
+     * 상세 조사 대상 영웅 화이트리스트.
+     *
+     * 국제화를 위해 영웅 이름은 코드에 저장하지 않는다.
+     * heroIdCandidate만 판정 기준으로 사용한다.
+     *
+     * 스킬/특성/타이탄/각성 상세 진입은 아래 ID만 수행한다.
+     */
+    const TARGET_DETAIL_HERO_IDS =
+        new Set([
+        169,
+        174,
+        170,
+        172,
+        173,
+        165,
+        234,
+        241,
+        240,
+        239,
+        232,
+        237,
+        334,
+        338,
+        332,
+        337,
+        336,
+        333
+        ]);
+
+
     async function collectDetailedHeroSaleData(
         heroItems,
         options = {}
@@ -12643,14 +12903,19 @@ function inspectCurrentProfileItems() {
 
 
         /*
-         * 판매 정보 상세 조사는 SSR만 수행한다.
-         * SR/R/UNKNOWN은 상세창 자체를 열지 않는다.
+         * 상세 조사는 heroId 화이트리스트에 포함된 영웅만 수행한다.
+         *
+         * rarity/name을 상세 조사 대상 판정에 사용하지 않는다.
+         * 따라서 클라이언트 언어가 바뀌어도 대상 영웅이 바뀌지 않는다.
          */
         const known =
             allKnown.filter(
                 item =>
-                    item?.rarity ===
-                    'SSR'
+                    TARGET_DETAIL_HERO_IDS.has(
+                        Number(
+                            item?.heroIdCandidate
+                        )
+                    )
             );
 
 
@@ -12701,6 +12966,33 @@ function inspectCurrentProfileItems() {
             );
 
 
+        const foundTargetHeroIds =
+            new Set(
+                known
+                    .map(
+                        item =>
+                            Number(
+                                item?.heroIdCandidate
+                            )
+                    )
+                    .filter(
+                        Number.isFinite
+                    )
+            );
+
+
+        const missingTargetHeroIds =
+            [
+                ...TARGET_DETAIL_HERO_IDS
+            ]
+                .filter(
+                    heroId =>
+                        !foundTargetHeroIds.has(
+                            heroId
+                        )
+                );
+
+
         const targetCount =
             known.length;
 
@@ -12716,8 +13008,23 @@ function inspectCurrentProfileItems() {
             sourceHeroCount:
                 allKnown.length,
 
-            targetRarity:
-                'SSR',
+            targetMode:
+                'HERO_ID_WHITELIST',
+
+            configuredTargetCount:
+                TARGET_DETAIL_HERO_IDS.size,
+
+            targetHeroIds:
+                [
+                    ...TARGET_DETAIL_HERO_IDS
+                ],
+
+            foundTargetHeroIds:
+                [
+                    ...foundTargetHeroIds
+                ],
+
+            missingTargetHeroIds,
 
             targetCount,
 
@@ -12731,7 +13038,15 @@ function inspectCurrentProfileItems() {
                 unavailable:
                     0,
                 failed:
-                    0
+                    0,
+                heroesWithSkills:
+                    0,
+                totalSkillCount:
+                    0,
+                level5PlusCount:
+                    0,
+                levelCounts:
+                    {}
             },
             trait: {
                 available:
@@ -12741,6 +13056,8 @@ function inspectCurrentProfileItems() {
                 skipped:
                     0,
                 failed:
+                    0,
+                allMaxedHeroCount:
                     0
             },
             titan: {
@@ -12828,7 +13145,7 @@ function inspectCurrentProfileItems() {
                                 : Promise.resolve({
                                     ok: false,
                                     reason:
-                                        'SSR 영웅을 찾지 못했습니다.'
+                                        '상세 조사 대상 영웅을 찾지 못했습니다.'
                                   })
                         ),
                     {
@@ -12901,8 +13218,8 @@ function inspectCurrentProfileItems() {
 
 
                     /*
-                     * 다음 화살표가 SR/R 등 비SSR 영웅으로 이동한 경우
-                     * 상세조사를 하지 않고 바로 다음 미수집 SSR을 목록에서 연다.
+                     * 다음 화살표가 화이트리스트 외 영웅으로 이동한 경우
+                     * 상세조사를 하지 않고 다음 미수집 대상 영웅을 목록에서 연다.
                      */
                     if (
                         !byName.has(
@@ -12924,7 +13241,7 @@ function inspectCurrentProfileItems() {
                                 from:
                                     identity.name,
                                 reason:
-                                    '비SSR 영웅 상세 스킵',
+                                    '화이트리스트 외 영웅 상세 스킵',
                                 ok:
                                     !!nonSsrFallback?.ok,
                                 value:
@@ -12936,7 +13253,7 @@ function inspectCurrentProfileItems() {
 
                             fatalError =
                                 nonSsrFallback?.reason ||
-                                '다음 SSR 영웅 목록 fallback 실패';
+                                '다음 대상 영웅 목록 fallback 실패';
 
                             break;
                         }
@@ -13072,6 +13389,71 @@ function inspectCurrentProfileItems() {
                     }
 
 
+                    /*
+                     * 스킬 판매 가치는 "몇 개 있나"보다 레벨이 중요하므로
+                     * 실제 장착 스킬 level을 누적 집계한다.
+                     */
+                    const skillLevels =
+                        (
+                            Array.isArray(
+                                skills?.items
+                            )
+                                ? skills.items
+                                : []
+                        )
+                            .map(
+                                item =>
+                                    Number(
+                                        item?.level
+                                    )
+                            )
+                            .filter(
+                                Number.isFinite
+                            );
+
+
+                    if (
+                        skillLevels.length
+                    ) {
+
+                        summary.skills.heroesWithSkills +=
+                            1;
+
+                        summary.skills.totalSkillCount +=
+                            skillLevels.length;
+
+
+                        for (
+                            const level
+                            of skillLevels
+                        ) {
+
+                            const key =
+                                String(
+                                    level
+                                );
+
+
+                            summary.skills.levelCounts[key] =
+                                (
+                                    summary.skills.levelCounts[key] ||
+                                    0
+                                ) +
+                                1;
+
+
+                            if (
+                                level >=
+                                5
+                            ) {
+
+                                summary.skills.level5PlusCount +=
+                                    1;
+                            }
+                        }
+                    }
+
+
                     report(
                         'skills',
                         {
@@ -13096,8 +13478,8 @@ function inspectCurrentProfileItems() {
                      * 영웅 상세 탭 진입 조건 최적화
                      * - 특성: 5성 + 120레벨
                      * - 타이탄: 5성 + 120레벨 + 특성 4개 모두 최대치
-                     * - 각성: 5성 + 120레벨 + 특성 4개 모두 최대치
-                     *          + 현재 장착 스킬 중 5레벨 이상 1개 이상
+                     * - 특성/타이탄: 5성 + 120레벨
+                     * - 각성: 5성 + 120레벨 + 2번 슬롯 전속 스킬 Lv5 이상
                      *
                      * 조건 미충족 영웅은 해당 탭 자체를 누르지 않는다.
                      */
@@ -13121,14 +13503,16 @@ function inspectCurrentProfileItems() {
                         heroLevel === 120;
 
 
-                    const equippedSkillLevels =
-                        (
-                            Array.isArray(
-                                skills?.items
-                            )
-                                ? skills.items
-                                : []
+                    const equippedSkills =
+                        Array.isArray(
+                            skills?.items
                         )
+                            ? skills.items
+                            : [];
+
+
+                    const equippedSkillLevels =
+                        equippedSkills
                             .map(
                                 item =>
                                     Number(
@@ -13149,9 +13533,41 @@ function inspectCurrentProfileItems() {
                             : 0;
 
 
+                    /*
+                     * 각성 조건에서 중요한 것은 "아무 스킬 Lv5+"가 아니다.
+                     * 장착 스킬의 두 번째 칸(slot === 2)이 전속 스킬이며,
+                     * 이 전속 스킬이 Lv5 이상이어야 각성이 존재할 수 있다.
+                     */
+                    const exclusiveSkill =
+                        equippedSkills.find(
+                            item =>
+                                Number(
+                                    item?.slot
+                                ) ===
+                                2
+                        ) ||
+                        null;
+
+
+                    const exclusiveSkillLevel =
+                        exclusiveSkill
+                            ? Number(
+                                exclusiveSkill.level
+                              )
+                            : null;
+
+
+                    const exclusiveSkillLevelKnown =
+                        !!exclusiveSkill &&
+                        Number.isFinite(
+                            exclusiveSkillLevel
+                        );
+
+
                     const awakeningBaseEligible =
                         traitEligible &&
-                        maxEquippedSkillLevel >= 5;
+                        exclusiveSkillLevelKnown &&
+                        exclusiveSkillLevel >= 5;
 
 
                     const eligibility = {
@@ -13177,7 +13593,23 @@ function inspectCurrentProfileItems() {
                             baseEligible:
                                 awakeningBaseEligible,
                             requirement:
-                                '5성 · 120레벨 · 특성 데이터 존재 · 장착 스킬 5레벨 이상',
+                                '5성 · 120레벨 · 2번 슬롯 전속 스킬 5레벨 이상',
+                            exclusiveSkillSlot:
+                                2,
+                            exclusiveSkillLevelKnown,
+                            exclusiveSkillLevel,
+                            exclusiveSkill:
+                                exclusiveSkill
+                                    ? {
+                                        slot:
+                                            exclusiveSkill.slot,
+                                        level:
+                                            exclusiveSkill.level,
+                                        levelText:
+                                            exclusiveSkill.levelText ??
+                                            null
+                                      }
+                                    : null,
                             maxEquippedSkillLevel
                         }
                     };
@@ -13353,22 +13785,23 @@ function inspectCurrentProfileItems() {
 
 
                     /*
-                     * 타이탄: 특성 4개 모두 MAX
+                     * v0.9.1부터 조사 조건을 단순화한다.
+                     *
+                     * SSR 상세 조사 대상 중:
+                     * - 특성: 5성 + 120레벨이면 조사
+                     * - 타이탄: 5성 + 120레벨이면 조사
+                     * - 각성: 5성 + 120레벨 +
+                     *         2번 슬롯 전속 스킬 Lv5 이상일 때 조사
+                     *
+                     * 특성 개수/완성도는 조사 gate로 사용하지 않는다.
+                     * 각성에 한해서 2번 슬롯 전속 스킬 레벨만 gate로 사용한다.
                      */
                     const titanEligible =
-                        traitEligible &&
-                        traitKnown &&
-                        traitAllMaxed;
+                        traitEligible;
 
 
-                    /*
-                     * 각성: 특성이 비어있지 않고 + 장착 스킬 5레벨 이상.
-                     * 특성 4개 MAX 조건은 각성에는 적용하지 않는다.
-                     */
                     const awakeningEligible =
-                        awakeningBaseEligible &&
-                        traitKnown &&
-                        traitHasData;
+                        awakeningBaseEligible;
 
 
                     eligibility.trait.known =
@@ -13391,8 +13824,25 @@ function inspectCurrentProfileItems() {
                             : null;
 
 
+                    if (
+                        traitAllMaxed
+                    ) {
+
+                        summary.trait.allMaxedHeroCount +=
+                            1;
+                    }
+
+
                     eligibility.titan.eligible =
                         titanEligible;
+
+
+                    eligibility.titan.requirement =
+                        '5성 · 120레벨';
+
+
+                    eligibility.titan.traitGateUsed =
+                        false;
 
 
                     eligibility.titan.traitKnown =
@@ -13411,6 +13861,30 @@ function inspectCurrentProfileItems() {
 
                     eligibility.awakening.eligible =
                         awakeningEligible;
+
+
+                    eligibility.awakening.requirement =
+                        '5성 · 120레벨 · 2번 슬롯 전속 스킬 5레벨 이상';
+
+
+                    eligibility.awakening.traitGateUsed =
+                        false;
+
+
+                    eligibility.awakening.skillLevelGateUsed =
+                        true;
+
+
+                    eligibility.awakening.exclusiveSkillSlot =
+                        2;
+
+
+                    eligibility.awakening.exclusiveSkillLevelKnown =
+                        exclusiveSkillLevelKnown;
+
+
+                    eligibility.awakening.exclusiveSkillLevel =
+                        exclusiveSkillLevel;
 
 
                     eligibility.awakening.traitKnown =
@@ -13437,66 +13911,21 @@ function inspectCurrentProfileItems() {
 
                     if (!titanEligible) {
 
-                        if (
-                            traitEligible &&
-                            !traitKnown
-                        ) {
-
-                            titan = {
-                                ok: false,
-                                available: null,
-                                skipped: false,
-                                unknown: true,
-                                blocked: true,
-                                reason:
-                                    '타이탄 판정 불가: 특성 수집 실패',
-                                eligibility: {
-                                    star:
-                                        heroStar,
-                                    level:
-                                        heroLevel,
-                                    traitKnown:
-                                        false,
-                                    traitCompletion
-                                },
-                                slots: [],
-                                attempts: []
-                            };
-
-                        } else {
-
-                            titan = {
-                                ok: true,
-                                available: false,
-                                skipped: true,
-                                reason:
-                                    !traitEligible
-                                        ? '타이탄 조건 미충족: 5성 · 120레벨 필요'
-                                        : (
-                                            !traitHasData
-                                                ? '타이탄 조사 스킵: 특성 데이터가 비어 있음'
-                                                : (
-                                                    traitCompletion.actualCount !==
-                                                        4
-                                                        ? `타이탄 조사 스킵: 특성이 ${traitCompletion.actualCount}/4개`
-                                                        : `타이탄 조사 스킵: 특성 최대치 ${traitCompletion.fullCount}/4개`
-                                                  )
-                                          ),
-                                eligibility: {
-                                    star:
-                                        heroStar,
-                                    level:
-                                        heroLevel,
-                                    traitKnown,
-                                    traitHasData,
-                                    traitAllMaxed,
-                                    traitCompletion
-                                },
-                                slots: [],
-                                attempts: []
-                            };
-                        }
-
+                        titan = {
+                            ok: true,
+                            available: false,
+                            skipped: true,
+                            reason:
+                                '타이탄 조건 미충족: 5성 · 120레벨 필요',
+                            eligibility: {
+                                star:
+                                    heroStar,
+                                level:
+                                    heroLevel
+                            },
+                            slots: [],
+                            attempts: []
+                        };
                     } else {
 
                         titanStep =
@@ -13621,9 +14050,13 @@ function inspectCurrentProfileItems() {
 
                         if (
                             traitEligible &&
-                            !traitKnown
+                            !exclusiveSkillLevelKnown
                         ) {
 
+                            /*
+                             * 5성 120레벨인데 2번 슬롯 전속 스킬 레벨을
+                             * 읽지 못한 경우 "미각성"으로 단정하지 않는다.
+                             */
                             awakening = {
                                 ok: false,
                                 available: null,
@@ -13631,15 +14064,18 @@ function inspectCurrentProfileItems() {
                                 unknown: true,
                                 blocked: true,
                                 reason:
-                                    '각성 판정 불가: 특성 수집 실패',
+                                    '각성 판정 불가: 2번 슬롯 전속 스킬 레벨 확인 실패',
                                 eligibility: {
                                     star:
                                         heroStar,
                                     level:
                                         heroLevel,
-                                    traitKnown:
+                                    exclusiveSkillSlot:
+                                        2,
+                                    exclusiveSkillLevelKnown:
                                         false,
-                                    traitCompletion,
+                                    exclusiveSkillLevel:
+                                        null,
                                     maxEquippedSkillLevel
                                 },
                                 level:
@@ -13659,19 +14095,16 @@ function inspectCurrentProfileItems() {
                                 reason:
                                     !traitEligible
                                         ? '각성 조건 미충족: 5성 · 120레벨 필요'
-                                        : (
-                                            !traitHasData
-                                                ? '각성 조사 스킵: 특성 데이터가 비어 있음'
-                                                : '각성 조건 미충족: 장착 스킬 5레벨 이상 필요'
-                                          ),
+                                        : `각성 조건 미충족: 2번 슬롯 전속 스킬 Lv${exclusiveSkillLevel} (<5)`,
                                 eligibility: {
                                     star:
                                         heroStar,
                                     level:
                                         heroLevel,
-                                    traitKnown,
-                                    traitHasData,
-                                    traitCompletion,
+                                    exclusiveSkillSlot:
+                                        2,
+                                    exclusiveSkillLevelKnown,
+                                    exclusiveSkillLevel,
                                     maxEquippedSkillLevel
                                 },
                                 level:
@@ -14145,12 +14578,21 @@ function inspectCurrentProfileItems() {
                 0;
 
 
+        /*
+         * 영웅 상세 수집 성공 여부와 하위 Collector 품질을 분리한다.
+         *
+         * ok/traversalOk:
+         *   영웅 자체 순회가 끝까지 완료됐는가
+         *
+         * qualityOk:
+         *   스킬/특성/타이탄/각성 등 하위 상세까지 모두 문제없는가
+         *
+         * 특성 실패 하나 때문에 영웅 전체를 실패로 표시하지 않는다.
+         */
         return {
             ok:
                 complete &&
-                closed &&
-                !fatalError &&
-                qualityOk,
+                !fatalError,
             traversalOk:
                 complete &&
                 !fatalError,
@@ -14679,22 +15121,34 @@ function inspectCurrentProfileItems() {
                 skills: {
                     available: 0,
                     unavailable: 0,
-                    failed: 0
+                    failed: 0,
+                    heroesWithSkills: 0,
+                    totalSkillCount: 0,
+                    level5PlusCount: 0,
+                    levelCounts: {}
                 },
                 trait: {
                     available: 0,
                     unavailable: 0,
-                    failed: 0
+                    skipped: 0,
+                    failed: 0,
+                    allMaxedHeroCount: 0
                 },
                 titan: {
                     available: 0,
                     unavailable: 0,
-                    failed: 0
+                    skipped: 0,
+                    unknown: 0,
+                    failed: 0,
+                    equippedHeroCount: 0
                 },
                 awakening: {
                     available: 0,
                     unavailable: 0,
-                    failed: 0
+                    skipped: 0,
+                    unknown: 0,
+                    failed: 0,
+                    awakenedHeroCount: 0
                 }
             },
             navigation: {},
@@ -14755,90 +15209,137 @@ function inspectCurrentProfileItems() {
                 );
 
 
+            const skillSummary =
+                heroDetailData.summary
+                    ?.skills ||
+                {};
+
+
+            const skillLevelEntries =
+                Object.entries(
+                    skillSummary.levelCounts ||
+                    {}
+                )
+                    .map(
+                        ([level, count]) => [
+                            Number(level),
+                            Number(count)
+                        ]
+                    )
+                    .filter(
+                        ([level, count]) =>
+                            Number.isFinite(level) &&
+                            Number.isFinite(count) &&
+                            count >
+                                0
+                    )
+                    .sort(
+                        (a, b) =>
+                            b[0] -
+                            a[0]
+                    );
+
+
+            const skillLevelText =
+                skillLevelEntries.length
+                    ? skillLevelEntries
+                        .map(
+                            ([level, count]) =>
+                                `Lv${level} ${count}개`
+                        )
+                        .join(
+                            ' · '
+                        )
+                    : '레벨 데이터 없음';
+
+
             notify(
                 'skills',
-                heroDetailData.summary
-                    ?.skills
-                    ?.failed
+                skillSummary.failed
                     ? 'error'
                     : 'done',
                 {
-                    ownedCount:
-                        heroDetailData
-                            .summary
-                            ?.processedCount ??
-                        0,
-                    ...(
-                        heroDetailData.summary
-                            ?.skills ||
-                        {}
-                    )
+                    displayText:
+                        skillLevelText,
+                    ...skillSummary
                 }
             );
+
+
+            const traitSummary =
+                heroDetailData.summary
+                    ?.trait ||
+                {};
 
 
             notify(
                 'traits',
-                heroDetailData.summary
-                    ?.trait
-                    ?.failed
+                traitSummary.failed
                     ? 'error'
                     : 'done',
                 {
-                    ownedCount:
-                        heroDetailData
-                            .summary
-                            ?.processedCount ??
-                        0,
-                    ...(
-                        heroDetailData.summary
-                            ?.trait ||
-                        {}
-                    )
+                    displayText:
+                        `조사 ${traitSummary.available || 0}명 · 4/4 MAX ${traitSummary.allMaxedHeroCount || 0}명` +
+                        (
+                            traitSummary.failed
+                                ? ` · 실패 ${traitSummary.failed}명`
+                                : ''
+                        ),
+                    ...traitSummary
                 }
             );
+
+
+            const titanSummary =
+                heroDetailData.summary
+                    ?.titan ||
+                {};
 
 
             notify(
                 'equipment',
-                heroDetailData.summary
-                    ?.titan
-                    ?.failed
+                (
+                    titanSummary.failed ||
+                    titanSummary.unknown
+                )
                     ? 'error'
                     : 'done',
                 {
-                    ownedCount:
-                        heroDetailData
-                            .summary
-                            ?.processedCount ??
-                        0,
-                    ...(
-                        heroDetailData.summary
-                            ?.titan ||
-                        {}
-                    )
+                    displayText:
+                        `장착 ${titanSummary.equippedHeroCount || 0}명` +
+                        (
+                            titanSummary.unknown
+                                ? ` · 판정불가 ${titanSummary.unknown}명`
+                                : ''
+                        ),
+                    ...titanSummary
                 }
             );
 
 
+            const awakeningSummary =
+                heroDetailData.summary
+                    ?.awakening ||
+                {};
+
+
             notify(
                 'awakening',
-                heroDetailData.summary
-                    ?.awakening
-                    ?.failed
+                (
+                    awakeningSummary.failed ||
+                    awakeningSummary.unknown
+                )
                     ? 'error'
                     : 'done',
                 {
-                    ownedCount:
-                        heroDetailData
-                            .summary
-                            ?.processedCount ??
-                        0,
-                    ...(
-                        heroDetailData.summary
-                            ?.awakening ||
-                        {}
-                    )
+                    displayText:
+                        `각성 ${awakeningSummary.awakenedHeroCount || 0}명` +
+                        (
+                            awakeningSummary.unknown
+                                ? ` · 판정불가 ${awakeningSummary.unknown}명`
+                                : ''
+                        ),
+                    ...awakeningSummary
                 }
             );
         }
@@ -14855,6 +15356,12 @@ function inspectCurrentProfileItems() {
                     heroDetailData?.collectedCount ??
                     heroData?.count ??
                     0,
+
+                unit:
+                    '명',
+
+                displayText:
+                    `${heroDetailData?.collectedCount ?? 0}명 수집 완료`,
 
                 count:
                     heroData?.count ??
@@ -14887,7 +15394,17 @@ function inspectCurrentProfileItems() {
 
 
         const saleData = {
-            ok: !!profileData?.ok && !!heroCollectStep?.ok && !!heroDetailData?.ok,
+            /*
+             * 전체 수집 성공은 핵심 구조(프로필 + 영웅 목록 + 영웅 순회) 기준.
+             * 하위 상세 품질 문제는 qualityOk 및 각 세부 항목에서 별도 표현한다.
+             */
+            ok:
+                !!profileData?.ok &&
+                !!heroCollectStep?.ok &&
+                !!heroDetailData?.traversalOk,
+
+            qualityOk:
+                !!heroDetailData?.qualityOk,
 
             schemaVersion:
                 SALE_SCHEMA_VERSION,
@@ -14940,6 +15457,9 @@ function inspectCurrentProfileItems() {
                     !!heroDetailData?.traversalOk,
 
                 detailOk:
+                    !!heroDetailData?.traversalOk,
+
+                detailQualityOk:
                     !!heroDetailData?.qualityOk,
 
                 closed:
@@ -14976,6 +15496,21 @@ function inspectCurrentProfileItems() {
                     heroDetailData
                         ?.fatalError ??
                     null,
+
+                detailQualityIssues: {
+                    skillsFailed:
+                        heroDetailData?.summary?.skills?.failed ??
+                        0,
+                    traitsFailed:
+                        heroDetailData?.summary?.trait?.failed ??
+                        0,
+                    titanUnknown:
+                        heroDetailData?.summary?.titan?.unknown ??
+                        0,
+                    awakeningUnknown:
+                        heroDetailData?.summary?.awakening?.unknown ??
+                        0
+                },
 
                 scrollSupported:
                     !!heroData?.scrollSupported,
@@ -15032,6 +15567,10 @@ function inspectCurrentProfileItems() {
                 heroDetailQualityOk:
                     !!heroDetailData
                         ?.qualityOk,
+
+                heroDetailStructuralOk:
+                    !!heroDetailData
+                        ?.traversalOk,
 
                 heroTabsClosed:
                     !!heroDetailData
@@ -21370,8 +21909,739 @@ function inspectCurrentProfileItems() {
         }
     }
 
+
+    /* ============================================================
+     * TRAIT DIAGNOSTIC
+     *
+     * 목적:
+     * - 판매 정보 전체 수집 없이 현재 영웅의 특성 진입 구조만 조사
+     * - toggle3 / detailBtn은 기존 Cocos EventHandler를 1회만 호출
+     * - 강화/교환/습득/리셋 등 계정 상태 변경 동작은 호출하지 않음
+     * - 클릭 전/후 active node diff를 기록하여 실제 열린 패널 이름을 추적
+     * ============================================================ */
+
+    function traitDiagnosticNodeRow(
+        node
+    ) {
+
+        const labels =
+            [];
+
+        walk(
+            node,
+            child => {
+
+                if (
+                    !isActive(
+                        child
+                    )
+                )
+                    return;
+
+
+                for (
+                    const type
+                    of [
+                        window.cc?.Label,
+                        window.cc?.RichText
+                    ].filter(
+                        Boolean
+                    )
+                ) {
+
+                    const value =
+                        child
+                            .getComponent?.(
+                                type
+                            )
+                            ?.string;
+
+
+                    if (
+                        value != null &&
+                        String(
+                            value
+                        ).trim() &&
+                        labels.length <
+                            12
+                    ) {
+
+                        labels.push(
+                            String(
+                                value
+                            ).trim()
+                        );
+                    }
+                }
+            }
+        );
+
+
+        return {
+            name:
+                String(
+                    node?.name ||
+                    ''
+                ),
+            path:
+                nodePath(
+                    node
+                ),
+            active:
+                isActive(
+                    node
+                ),
+            text:
+                [
+                    ...new Set(
+                        labels
+                    )
+                ]
+        };
+    }
+
+
+    function traitDiagnosticSnapshot(
+        stage
+    ) {
+
+        const root =
+            findHeroDetailRoot();
+
+
+        const keyword =
+            /(talent|trait|strengthen|detailbtn|toggle3|herodetail|hero.*talent|talent.*hero)/i;
+
+
+        const candidateNodes =
+            [];
+
+
+        walk(
+            scene(),
+            node => {
+
+                if (
+                    !isActive(
+                        node
+                    )
+                )
+                    return;
+
+
+                const path =
+                    nodePath(
+                        node
+                    );
+
+                const name =
+                    String(
+                        node?.name ||
+                        ''
+                    );
+
+
+                if (
+                    keyword.test(
+                        name
+                    ) ||
+                    keyword.test(
+                        path
+                    )
+                ) {
+
+                    candidateNodes.push(
+                        traitDiagnosticNodeRow(
+                            node
+                        )
+                    );
+                }
+            }
+        );
+
+
+        const buttons =
+            gameButtonRows()
+                .filter(
+                    row => {
+
+                        const joined =
+                            [
+                                row.name,
+                                row.path,
+                                row.text,
+                                ...(row.events || [])
+                                    .flatMap(
+                                        event => [
+                                            event?.component,
+                                            event?.handler
+                                        ]
+                                    )
+                            ]
+                                .filter(
+                                    Boolean
+                                )
+                                .join(
+                                    ' '
+                                );
+
+
+                        return (
+                            /(talent|trait|strengthen|detail|toggle3|toggle4|hero)/i
+                                .test(
+                                    joined
+                                )
+                            &&
+                            (
+                                !root ||
+                                withinGameRoot(
+                                    row.node,
+                                    root
+                                ) ||
+                                /PopLayer|UIFrame/i
+                                    .test(
+                                        row.path ||
+                                        ''
+                                    )
+                            )
+                        );
+                    }
+                )
+                .map(
+                    describeGameButton
+                )
+                .slice(
+                    0,
+                    160
+                );
+
+
+        const panelLike =
+            [];
+
+
+        walk(
+            scene(),
+            node => {
+
+                if (
+                    !isActive(
+                        node
+                    )
+                )
+                    return;
+
+
+                const path =
+                    nodePath(
+                        node
+                    );
+
+                const name =
+                    String(
+                        node?.name ||
+                        ''
+                    );
+
+
+                if (
+                    /PopLayer|UIFrame/i
+                        .test(
+                            path
+                        ) &&
+                    /(panel|popup|frame|talent|trait|strengthen|hero)/i
+                        .test(
+                            `${name} ${path}`
+                        )
+                ) {
+
+                    panelLike.push(
+                        traitDiagnosticNodeRow(
+                            node
+                        )
+                    );
+                }
+            }
+        );
+
+
+        const detailComponents =
+            root
+                ? compactRelevantComponentFields(
+                    root,
+                    /(Talent|Trait|Strengthen|HeroDetail)/i,
+                    /(id|talent|trait|strength|level|lv|hero|skill|item|progress|value|index|slot|select|current|data)/i
+                  )
+                    .slice(
+                        0,
+                        120
+                    )
+                : [];
+
+
+        return {
+            stage,
+            at:
+                new Date()
+                    .toISOString(),
+            identity:
+                readHeroDetailIdentity(),
+            heroDetailOpen:
+                !!root,
+            candidateNodes:
+                candidateNodes
+                    .slice(
+                        0,
+                        220
+                    ),
+            buttons,
+            panelLike:
+                panelLike
+                    .slice(
+                        0,
+                        160
+                    ),
+            detailComponents
+        };
+    }
+
+
+    function traitDiagnosticDiff(
+        beforeNodes,
+        afterNodes
+    ) {
+
+        const before =
+            new Set(
+                (
+                    beforeNodes ||
+                    []
+                )
+            );
+
+        const after =
+            new Set(
+                (
+                    afterNodes ||
+                    []
+                )
+            );
+
+
+        return {
+            opened:
+                [
+                    ...after
+                ]
+                    .filter(
+                        node =>
+                            !before.has(
+                                node
+                            )
+                    )
+                    .map(
+                        nodePath
+                    )
+                    .slice(
+                        0,
+                        240
+                    ),
+            hidden:
+                [
+                    ...before
+                ]
+                    .filter(
+                        node =>
+                            !after.has(
+                                node
+                            )
+                    )
+                    .map(
+                        nodePath
+                    )
+                    .slice(
+                        0,
+                        240
+                    )
+        };
+    }
+
+
+    async function inspectCurrentHeroTraitFlow(
+        options = {}
+    ) {
+
+        const startedAt =
+            Date.now();
+
+        const identity =
+            readHeroDetailIdentity();
+
+
+        if (
+            !identity?.ok
+        ) {
+
+            return {
+                ok: false,
+                version:
+                    VERSION,
+                reason:
+                    '영웅 상세 화면을 먼저 열어주세요.',
+                identity
+            };
+        }
+
+
+        const result = {
+            ok:
+                false,
+            version:
+                VERSION,
+            collectedAt:
+                new Date()
+                    .toISOString(),
+            identity,
+            stages:
+                [],
+            actions:
+                [],
+            elapsedMs:
+                0
+        };
+
+
+        const pushStage =
+            stage => {
+
+                const snapshot =
+                    traitDiagnosticSnapshot(
+                        stage
+                    );
+
+                result.stages.push(
+                    snapshot
+                );
+
+                return snapshot;
+            };
+
+
+        pushStage(
+            'BEFORE_TRAIT_TAB'
+        );
+
+
+        const beforeToggleNodes =
+            [
+                ...gameNodes()
+            ];
+
+
+        const toggle =
+            findHeroDetailButton({
+                name:
+                    'toggle3',
+                handler:
+                    'onToggleClick'
+            });
+
+
+        if (!toggle) {
+
+            result.reason =
+                '특성 toggle3 버튼을 찾지 못함';
+
+            result.actions.push({
+                action:
+                    'toggle3',
+                ok:
+                    false,
+                reason:
+                    result.reason
+            });
+
+
+            pushStage(
+                'TOGGLE3_NOT_FOUND'
+            );
+
+            result.elapsedMs =
+                Date.now() -
+                startedAt;
+
+
+            window.TOPWAR_TRAIT_DIAGNOSTIC_DATA =
+                result;
+
+
+            return result;
+        }
+
+
+        const toggleResult =
+            await pressGameButton(
+                toggle.id,
+                {
+                    waitMs:
+                        options.toggleWaitMs ??
+                        650
+                }
+            );
+
+
+        result.actions.push({
+            action:
+                'toggle3',
+            ...toggleResult,
+            nodeDiff:
+                traitDiagnosticDiff(
+                    beforeToggleNodes,
+                    [
+                        ...gameNodes()
+                    ]
+                )
+        });
+
+
+        pushStage(
+            'AFTER_TRAIT_TAB'
+        );
+
+
+        if (
+            !toggleResult?.ok
+        ) {
+
+            result.reason =
+                '특성 toggle3 실행 실패';
+
+            result.elapsedMs =
+                Date.now() -
+                startedAt;
+
+
+            window.TOPWAR_TRAIT_DIAGNOSTIC_DATA =
+                result;
+
+
+            return result;
+        }
+
+
+        const detail =
+            findHeroDetailButton({
+                name:
+                    'detailBtn',
+                handler:
+                    'detailsClick'
+            });
+
+
+        if (!detail) {
+
+            result.reason =
+                '특성 detailBtn(detailsClick)을 찾지 못함';
+
+            result.actions.push({
+                action:
+                    'detailBtn',
+                ok:
+                    false,
+                reason:
+                    result.reason
+            });
+
+
+            pushStage(
+                'DETAIL_BUTTON_NOT_FOUND'
+            );
+
+            result.elapsedMs =
+                Date.now() -
+                startedAt;
+
+
+            window.TOPWAR_TRAIT_DIAGNOSTIC_DATA =
+                result;
+
+
+            return result;
+        }
+
+
+        const beforeDetailNodes =
+            [
+                ...gameNodes()
+            ];
+
+
+        const detailResult =
+            await pressGameButton(
+                detail.id,
+                {
+                    waitMs:
+                        options.detailWaitMs ??
+                        1000
+                }
+            );
+
+
+        result.actions.push({
+            action:
+                'detailBtn',
+            ...detailResult,
+            nodeDiff:
+                traitDiagnosticDiff(
+                    beforeDetailNodes,
+                    [
+                        ...gameNodes()
+                    ]
+                )
+        });
+
+
+        pushStage(
+            'AFTER_DETAIL_CLICK'
+        );
+
+
+        /*
+         * 클릭 이후 실제 특성 관련 노드가 보이는지 이름에 의존하지 않고 검사.
+         */
+        const liveTraitNodes =
+            [];
+
+
+        walk(
+            scene(),
+            node => {
+
+                if (
+                    !isActive(
+                        node
+                    )
+                )
+                    return;
+
+
+                const path =
+                    nodePath(
+                        node
+                    );
+
+
+                if (
+                    /(HeroTalentNode|heroTalentItem|talentMainNode|Talentnode|haveContent|Itemname|addNum|progress)/i
+                        .test(
+                            `${node?.name || ''} ${path}`
+                        )
+                ) {
+
+                    liveTraitNodes.push(
+                        traitDiagnosticNodeRow(
+                            node
+                        )
+                    );
+                }
+            }
+        );
+
+
+        result.liveTraitNodes =
+            liveTraitNodes
+                .slice(
+                    0,
+                    240
+                );
+
+
+        result.ok =
+            !!detailResult?.ok;
+
+        result.reason =
+            detailResult?.ok
+                ? (
+                    liveTraitNodes.length
+                        ? '특성 세부 클릭 후 특성 관련 노드 확인'
+                        : 'detailBtn 클릭은 성공했으나 특성 관련 노드가 확인되지 않음'
+                  )
+                : '특성 detailBtn 실행 실패';
+
+
+        result.elapsedMs =
+            Date.now() -
+            startedAt;
+
+
+        window.TOPWAR_TRAIT_DIAGNOSTIC_DATA =
+            result;
+
+
+        return result;
+    }
+
+
+    async function copyTraitDiagnosticJson() {
+
+        const data =
+            window.TOPWAR_TRAIT_DIAGNOSTIC_DATA;
+
+
+        if (!data) {
+
+            return {
+                ok: false,
+                reason:
+                    '먼저 특성 조사를 실행하세요.'
+            };
+        }
+
+
+        const json =
+            JSON.stringify(
+                data,
+                null,
+                2
+            );
+
+
+        try {
+
+            await navigator
+                .clipboard
+                .writeText(
+                    json
+                );
+
+
+            return {
+                ok: true,
+                copied:
+                    true,
+                length:
+                    json.length
+            };
+
+        } catch (error) {
+
+            return {
+                ok: false,
+                copied:
+                    false,
+                reason:
+                    error?.message ||
+                    String(
+                        error
+                    ),
+                json
+            };
+        }
+    }
+
+
     const api = {
-        integrationVersion: '0.8.6',
+        integrationVersion: '0.9.3',
         hideGameButton, restoreGameButton, removeGameAction,
         getHiddenGameButtons: () => Object.fromEntries(hiddenGameButtons),
         listGameButtons,
@@ -21479,6 +22749,21 @@ function inspectCurrentProfileItems() {
                 ),
 
         inspectTraitCompletion,
+
+        inspectCurrentHeroTraitFlow:
+            options =>
+                runProfileTask(
+                    () =>
+                        inspectCurrentHeroTraitFlow(
+                            options
+                        )
+                ),
+
+        getTraitDiagnosticData:
+            () =>
+                window.TOPWAR_TRAIT_DIAGNOSTIC_DATA,
+
+        copyTraitDiagnosticJson,
 
         collectCurrentHeroSkills:
             () =>
@@ -21926,6 +23211,94 @@ function inspectCurrentProfileItems() {
         );
 
 
+    const traitInspectButton =
+        saleToolButton(
+            '특성 조사',
+            async () => {
+
+                traitInspectButton.disabled =
+                    true;
+
+
+                try {
+
+                    const result =
+                        await api.inspectCurrentHeroTraitFlow();
+
+
+                    const copyResult =
+                        await api.copyTraitDiagnosticJson();
+
+
+                    log(
+                        '특성 조사',
+                        {
+                            result,
+                            copyResult
+                        }
+                    );
+
+
+                    if (
+                        result?.ok
+                    ) {
+
+                        alert(
+                            copyResult?.ok
+                                ? '특성 조사 완료\n결과 JSON을 클립보드에 복사했습니다.'
+                                : '특성 조사 완료\n자동 복사는 실패했습니다. 콘솔/로그의 결과를 확인하세요.'
+                        );
+
+                    } else {
+
+                        alert(
+                            `특성 조사 실패\n${result?.reason || '원인 미확인'}\n\n결과는 진단 데이터에 저장되었습니다.`
+                        );
+                    }
+
+                } catch (error) {
+
+                    recordError(
+                        '특성 조사',
+                        error
+                    );
+
+                } finally {
+
+                    traitInspectButton.disabled =
+                        false;
+                }
+            }
+        );
+
+
+    saleToolButton(
+        '특성 JSON 복사',
+        async () => {
+
+            const result =
+                await api.copyTraitDiagnosticJson();
+
+
+            log(
+                '특성 진단 JSON 복사',
+                result
+            );
+
+
+            if (
+                !result?.ok
+            ) {
+
+                alert(
+                    result?.reason ||
+                    '특성 진단 JSON 복사 실패'
+                );
+            }
+        }
+    );
+
+
     saleToolButton(
         'JSON 복사',
         async () => {
@@ -22138,6 +23511,20 @@ function inspectCurrentProfileItems() {
 
 
             if (
+                (
+                    state.status ===
+                        'done' ||
+                    state.status ===
+                        'error'
+                ) &&
+                state.detail
+                    ?.displayText
+            ) {
+
+                text +=
+                    ` · ${state.detail.displayText}`;
+
+            } else if (
                 state.status ===
                 'done'
                 &&
@@ -22148,7 +23535,7 @@ function inspectCurrentProfileItems() {
             ) {
 
                 text +=
-                    ` · ${state.detail.ownedCount}개`;
+                    ` · ${state.detail.ownedCount}${state.detail?.unit || '개'}`;
             }
 
 
