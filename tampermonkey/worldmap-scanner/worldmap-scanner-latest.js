@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar Unified Automation V2.14.9.35 - Synchronized Season Group Collection
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.35
+// @version      2.14.9.36
 // @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
