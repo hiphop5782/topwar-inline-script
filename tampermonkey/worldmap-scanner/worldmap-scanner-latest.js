@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix
+// @name         TopWar Unified Automation V2.14.9.41 - Season Empty Group Fallback Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.39
-// @description  Unified TopWar automation with navigation, per-cycle season refresh, and auto recovery after memory/WebSocket failures
+// @version      2.14.9.41
+// @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -4753,7 +4753,7 @@
      * ============================================================ */
 
 
-    
+
 
 
     /* ============================================================
@@ -7225,7 +7225,7 @@ function inspectCurrentProfileItems() {
 
 
 /* ============================================================================
- * TopWar navigation/recovery bridge - V2.14.9.39
+ * TopWar navigation/recovery bridge - V2.14.9.41
  * Persistent recovery payload is intentionally minimal:
  *   { mode, serverId, startedAt }
  * Ephemeral reload guards live only in sessionStorage.
@@ -7233,9 +7233,9 @@ function inspectCurrentProfileItems() {
 (function installTopwarRecoveryBridge() {
   "use strict";
 
-  if (window.TOPWAR_RECOVERY?.version === "2.14.9.39") return;
+  if (window.TOPWAR_RECOVERY?.version === "2.14.9.41") return;
 
-  const VERSION = "2.14.9.39";
+  const VERSION = "2.14.9.41";
   const RECOVERY_KEY = "TOPWAR_ACTIVE_RECOVERY_V1";
   const PENDING_KEY = "TOPWAR_RECOVERY_RELOAD_PENDING_V1";
   const ATTEMPT_KEY = "TOPWAR_RECOVERY_ATTEMPT_V1";
@@ -7299,7 +7299,7 @@ function inspectCurrentProfileItems() {
     if (!mode) throw new Error(`알 수 없는 복구 모드: ${mode}`);
 
     // 이전 버전의 상세 진행상태는 복구에 사용하지 않는다.
-    // V2.14.9.39부터 영구 복구정보는 RECOVERY_KEY의 mode/serverId/startedAt 세 필드뿐이다.
+    // V2.14.9.41부터 영구 복구정보는 RECOVERY_KEY의 mode/serverId/startedAt 세 필드뿐이다.
     try { localStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
     try { sessionStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
     try { localStorage.removeItem("REALPOWER_STANDALONE_SERVER_QUEUE"); } catch {}
@@ -7585,7 +7585,7 @@ function inspectCurrentProfileItems() {
     if (bootstrapDone) clearInterval(timer);
   }, 500);
 
-  console.log("%c[TopWar Recovery V2.14.9.39] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Recovery V2.14.9.41] installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -8278,11 +8278,11 @@ function inspectCurrentProfileItems() {
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.14.9.39";
+  const VERSION = "2.14.9.41";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
-    console.warn("[TopWar Unified Automation V2.14.9.39] already installed");
+    console.warn("[TopWar Unified Automation V2.14.9.41] already installed");
     return;
   }
   window[INSTALL_KEY] = true;
@@ -11818,7 +11818,7 @@ function inspectCurrentProfileItems() {
 
   function help() {
     console.log(`
-[TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix]
+[TopWar Unified Automation V2.14.9.41 - Season Empty Group Fallback Fix]
 
 133 감시 + 자동 공유:
 await TOPWAR.watchPointTypeAndNotify({
@@ -12043,12 +12043,12 @@ TOPWAR.clearThiefQueue()
     });
   }, 0);
 
-  console.log("%c[TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix] core installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.41 - Season Empty Group Fallback Fix] core installed", "color:#00e676;font-weight:bold");
   console.log("[TopWar] 사용법: TOPWAR.help()");
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.39 - Integrated Survey + Finder UI
+ * TopWar Unified Automation V2.14.9.41 - Integrated Survey + Finder UI
  * - V2.3 core scanner 위에 붙는 단일 통합 모듈
  * - 기존 후속 패치들을 이 모듈 하나로 통합
  * - 서버번호 입력 UI
@@ -12065,13 +12065,13 @@ TOPWAR.clearThiefQueue()
   "use strict";
 
   if (!window.TOPWAR) {
-    console.error("[TopWar Unified V2.14.9.39] TOPWAR 객체가 없습니다.");
+    console.error("[TopWar Unified V2.14.9.41] TOPWAR 객체가 없습니다.");
     return;
   }
 
   const TOPWAR = window.TOPWAR;
   const state = TOPWAR.state;
-  const VERSION = "2.14.9.39";
+  const VERSION = "2.14.9.41";
   const PANEL_ID = "topwar-unified-control-panel-v26";
   const LEGACY_PANEL_IDS = [
     "topwar-thief-watch-panel",
@@ -12307,12 +12307,45 @@ TOPWAR.clearThiefQueue()
     return true;
   }
 
-  function findSeasonServerContent(panel) {
+  function findSeasonServerContent(panel, options = {}) {
     const contents = findAllSeasonSurveyNodesByName(panel, "content");
-    return contents.find(content => findAllSeasonSurveyNodesByName(content, "num").some(node => {
-      const text = String(node.getComponent?.(cc.Label)?.string || "").trim();
-      return /^S\d+$/.test(text) && text !== "S999";
-    })) || null;
+    const activeCandidates = [];
+
+    for (const content of contents) {
+      if (!content || content.active === false || content.activeInHierarchy === false) continue;
+      const scrollView = findSeasonServerScrollView(content);
+      if (!scrollView) continue;
+
+      const serverIds = [];
+      (function walk(node) {
+        if (!node || node.active === false || node.activeInHierarchy === false) return;
+        const text = String(node.getComponent?.(cc.Label)?.string || "").trim();
+        if (/^S\d+$/.test(text) && text !== "S999") serverIds.push(text);
+        for (const child of node.children || []) walk(child);
+      })(content);
+
+      activeCandidates.push({
+        content,
+        serverCount: new Set(serverIds).size
+      });
+    }
+
+    // 서버번호가 실제로 렌더링된 content를 항상 우선한다.
+    const withServers = activeCandidates
+      .filter(item => item.serverCount > 0)
+      .sort((a, b) => b.serverCount - a.serverCount);
+    if (withServers.length) return withServers[0].content;
+
+    // 일부 시즌/내부 그룹은 서버가 0개일 수 있다. 이런 경우 기존 구현은 content 자체를
+    // 찾지 못해 10초 후 전체 시즌조사를 실패시켰다. allowEmpty일 때는 활성 ScrollView의
+    // content를 반환해 빈 그룹으로 정상 처리한다.
+    if (options.allowEmpty === true && activeCandidates.length) {
+      const preferred = options.preferredContent;
+      if (preferred && activeCandidates.some(item => item.content === preferred)) return preferred;
+      return activeCandidates[0].content;
+    }
+
+    return null;
   }
 
   function findSeasonServerScrollView(content) {
@@ -12348,17 +12381,28 @@ TOPWAR.clearThiefQueue()
       stableMs,
       Number(options.sameSignatureFallbackMs ?? 1800)
     );
+    const emptyFallbackMs = Math.max(
+      500,
+      Number(options.emptyFallbackMs ?? 1400)
+    );
     const startedAt = Date.now();
     let lastSignature = "";
     let stableSince = 0;
+    let emptyStableSince = 0;
     let normalizedContent = null;
+    let lastUsableContent = options.previousContent || null;
 
     while (Date.now() - startedAt < timeout) {
-      const content = findSeasonServerContent(panel);
+      // 서버가 0개인 그룹도 정상 상태일 수 있으므로 allowEmpty로 현재 활성 content를 찾는다.
+      const content = findSeasonServerContent(panel, {
+        allowEmpty: true,
+        preferredContent: lastUsableContent
+      });
 
       if (content) {
-        // 시즌/그룹 전환 직후 이전 스크롤의 관성이나 위치 보정이 남아 있으면
-        // signature가 계속 흔들릴 수 있다. 판정 전에 스크롤을 즉시 멈추고 상단으로 정규화한다.
+        lastUsableContent = content;
+
+        // 시즌/그룹 전환 직후 이전 스크롤 관성을 정리한다.
         if (content !== normalizedContent) {
           const scrollView = findSeasonServerScrollView(content);
           if (scrollView) {
@@ -12370,24 +12414,54 @@ TOPWAR.clearThiefQueue()
         }
 
         const signature = seasonServerContentSignature(content);
+        const current = Date.now();
+        const elapsed = current - startedAt;
+
         if (signature) {
-          const current = Date.now();
+          emptyStableSince = 0;
           if (signature !== lastSignature) {
             lastSignature = signature;
             stableSince = current;
           }
 
           const stableFor = current - stableSince;
-          const elapsed = current - startedAt;
           const changed = !previousSignature || signature !== previousSignature;
 
+          // 정상적으로 목록이 바뀐 경우 즉시 진행. 서버 구성이 우연히 동일한 그룹도
+          // sameSignatureFallbackMs가 지나면 동일 목록으로 인정하고 진행한다.
           if (stableFor >= stableMs && (changed || elapsed >= sameSignatureFallbackMs)) {
             return content;
           }
+        } else {
+          // 활성 ScrollView content는 존재하지만 Sxxxx 라벨이 하나도 없다면 빈 그룹일 수 있다.
+          // 일정 시간 빈 상태가 유지되면 오류가 아니라 '서버 0개 그룹'으로 인정한다.
+          lastSignature = "";
+          stableSince = 0;
+          if (!emptyStableSince) emptyStableSince = current;
+          if (current - emptyStableSince >= emptyFallbackMs) {
+            console.log("[TopWar Server Seasons] 서버가 없는/빈 그룹으로 판정하여 계속 진행", {
+              elapsed,
+              previousSignature
+            });
+            return content;
+          }
         }
+      } else {
+        emptyStableSince = 0;
       }
 
       await sleep(pollDelay);
+    }
+
+    // 패널과 마지막 content가 살아 있다면 timeout만으로 전체 Top100을 죽이지 않는다.
+    // 선택 이벤트 이후 UI가 같은 content를 재사용하는 시즌/그룹이 실제로 존재한다.
+    if (lastUsableContent && lastUsableContent.active !== false && lastUsableContent.activeInHierarchy !== false) {
+      console.warn("[TopWar Server Seasons] content 안정화 timeout - 마지막 활성 content로 계속 진행", {
+        previousSignature,
+        lastSignature,
+        elapsed: Date.now() - startedAt
+      });
+      return lastUsableContent;
     }
 
     console.warn("[TopWar Server Seasons] content 안정화 실패", {
@@ -12689,7 +12763,8 @@ TOPWAR.clearThiefQueue()
         const previousSeasonSignature = seasonServerContentSignature(serverContent);
         await selectServerSeason(toggleContainer, seasonNode, { loadDelay: options.seasonLoadDelay ?? 1200 });
         serverContent = await waitForSeasonServerContent(panel, previousSeasonSignature, {
-          timeout: options.contentLoadTimeout ?? 10000
+          timeout: options.contentLoadTimeout ?? 10000,
+          previousContent: serverContent
         });
         await resetSeasonServerScroll(serverContent, options);
 
@@ -12710,7 +12785,8 @@ TOPWAR.clearThiefQueue()
               loadDelay: options.groupLoadDelay ?? options.seasonLoadDelay ?? 1200
             });
             const currentContent = await waitForSeasonServerContent(panel, previousGroupSignature, {
-              timeout: options.contentLoadTimeout ?? 10000
+              timeout: options.contentLoadTimeout ?? 10000,
+              previousContent: serverContent
             });
             await resetSeasonServerScroll(currentContent, options);
             const groupResult = await collectServerSeason(currentContent, `${seasonName}/${control.label}`, {
@@ -17363,7 +17439,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR Unified V2.14.9.39</span>
+        <span>TOPWAR Unified V2.14.9.41</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -17859,20 +17935,48 @@ TOPWAR.clearThiefQueue()
     }
 
     async function resolveTop100ServerIds() {
-      // Top100 시작 전에는 기존 캐시가 최신이어도 시즌 패널을 반드시 다시 조사한다.
-      // 그래야 새로 편입되거나 시즌/특수그룹이 바뀐 서버까지 이번 큐에 반영된다.
+      // Top100 사이클 시작 시 시즌 패널은 정확히 한 번 새로 조사한다.
+      // 중요: 시즌 목록 수집 성공과 DataHub 업로드 성공은 별개다.
+      // 업로드 실패 때문에 시즌조사를 다시 실행하면 시즌조사만 반복되는 루프가 생길 수 있다.
       serverListLoading = true;
       lastServerListError = null;
       render();
+
       let survey;
       try {
         survey = await TOPWAR.surveySeasonServerList?.({ debug: true });
         if (!survey?.seasons) {
           throw new Error("Top100 시작 전 최신 시즌 패널 조사가 완료되지 않았습니다.");
         }
-        if (typeof TOPWAR.uploadSeasonServerListToDataHub === "function") {
-          survey.serverUpload = await TOPWAR.uploadSeasonServerListToDataHub(survey);
+
+        const allIds = parseServerIdsStrict(survey?.allServers || []);
+        if (!allIds.length) {
+          throw new Error("Top100 시작 전 시즌 패널 조사 결과가 비어 있습니다.");
         }
+
+        // 서버목록 업로드는 best-effort. 실패해도 이미 성공한 시즌조사를 다시 하지 않는다.
+        if (typeof TOPWAR.uploadSeasonServerListToDataHub === "function") {
+          try {
+            survey.serverUpload = await TOPWAR.uploadSeasonServerListToDataHub(survey);
+          } catch (uploadError) {
+            survey.serverUpload = {
+              ok: false,
+              error: uploadError?.message || String(uploadError)
+            };
+            console.warn(
+              "[TopWar Top100] 시즌목록 DataHub 업로드 실패 - 시즌조사는 성공으로 유지하고 본 조사 계속:",
+              uploadError
+            );
+          }
+        }
+
+        const ordered = applyServerOrder(allIds, getServerOrderMode());
+        console.log("[TopWar V2.14.9.41 UI] 최신 시즌 분류 서버 조사 완료:", {
+          count: ordered.length,
+          first: ordered.slice(0, 20),
+          uploadOk: survey?.serverUpload?.ok !== false
+        });
+        return ordered;
       } catch (error) {
         lastServerListError = error?.message || String(error);
         throw error;
@@ -17880,16 +17984,6 @@ TOPWAR.clearThiefQueue()
         serverListLoading = false;
         render();
       }
-      const allIds = parseServerIdsStrict(survey?.allServers || []);
-      if (!allIds.length) {
-        throw new Error("Top100 시작 전 시즌 패널 조사 결과가 비어 있습니다.");
-      }
-      const ordered = applyServerOrder(allIds, getServerOrderMode());
-      console.log("[TopWar V2.14.9.22 UI] 최신 시즌 분류 서버 조사 완료:", {
-        count: ordered.length,
-        first: ordered.slice(0, 20)
-      });
-      return ordered;
     }
 
     const initialServerOrderMode = (() => {
@@ -19049,9 +19143,9 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar Unified V2.14.9.39 UI] 도둑+도시보상 통합찾기 종료:", result);
+            console.log("[TopWar Unified V2.14.9.41 UI] 도둑+도시보상 통합찾기 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar Unified V2.14.9.39 UI] 통합찾기 실패 원인:", result.reason);
+              console.error("[TopWar Unified V2.14.9.41 UI] 통합찾기 실패 원인:", result.reason);
               alert(`도둑+도시보상 실행 실패\n\n${result.reason}`);
             }
             render();
@@ -19060,7 +19154,7 @@ ${lastServerListError}`
             state.watch133.running = false;
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar Unified V2.14.9.39 UI] 도둑+도시보상 통합찾기 오류:", error);
+            console.error("[TopWar Unified V2.14.9.41 UI] 도둑+도시보상 통합찾기 오류:", error);
             alert(`도둑+도시보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
@@ -19319,7 +19413,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar Unified V2.14.9.39 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[TopWar Unified V2.14.9.41 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -19339,7 +19433,7 @@ ${lastServerListError}`
     bootUi();
   }
 
-  console.log("%c[TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix] UI installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.41 - Season Empty Group Fallback Fix] UI installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -20308,7 +20402,7 @@ ${lastServerListError}`
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.39 Runtime Integration
+ * TopWar Unified Automation V2.14.9.41 Runtime Integration
  * - 도둑 상세창의 현재 라운드 감지
  * - 서버별 1회 조사 → GitHub 업로드 → Soft Reset
  * - 반복 조사와 Soft Reset을 하나의 runMultiServerSurvey 래퍼로 통합
@@ -21482,7 +21576,7 @@ ${lastServerListError}`
     closeVisiblePopupsForSoftReset: closeVisiblePopups
   });
 
-  console.log("%c[TopWar Unified Automation V2.14.9.39 Runtime] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.41 Runtime] installed", "color:#00e676;font-weight:bold");
 })();
 /* ---------------------------------------------------------------------------
  * TopWar V2.9 Storage Policy Override
@@ -25027,8 +25121,8 @@ function migrateLegacyRealPowerToken() {
 
 
 const loopRuntime = {stopRequested: false,runningPromise: null,abortController: null,mode: "idle",progress: {currentIndex: 0,total: 0,currentServerId: null,phase: "idle"}};
-// V2.14.9.39: 전체 서버 진행 큐는 페이지 런타임에서만 유지한다.
-// V2.14.9.39: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
+// V2.14.9.41: 전체 서버 진행 큐는 페이지 런타임에서만 유지한다.
+// V2.14.9.41: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
 // 새로고침 복구는 TOPWAR_ACTIVE_RECOVERY_V1의 mode/serverId/startedAt만 사용한다.
 let runtimeServerQueue = null;
 try { localStorage.removeItem(QUEUE_KEY); } catch {}
@@ -32580,45 +32674,34 @@ const promise = (async () => {
   }
 
   async function refreshSeasonListOnceForCycle(cycleNo) {
-    while (!loopRuntime.stopRequested && !controller.signal.aborted) {
-      throwIfStopped();
-      try {
-        const refreshSeasonList = window.TOPWAR?.resolveTop100ServerIds;
-        if (typeof refreshSeasonList !== "function") {
-          throw new Error("TOPWAR.resolveTop100ServerIds를 찾지 못했습니다.");
-        }
-
-        updateProgress({
-          currentIndex: 0,
-          currentServerId: null,
-          phase: "refreshing-season-list"
-        });
-        pushLog(`전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 시작`);
-
-        const seasonalIds = await refreshSeasonList();
-        throwIfStopped();
-
-        if (!Array.isArray(seasonalIds) || !seasonalIds.length) {
-          throw new Error("새로 조사한 시즌별 서버 목록이 비어 있습니다.");
-        }
-
-        pushLog(`전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 완료: ${seasonalIds.length}개`, {
-          firstServers: seasonalIds.slice(0, 20)
-        });
-        return seasonalIds;
-      } catch (error) {
-        if (isStopError(error) || loopRuntime.stopRequested || controller.signal.aborted) throw error;
-        pushLog(
-          `전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 실패 - 시즌 단계만 재시도`,
-          error?.message || String(error)
-        );
-        updateProgress({ phase: "season-list-retry-waiting" });
-        await sleep(Number(settings.loopDelayMs ?? 3000));
-        // 시즌 조사 자체가 실패한 경우에만 시즌 단계를 다시 수행한다.
-      }
-    }
+    // 시즌조사는 한 Top100 사이클당 정확히 1회만 수행한다.
+    // 실패했다고 여기서 무한 재시도하지 않는다. 실패 시 전체 Top100 실행을 중단해
+    // "시즌목록 조사만 반복"되는 상태를 구조적으로 차단한다.
     throwIfStopped();
-    return [];
+
+    const refreshSeasonList = window.TOPWAR?.resolveTop100ServerIds;
+    if (typeof refreshSeasonList !== "function") {
+      throw new Error("TOPWAR.resolveTop100ServerIds를 찾지 못했습니다.");
+    }
+
+    updateProgress({
+      currentIndex: 0,
+      currentServerId: null,
+      phase: "refreshing-season-list"
+    });
+    pushLog(`전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 시작 (사이클당 1회)`);
+
+    const seasonalIds = await refreshSeasonList();
+    throwIfStopped();
+
+    if (!Array.isArray(seasonalIds) || !seasonalIds.length) {
+      throw new Error("새로 조사한 시즌별 서버 목록이 비어 있습니다.");
+    }
+
+    pushLog(`전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 완료: ${seasonalIds.length}개`, {
+      firstServers: seasonalIds.slice(0, 20)
+    });
+    return seasonalIds;
   }
 
   async function readWorldServerIdsAfterSeason(cycleNo) {
@@ -32685,54 +32768,83 @@ const promise = (async () => {
 
       cycleNumber = nextCycleNumber;
 
-      const cycleSettings = {
+      const baseCycleSettings = {
         ...settings,
         allServers: true,
-        serverIds: cycleServerIds,
-        // 핵심: 이전 사이클의 lastSuccessAt/playerCount/allianceCount를 절대 재사용하지 않는다.
-        // 복구가 필요한 경우는 TOPWAR_RECOVERY가 serverIds 자체를 마지막 서버부터 잘라서 전달한다.
-        forceRefreshAllServers: true
+        serverIds: cycleServerIds
       };
 
-      updateProgress({
-        currentIndex: 0,
-        total: cycleServerIds.length,
-        currentServerId: null,
-        phase: "starting-top100-survey"
-      });
-      pushLog(`전체 서버 사이클 ${cycleNumber} Top100 본 조사 시작`, {
-        total: cycleServerIds.length,
-        firstServers: cycleServerIds.slice(0, 20)
-      });
+      // ------------------------------------------------------------
+      // 중요: 시즌조사는 이미 이번 cycleNumber에서 1회 끝났다.
+      // 이제 Top100 본 조사가 완전히 끝날 때까지 절대 바깥 사이클로 돌아가지 않는다.
+      // 첫 시도만 새 큐를 만들고, 이후 재시도는 같은 큐를 재사용하여 실패 서버만 다시 조사한다.
+      // ------------------------------------------------------------
+      let mainAttempt = 0;
+      let mainCompleted = false;
 
-      // runOneCycle 내부에서 forceRefreshAllServers=true를 확인해 완료정보 없는 새 큐를 만든다.
-      const cycleResult = await runOneCycle(cycleSettings);
+      while (!mainCompleted && !loopRuntime.stopRequested && !controller.signal.aborted) {
+        throwIfStopped();
+        mainAttempt++;
 
-      if (
-        loopRuntime.stopRequested ||
-        controller.signal.aborted ||
-        cycleResult?.stopped
-      ) {
-        break;
+        const cycleSettings = {
+          ...baseCycleSettings,
+          forceRefreshAllServers: mainAttempt === 1
+        };
+
+        updateProgress({
+          currentIndex: 0,
+          total: cycleServerIds.length,
+          currentServerId: null,
+          phase: mainAttempt === 1 ? "starting-top100-survey" : "retrying-top100-survey"
+        });
+        pushLog(`전체 서버 사이클 ${cycleNumber} Top100 본 조사 ${mainAttempt === 1 ? "시작" : `재시도 #${mainAttempt}`}`, {
+          total: cycleServerIds.length,
+          firstServers: cycleServerIds.slice(0, 20),
+          seasonRefreshRepeated: false
+        });
+
+        const cycleResult = await runOneCycle(cycleSettings);
+
+        if (
+          loopRuntime.stopRequested ||
+          controller.signal.aborted ||
+          cycleResult?.stopped
+        ) {
+          break;
+        }
+
+        const completed = Number(cycleResult?.completed || 0);
+        const total = Number(cycleResult?.total || cycleServerIds.length || 0);
+        mainCompleted = total > 0 && completed >= total && cycleResult?.ok !== false;
+
+        if (mainCompleted) {
+          pushLog(`전체 서버 사이클 ${cycleNumber} 시즌조사 -> Top100 본 조사 완료`, {
+            completed,
+            total,
+            attempt: mainAttempt
+          });
+          break;
+        }
+
+        // runOneCycle은 일부 서버 실패가 있어도 ok:true를 반환할 수 있다.
+        // completed < total이면 절대 다음 시즌조사로 넘어가지 않고 같은 본 조사 큐를 재시도한다.
+        pushLog(`전체 서버 사이클 ${cycleNumber} Top100 본 조사 미완료 - 시즌조사 없이 본 조사만 재시도`, {
+          completed,
+          total,
+          ok: cycleResult?.ok,
+          error: cycleResult?.error || null,
+          nextAttempt: mainAttempt + 1
+        });
+        updateProgress({ phase: "top100-main-retry-waiting" });
+        await sleep(Number(settings.loopDelayMs ?? 3000));
       }
 
-      pushLog(
-        cycleResult?.ok === false
-          ? `전체 서버 사이클 ${cycleNumber} Top100 본 조사 오류 후 다음 사이클 대기`
-          : `전체 서버 사이클 ${cycleNumber} 시즌조사 -> Top100 본 조사 완료`,
-        {
-          completed: cycleResult?.completed,
-          total: cycleResult?.total,
-          ok: cycleResult?.ok,
-          error: cycleResult?.error || null
-        }
-      );
+      if (loopRuntime.stopRequested || controller.signal.aborted) break;
+      if (!mainCompleted) {
+        throw new Error(`Top100 본 조사가 완료되지 않은 상태에서 사이클 ${cycleNumber}이 종료되었습니다.`);
+      }
 
-      updateProgress({
-        phase: cycleResult?.ok === false
-          ? "retry-waiting"
-          : "waiting"
-      });
+      updateProgress({ phase: "waiting" });
       await sleep(Number(settings.loopDelayMs ?? 3000));
     }
   } catch (error) {
