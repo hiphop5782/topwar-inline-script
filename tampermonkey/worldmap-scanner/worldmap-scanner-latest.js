@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle
+// @name         TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.37
-// @description  Unified TopWar automation with stable season-group refresh at the start of every Top100 cycle
+// @version      2.14.9.39
+// @description  Unified TopWar automation with navigation, per-cycle season refresh, and auto recovery after memory/WebSocket failures
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -12,6 +12,7582 @@
 // @updateURL    https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/tampermonkey/worldmap-scanner/worldmap-scanner-automation.js
 // @downloadURL  https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/tampermonkey/worldmap-scanner/worldmap-scanner-automation.js
 // ==/UserScript==
+
+(() => {
+    'use strict';
+    const installation = {};
+    try {
+
+    /* ============================================================
+     * TopWar Navigation Controller
+     * v0.4.0
+     *
+     * 상태
+     * - BASE
+     * - WORLD
+     * - WORLD_MINIMAP
+     * - WORLD_MAP
+     *
+     * UI 버튼
+     * - 기지
+     * - 월드
+     * - 월드맵
+     *
+     * WORLD_MINIMAP은 내부 중간 상태
+     * ============================================================ */
+
+    const VERSION = '0.4.1-integrated';
+
+    const UI_ID = 'topwar-nav-v040';
+    const STYLE_ID = 'topwar-nav-v040-style';
+
+    const WATCH_INTERVAL = 250;
+
+
+    /* ============================================================
+     * STATE
+     * ============================================================ */
+
+    const STATE = Object.freeze({
+
+        BASE:
+            'BASE',
+
+        WORLD:
+            'WORLD',
+
+        WORLD_MINIMAP:
+            'WORLD_MINIMAP',
+
+        WORLD_MAP:
+            'WORLD_MAP',
+
+        UNKNOWN:
+            'UNKNOWN'
+    });
+
+
+    /* ============================================================
+     * 실제 확인된 경로
+     * ============================================================ */
+
+    const PATH = Object.freeze({
+
+        MINIMAP:
+            'NWorldMap/UICanvas/WorldMapUIWrapper/NWorldMapUI/' +
+            'leftTopNode/leftMoveNode/minimapNode/infoNode/MinimapBtn',
+
+        WORLD_MAP:
+            'NWorldMap/UICanvas/PopLayer/UIFrameNone/CONTENT/' +
+            'NWorldMinimap3D/UINodeNormal/worldmapBtn'
+    });
+
+
+    let watcher = null;
+
+    let moving = false;
+
+    let lastState = null;
+
+
+    /* ============================================================
+     * 기존 버전 제거
+     * ============================================================ */
+
+    const previousNav = window.TOPWAR_NAV;
+    const uiEvents = new AbortController();
+    installation.events = uiEvents;
+    let disposed = false;
+    let profileBusy = false;
+    const runtimeErrors = [];
+
+    /* ============================================================
+     * 공통
+     * ============================================================ */
+
+    const sleep = ms =>
+        new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    Number(ms) || 0
+                )
+        );
+
+
+    function scene() {
+
+        try {
+
+            return (
+                window.cc
+                    ?.director
+                    ?.getScene?.()
+                || null
+            );
+
+        } catch {
+
+            return null;
+        }
+    }
+
+
+    function isActive(node) {
+
+        if (!node)
+            return false;
+
+
+        try {
+
+            if (
+                node.active === false
+            )
+                return false;
+
+        } catch {}
+
+
+        try {
+
+            if (
+                node.activeInHierarchy ===
+                false
+            )
+                return false;
+
+        } catch {}
+
+
+        return true;
+    }
+
+
+    function nodePath(node) {
+
+        const names = [];
+
+        let current =
+            node;
+
+
+        while (current) {
+
+            names.unshift(
+                current.name || '?'
+            );
+
+            current =
+                current.parent;
+        }
+
+
+        return names.join('/');
+    }
+
+
+    function componentName(component) {
+
+        return String(
+
+            component
+                ?.__classname__
+
+            ||
+
+            component
+                ?.constructor
+                ?.name
+
+            ||
+
+            component
+                ?.name
+
+            ||
+
+            ''
+        );
+    }
+
+
+    function walk(
+        root,
+        callback
+    ) {
+
+        if (!root)
+            return;
+
+
+        const stack =
+            [root];
+
+        const visited =
+            new Set();
+
+
+        while (
+            stack.length
+        ) {
+
+            const node =
+                stack.pop();
+
+
+            if (!node)
+                continue;
+
+
+            if (
+                visited.has(node)
+            )
+                continue;
+
+
+            visited.add(node);
+
+
+            callback(node);
+
+
+            for (
+                const child
+                of node.children || []
+            ) {
+
+                stack.push(
+                    child
+                );
+            }
+        }
+    }
+
+
+    /* ============================================================
+     * 정확한 direct child 경로 탐색
+     * ============================================================ */
+
+    function findDirectPath(path) {
+
+        const root =
+            scene();
+
+
+        if (!root)
+            return null;
+
+
+        const parts =
+            String(path)
+                .split('/')
+                .filter(Boolean);
+
+
+        if (
+            !parts.length
+        )
+            return null;
+
+
+        /*
+         * 첫 번째 root 이름 검색
+         */
+
+        let current =
+            null;
+
+
+        walk(
+            root,
+            node => {
+
+                if (current)
+                    return;
+
+
+                if (
+                    node.name ===
+                    parts[0]
+                ) {
+
+                    current =
+                        node;
+                }
+            }
+        );
+
+
+        if (!current)
+            return null;
+
+
+        /*
+         * 이후는 반드시 direct child
+         */
+
+        for (
+            let i = 1;
+            i < parts.length;
+            i++
+        ) {
+
+            const name =
+                parts[i];
+
+
+            current =
+
+                current
+                    .getChildByName
+                    ?.(name)
+
+                ||
+
+                (
+                    current.children || []
+                ).find(
+                    child =>
+                        child?.name ===
+                        name
+                )
+
+                ||
+
+                null;
+
+
+            if (!current)
+                return null;
+        }
+
+
+        return current;
+    }
+
+
+    /* ============================================================
+     * 이름으로 Node 찾기
+     * ============================================================ */
+
+    function findNodeByName(
+        name,
+        activeOnly = false
+    ) {
+
+        let result =
+            null;
+
+
+        walk(
+            scene(),
+            node => {
+
+                if (result)
+                    return;
+
+
+                if (
+                    node.name !== name
+                )
+                    return;
+
+
+                if (
+                    activeOnly &&
+                    !isActive(node)
+                )
+                    return;
+
+
+                result =
+                    node;
+            }
+        );
+
+
+        return result;
+    }
+
+
+    /* ============================================================
+     * Component 찾기
+     * ============================================================ */
+
+    function findComponent(
+        name,
+        activeOnly = false
+    ) {
+
+        let result =
+            null;
+
+
+        walk(
+            scene(),
+            node => {
+
+                if (result)
+                    return;
+
+
+                if (
+                    activeOnly &&
+                    !isActive(node)
+                )
+                    return;
+
+
+                /*
+                 * getComponent(name)
+                 */
+
+                try {
+
+                    const direct =
+                        node.getComponent?.(
+                            name
+                        );
+
+
+                    if (direct) {
+
+                        if (
+                            !activeOnly ||
+                            isActive(
+                                direct.node
+                            )
+                        ) {
+
+                            result =
+                                direct;
+
+                            return;
+                        }
+                    }
+
+                } catch {}
+
+
+                /*
+                 * _components
+                 */
+
+                for (
+                    const component
+                    of node._components || []
+                ) {
+
+                    if (
+                        componentName(
+                            component
+                        ) !==
+                        name
+                    )
+                        continue;
+
+
+                    if (
+                        activeOnly &&
+                        !isActive(
+                            component.node
+                        )
+                    )
+                        continue;
+
+
+                    result =
+                        component;
+
+                    return;
+                }
+            }
+        );
+
+
+        return result;
+    }
+
+
+    /* ============================================================
+     * Cocos Button 실행
+     * ============================================================ */
+
+    function triggerButton(node) {
+
+        if (!node) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'node 없음'
+            };
+        }
+
+
+        /*
+         * 1. cc.Button clickEvents
+         */
+
+        try {
+
+            const button =
+                node.getComponent?.(
+                    cc.Button
+                );
+
+
+            if (
+                button
+                    ?.clickEvents
+                    ?.length
+
+                &&
+
+                cc.Component
+                    ?.EventHandler
+                    ?.emitEvents
+            ) {
+
+                const event = {
+
+                    type:
+                        'click',
+
+                    target:
+                        node,
+
+                    currentTarget:
+                        node
+                };
+
+
+                cc.Component
+                    .EventHandler
+                    .emitEvents(
+                        button.clickEvents,
+                        event
+                    );
+
+
+                return {
+
+                    ok: true,
+
+                    method:
+                        'clickEvents',
+
+                    node:
+                        node.name,
+
+                    path:
+                        nodePath(node)
+                };
+            }
+
+        } catch (
+            error
+        ) {
+
+            console.warn(
+                '[NAV] clickEvents 실패',
+                error
+            );
+        }
+
+
+        /*
+         * 2. node.emit
+         */
+
+        try {
+
+            if (
+                typeof node.emit ===
+                'function'
+            ) {
+
+                node.emit(
+                    'click',
+                    {
+                        type:
+                            'click',
+
+                        target:
+                            node,
+
+                        currentTarget:
+                            node
+                    }
+                );
+
+
+                return {
+
+                    ok: true,
+
+                    method:
+                        'node.emit',
+
+                    node:
+                        node.name,
+
+                    path:
+                        nodePath(node)
+                };
+            }
+
+        } catch (
+            error
+        ) {
+
+            console.warn(
+                '[NAV] node.emit 실패',
+                error
+            );
+        }
+
+
+        return {
+
+            ok: false,
+
+            reason:
+                '실행 가능한 이벤트 없음',
+
+            node:
+                node.name,
+
+            path:
+                nodePath(node)
+        };
+    }
+
+
+    /* ============================================================
+     * 상태 신호
+     * ============================================================ */
+
+    function getSignals() {
+
+        const serverPanel =
+            findComponent(
+                'WorldServerListPanel',
+                true
+            );
+
+
+        const serverPanelNode =
+
+            serverPanel?.node
+
+            ||
+
+            findNodeByName(
+                'WorldServerListPanel',
+                true
+            );
+
+
+        const minimapButton =
+            findDirectPath(
+                PATH.MINIMAP
+            );
+
+
+        const worldmapButton =
+            findDirectPath(
+                PATH.WORLD_MAP
+            );
+
+
+        const nWorldMap =
+            findNodeByName(
+                'NWorldMap',
+                true
+            );
+
+
+        const minimapRoot =
+            findNodeByName(
+                'NWorldMinimap3D',
+                true
+            );
+
+
+        return {
+
+            serverPanel:
+                !!(
+                    serverPanelNode &&
+                    isActive(
+                        serverPanelNode
+                    )
+                ),
+
+            serverPanelNode,
+
+
+            minimapButton:
+                !!(
+                    minimapButton &&
+                    isActive(
+                        minimapButton
+                    )
+                ),
+
+            minimapButtonNode:
+                minimapButton,
+
+
+            worldmapButton:
+                !!(
+                    worldmapButton &&
+                    isActive(
+                        worldmapButton
+                    )
+                ),
+
+            worldmapButtonNode:
+                worldmapButton,
+
+
+            minimapRoot:
+                !!(
+                    minimapRoot &&
+                    isActive(
+                        minimapRoot
+                    )
+                ),
+
+            minimapRootNode:
+                minimapRoot,
+
+
+            nWorldMap:
+                !!(
+                    nWorldMap &&
+                    isActive(
+                        nWorldMap
+                    )
+                ),
+
+            nWorldMapNode:
+                nWorldMap
+        };
+    }
+
+
+    function simplifySignals(s) {
+
+        return {
+
+            serverPanel:
+                s.serverPanel,
+
+            minimapButton:
+                s.minimapButton,
+
+            worldmapButton:
+                s.worldmapButton,
+
+            minimapRoot:
+                s.minimapRoot,
+
+            nWorldMap:
+                s.nWorldMap
+        };
+    }
+
+
+    /* ============================================================
+     * 상태 감지
+     * ============================================================ */
+
+    function detect() {
+
+        const s =
+            getSignals();
+
+
+        /*
+         * 1.
+         * WorldServerListPanel
+         */
+
+        if (
+            s.serverPanel
+        ) {
+
+            return {
+
+                state:
+                    STATE.WORLD_MAP,
+
+                confidence:
+                    1,
+
+                reason:
+                    'WorldServerListPanel active',
+
+                signals:
+                    simplifySignals(s)
+            };
+        }
+
+
+        /*
+         * 2.
+         * 중간 미니맵
+         */
+
+        if (
+            s.worldmapButton ||
+            s.minimapRoot
+        ) {
+
+            return {
+
+                state:
+                    STATE.WORLD_MINIMAP,
+
+                confidence:
+                    1,
+
+                reason:
+                    'NWorldMinimap3D active',
+
+                signals:
+                    simplifySignals(s)
+            };
+        }
+
+
+        /*
+         * 3.
+         * 일반 WORLD
+         */
+
+        if (
+            s.minimapButton
+        ) {
+
+            return {
+
+                state:
+                    STATE.WORLD,
+
+                confidence:
+                    1,
+
+                reason:
+                    'MinimapBtn active',
+
+                signals:
+                    simplifySignals(s)
+            };
+        }
+
+
+        /*
+         * 4.
+         * 전환중
+         */
+
+        if (
+            s.nWorldMap
+        ) {
+
+            return {
+
+                state:
+                    STATE.UNKNOWN,
+
+                confidence:
+                    0.4,
+
+                reason:
+                    'NWorldMap active but UI not confirmed',
+
+                signals:
+                    simplifySignals(s)
+            };
+        }
+
+
+        /*
+         * 5.
+         * BASE
+         */
+
+        return {
+
+            state:
+                STATE.BASE,
+
+            confidence:
+                0.9,
+
+            reason:
+                'World UI not active',
+
+            signals:
+                simplifySignals(s)
+        };
+    }
+
+
+    /* ============================================================
+     * 상태 대기
+     * ============================================================ */
+
+    async function waitForState(
+        target,
+        options = {}
+    ) {
+
+        const timeout =
+            Number(
+                options.timeout ??
+                12000
+            );
+
+
+        const interval =
+            Number(
+                options.interval ??
+                150
+            );
+
+
+        const stableRequired =
+            Number(
+                options.stable ??
+                2
+            );
+
+
+        const started =
+            Date.now();
+
+
+        let stable = 0;
+
+        let last = null;
+
+
+        while (
+            Date.now() -
+            started <
+            timeout
+        ) {
+
+            last =
+                detect();
+
+
+            if (
+                last.state ===
+                target
+            ) {
+
+                stable++;
+
+
+                if (
+                    stable >=
+                    stableRequired
+                ) {
+
+                    return {
+
+                        ok: true,
+
+                        state:
+                            target,
+
+                        elapsed:
+                            Date.now() -
+                            started,
+
+                        detected:
+                            last
+                    };
+                }
+
+            } else {
+
+                stable = 0;
+            }
+
+
+            await sleep(
+                interval
+            );
+        }
+
+
+        return {
+
+            ok: false,
+
+            target,
+
+            elapsed:
+                Date.now() -
+                started,
+
+            last
+        };
+    }
+
+
+    /* ============================================================
+     * Button 수집
+     * ============================================================ */
+
+    function collectActiveButtons(
+        root = scene()
+    ) {
+
+        const rows =
+            [];
+
+
+        walk(
+            root,
+            node => {
+
+                if (
+                    !isActive(node)
+                )
+                    return;
+
+
+                let button =
+                    null;
+
+
+                try {
+
+                    button =
+                        node.getComponent?.(
+                            cc.Button
+                        );
+
+                } catch {}
+
+
+                if (!button)
+                    return;
+
+
+                const events =
+                    [];
+
+
+                for (
+                    const event
+                    of button.clickEvents || []
+                ) {
+
+                    events.push(
+
+                        [
+                            event?.component,
+                            event?.handler,
+                            event?.target?.name
+                        ]
+                            .filter(Boolean)
+                            .join(' ')
+                    );
+                }
+
+
+                const value =
+
+                    [
+                        node.name,
+                        nodePath(node),
+                        ...events
+                    ]
+
+                        .join(' ')
+
+                        .replace(
+                            /[^a-zA-Z0-9가-힣]/g,
+                            ''
+                        )
+
+                        .toLowerCase();
+
+
+                rows.push({
+
+                    node,
+
+                    button,
+
+                    events,
+
+                    value,
+
+                    path:
+                        nodePath(node)
+                });
+            }
+        );
+
+
+        return rows;
+    }
+
+
+    /* ============================================================
+     * BASE 버튼 점수
+     * ============================================================ */
+
+    function scoreGoBase(row) {
+
+        const value =
+            row.value;
+
+
+        let score = 0;
+
+
+        if (
+            value.includes('btnhome')
+        )
+            score += 180;
+
+
+        if (
+            value.includes('gohome')
+        )
+            score += 180;
+
+
+        if (
+            value.includes('returnbase')
+        )
+            score += 150;
+
+
+        if (
+            value.includes('backhome')
+        )
+            score += 150;
+
+
+        if (
+            value.includes('maincity')
+        )
+            score += 140;
+
+
+        if (
+            value.includes('기지')
+        )
+            score += 100;
+
+
+        if (
+            value.includes('home')
+        )
+            score += 100;
+
+
+        if (
+            value.includes('base')
+        )
+            score += 80;
+
+
+        if (
+            value.includes('city')
+        )
+            score += 50;
+
+
+        if (
+            value.includes('close')
+        )
+            score -= 200;
+
+
+        if (
+            value.includes('chat')
+        )
+            score -= 160;
+
+
+        if (
+            value.includes('share')
+        )
+            score -= 160;
+
+
+        if (
+            value.includes('guild') ||
+            value.includes('alliance')
+        )
+            score -= 100;
+
+
+        return score;
+    }
+
+
+    /* ============================================================
+     * WORLD 버튼 점수
+     * ============================================================ */
+
+    function scoreGoWorld(row) {
+
+        const value =
+            row.value;
+
+
+        let score = 0;
+
+
+        if (
+            value.includes('worldmap')
+        )
+            score += 190;
+
+
+        if (
+            value.includes('btnworld')
+        )
+            score += 170;
+
+
+        if (
+            value.includes('btnmap')
+        )
+            score += 150;
+
+
+        if (
+            value.includes('mapbtn')
+        )
+            score += 140;
+
+
+        if (
+            value.includes('nworld')
+        )
+            score += 130;
+
+
+        if (
+            value.includes('월드맵')
+        )
+            score += 180;
+
+
+        if (
+            value.includes('월드')
+        )
+            score += 110;
+
+
+        if (
+            value.includes('지도')
+        )
+            score += 90;
+
+
+        if (
+            value.includes('world')
+        )
+            score += 70;
+
+
+        if (
+            value.includes('map')
+        )
+            score += 60;
+
+
+        if (
+            value.includes('chat')
+        )
+            score -= 240;
+
+
+        if (
+            value.includes('share')
+        )
+            score -= 160;
+
+
+        if (
+            value.includes('close')
+        )
+            score -= 180;
+
+
+        return score;
+    }
+
+
+    /* ============================================================
+     * BASE -> WORLD
+     * ============================================================ */
+
+    async function baseToWorld(
+        options = {}
+    ) {
+
+        if (
+            detect().state ===
+            STATE.WORLD
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        const candidates =
+
+            collectActiveButtons()
+
+                .map(
+                    row => ({
+                        ...row,
+
+                        score:
+                            scoreGoWorld(
+                                row
+                            )
+                    })
+                )
+
+                .filter(
+                    row =>
+                        row.score >=
+                        80
+                )
+
+                .sort(
+                    (a, b) =>
+                        b.score -
+                        a.score
+                );
+
+
+        if (
+            !candidates.length
+        ) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'WORLD 이동 버튼을 찾지 못함'
+            };
+        }
+
+
+        const target =
+            candidates[0];
+
+
+        const click =
+            triggerButton(
+                target.node
+            );
+
+
+        if (
+            !click.ok
+        ) {
+
+            return {
+
+                ok: false,
+
+                click,
+
+                target
+            };
+        }
+
+
+        const verified =
+            await waitForState(
+                STATE.WORLD,
+                {
+                    timeout:
+                        options.timeout ??
+                        12000
+                }
+            );
+
+
+        return {
+
+            ok:
+                verified.ok,
+
+            click,
+
+            target: {
+
+                node:
+                    target.node.name,
+
+                path:
+                    target.path,
+
+                score:
+                    target.score
+            },
+
+            verified
+        };
+    }
+
+
+    /* ============================================================
+     * WORLD -> BASE
+     * ============================================================ */
+
+    async function worldToBase(
+        options = {}
+    ) {
+
+        if (
+            detect().state ===
+            STATE.BASE
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        const candidates =
+
+            collectActiveButtons()
+
+                .map(
+                    row => ({
+                        ...row,
+
+                        score:
+                            scoreGoBase(
+                                row
+                            )
+                    })
+                )
+
+                .filter(
+                    row =>
+                        row.score >=
+                        80
+                )
+
+                .sort(
+                    (a, b) =>
+                        b.score -
+                        a.score
+                );
+
+
+        if (
+            !candidates.length
+        ) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'BASE 복귀 버튼을 찾지 못함'
+            };
+        }
+
+
+        const target =
+            candidates[0];
+
+
+        const click =
+            triggerButton(
+                target.node
+            );
+
+
+        if (
+            !click.ok
+        ) {
+
+            return {
+
+                ok: false,
+
+                click,
+
+                target
+            };
+        }
+
+
+        const verified =
+            await waitForState(
+                STATE.BASE,
+                {
+                    timeout:
+                        options.timeout ??
+                        12000
+                }
+            );
+
+
+        return {
+
+            ok:
+                verified.ok,
+
+            click,
+
+            target: {
+
+                node:
+                    target.node.name,
+
+                path:
+                    target.path,
+
+                score:
+                    target.score
+            },
+
+            verified
+        };
+    }
+
+
+    /* ============================================================
+     * WORLD -> WORLD_MINIMAP
+     * ============================================================ */
+
+    async function worldToWorldMinimap(
+        options = {}
+    ) {
+
+        const current =
+            detect();
+
+
+        if (
+            current.state ===
+            STATE.WORLD_MINIMAP
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        const minimapButton =
+            findDirectPath(
+                PATH.MINIMAP
+            );
+
+
+        if (
+            !minimapButton ||
+            !isActive(
+                minimapButton
+            )
+        ) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'MinimapBtn을 찾지 못함'
+            };
+        }
+
+
+        const click =
+            triggerButton(
+                minimapButton
+            );
+
+
+        if (
+            !click.ok
+        ) {
+
+            return {
+
+                ok: false,
+
+                click
+            };
+        }
+
+
+        const verified =
+            await waitForState(
+                STATE.WORLD_MINIMAP,
+                {
+                    timeout:
+                        options.timeout ??
+                        7000
+                }
+            );
+
+
+        return {
+
+            ok:
+                verified.ok,
+
+            click,
+
+            verified
+        };
+    }
+
+
+    /* ============================================================
+     * WORLD_MINIMAP -> WORLD_MAP
+     * ============================================================ */
+
+    async function worldMinimapToWorldMap(
+        options = {}
+    ) {
+
+        const current =
+            detect();
+
+
+        if (
+            current.state ===
+            STATE.WORLD_MAP
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        if (
+            current.state !==
+            STATE.WORLD_MINIMAP
+        ) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    '현재 상태가 WORLD_MINIMAP이 아님',
+
+                current
+            };
+        }
+
+
+        const button =
+            findDirectPath(
+                PATH.WORLD_MAP
+            );
+
+
+        if (
+            !button ||
+            !isActive(
+                button
+            )
+        ) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'worldmapBtn을 찾지 못함'
+            };
+        }
+
+
+        const click =
+            triggerButton(
+                button
+            );
+
+
+        if (
+            !click.ok
+        ) {
+
+            return {
+
+                ok: false,
+
+                click
+            };
+        }
+
+
+        const verified =
+            await waitForState(
+                STATE.WORLD_MAP,
+                {
+                    timeout:
+                        options.timeout ??
+                        10000
+                }
+            );
+
+
+        return {
+
+            ok:
+                verified.ok,
+
+            click,
+
+            verified
+        };
+    }
+
+
+    /* ============================================================
+     * WORLD -> WORLD_MAP
+     * ============================================================ */
+
+    async function worldToWorldMap(
+        options = {}
+    ) {
+
+        let current =
+            detect();
+
+
+        if (
+            current.state ===
+            STATE.WORLD_MAP
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        if (
+            current.state ===
+            STATE.WORLD
+        ) {
+
+            const step1 =
+                await worldToWorldMinimap(
+                    options
+                );
+
+
+            if (
+                !step1.ok
+            ) {
+
+                return {
+
+                    ok: false,
+
+                    stage:
+                        'WORLD_TO_WORLD_MINIMAP',
+
+                    detail:
+                        step1
+                };
+            }
+        }
+
+
+        current =
+            detect();
+
+
+        if (
+            current.state ===
+            STATE.WORLD_MINIMAP
+        ) {
+
+            const step2 =
+                await worldMinimapToWorldMap(
+                    options
+                );
+
+
+            return step2;
+        }
+
+
+        return {
+
+            ok: false,
+
+            reason:
+                'WORLD_MAP 이동 실패',
+
+            current:
+                detect()
+        };
+    }
+
+
+    /* ============================================================
+     * 뒤로가기 후보 찾기
+     * ============================================================ */
+
+    function findBackCandidates(
+        root,
+        options = {}
+    ) {
+
+        if (!root)
+            return [];
+
+
+        const candidates =
+            [];
+
+
+        walk(
+            root,
+            node => {
+
+                if (
+                    !isActive(node)
+                )
+                    return;
+
+
+                let button =
+                    null;
+
+
+                try {
+
+                    button =
+                        node.getComponent?.(
+                            cc.Button
+                        );
+
+                } catch {}
+
+
+                if (!button)
+                    return;
+
+
+                const handlers =
+                    [];
+
+
+                for (
+                    const event
+                    of button.clickEvents || []
+                ) {
+
+                    handlers.push({
+
+                        event,
+
+                        component:
+                            String(
+                                event?.component ||
+                                ''
+                            ),
+
+                        handler:
+                            String(
+                                event?.handler ||
+                                ''
+                            ),
+
+                        targetName:
+                            String(
+                                event
+                                    ?.target
+                                    ?.name ||
+                                ''
+                            )
+                    });
+                }
+
+
+                const text =
+
+                    [
+                        node.name,
+                        nodePath(node),
+
+                        ...handlers.map(
+                            h =>
+                                `${h.component} ${h.handler} ${h.targetName}`
+                        )
+                    ]
+
+                        .join(' ')
+
+                        .replace(
+                            /[^a-zA-Z0-9가-힣]/g,
+                            ''
+                        )
+
+                        .toLowerCase();
+
+
+                let score = 0;
+
+
+                if (
+                    text.includes(
+                        'btnback'
+                    )
+                )
+                    score += 10000;
+
+
+                if (
+                    text.includes(
+                        'backbtn'
+                    )
+                )
+                    score += 9500;
+
+
+                if (
+                    text.includes(
+                        'onclickback'
+                    )
+                )
+                    score += 9000;
+
+
+                if (
+                    text.includes(
+                        'onbtnback'
+                    )
+                )
+                    score += 9000;
+
+
+                if (
+                    text.includes(
+                        'onback'
+                    )
+                )
+                    score += 8500;
+
+
+                if (
+                    text.includes(
+                        'back'
+                    )
+                )
+                    score += 7000;
+
+
+                if (
+                    text.includes(
+                        'btnclose'
+                    )
+                )
+                    score += 8000;
+
+
+                if (
+                    text.includes(
+                        'closebtn'
+                    )
+                )
+                    score += 7500;
+
+
+                if (
+                    text.includes(
+                        'onclickclose'
+                    )
+                )
+                    score += 7300;
+
+
+                if (
+                    text.includes(
+                        'onbtnclose'
+                    )
+                )
+                    score += 7300;
+
+
+                if (
+                    text.includes(
+                        'onclose'
+                    )
+                )
+                    score += 7000;
+
+
+                if (
+                    text.includes(
+                        'close'
+                    )
+                )
+                    score += 5000;
+
+
+                if (
+                    text.includes(
+                        'return'
+                    )
+                )
+                    score += 4500;
+
+
+                /*
+                 * 제외
+                 */
+
+                if (
+                    text.includes(
+                        'worldmapbtn'
+                    )
+                )
+                    score -= 30000;
+
+
+                if (
+                    text.includes(
+                        'btnsevermap'
+                    )
+                )
+                    score -= 30000;
+
+
+                if (
+                    text.includes(
+                        'servermap'
+                    )
+                )
+                    score -= 20000;
+
+
+                if (
+                    text.includes(
+                        'transfer'
+                    )
+                )
+                    score -= 10000;
+
+
+                if (
+                    text.includes(
+                        'rank'
+                    )
+                )
+                    score -= 8000;
+
+
+                if (
+                    score > 0
+                ) {
+
+                    candidates.push({
+
+                        node,
+
+                        button,
+
+                        handlers,
+
+                        score,
+
+                        path:
+                            nodePath(node),
+
+                        text
+                    });
+                }
+            }
+        );
+
+
+        candidates.sort(
+            (a, b) =>
+                b.score -
+                a.score
+        );
+
+
+        return candidates;
+    }
+
+
+    /* ============================================================
+     * WORLD_MAP -> WORLD_MINIMAP
+     * ============================================================ */
+
+    async function worldMapToWorldMinimap(
+        options = {}
+    ) {
+
+        let current =
+            detect();
+
+
+        if (
+            current.state ===
+            STATE.WORLD_MINIMAP
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        if (
+            current.state !==
+            STATE.WORLD_MAP
+        ) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    '현재 WORLD_MAP 상태가 아님',
+
+                current
+            };
+        }
+
+
+        const panel =
+            findComponent(
+                'WorldServerListPanel',
+                true
+            );
+
+
+        const panelNode =
+
+            panel?.node
+
+            ||
+
+            findNodeByName(
+                'WorldServerListPanel',
+                true
+            );
+
+
+        if (!panelNode) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'WorldServerListPanel 없음'
+            };
+        }
+
+
+        /*
+         * 버튼 우선
+         */
+
+        const candidates =
+            findBackCandidates(
+                panelNode
+            );
+
+
+        console.table(
+            candidates.map(
+                (row, index) => ({
+
+                    index,
+
+                    score:
+                        row.score,
+
+                    node:
+                        row.node.name,
+
+                    path:
+                        row.path,
+
+                    handlers:
+                        row.handlers
+                            .map(
+                                h =>
+                                    `${h.component}.${h.handler}`
+                            )
+                            .join(' | ')
+                })
+            )
+        );
+
+
+        for (
+            const candidate
+            of candidates
+        ) {
+
+            const click =
+                triggerButton(
+                    candidate.node
+                );
+
+
+            if (
+                !click.ok
+            )
+                continue;
+
+
+            await sleep(
+                350
+            );
+
+
+            current =
+                detect();
+
+
+            if (
+                current.state ===
+                STATE.WORLD_MINIMAP
+            ) {
+
+                return {
+
+                    ok: true,
+
+                    method:
+                        'button',
+
+                    target: {
+
+                        node:
+                            candidate.node.name,
+
+                        path:
+                            candidate.path,
+
+                        score:
+                            candidate.score
+                    },
+
+                    detected:
+                        current
+                };
+            }
+
+
+            if (
+                current.state ===
+                STATE.WORLD
+            ) {
+
+                return {
+
+                    ok: true,
+
+                    directWorld:
+                        true,
+
+                    method:
+                        'button',
+
+                    detected:
+                        current
+                };
+            }
+        }
+
+
+        /*
+         * component method fallback
+         */
+
+        if (panel) {
+
+            const preferred = [
+
+                'onClickBack',
+                'onBtnBack',
+                'onBack',
+                'back',
+
+                'onClickClose',
+                'onBtnClose',
+                'onClose',
+                'close',
+
+                'closePanel',
+                'hide'
+            ];
+
+
+            for (
+                const methodName
+                of preferred
+            ) {
+
+                if (
+                    typeof panel[
+                        methodName
+                    ] !==
+                    'function'
+                )
+                    continue;
+
+
+                try {
+
+                    panel[
+                        methodName
+                    ]();
+
+
+                    await sleep(
+                        350
+                    );
+
+
+                    current =
+                        detect();
+
+
+                    if (
+                        current.state ===
+                        STATE.WORLD_MINIMAP
+                    ) {
+
+                        return {
+
+                            ok: true,
+
+                            method:
+                                `component.${methodName}`,
+
+                            detected:
+                                current
+                        };
+                    }
+
+
+                    if (
+                        current.state ===
+                        STATE.WORLD
+                    ) {
+
+                        return {
+
+                            ok: true,
+
+                            directWorld:
+                                true,
+
+                            method:
+                                `component.${methodName}`,
+
+                            detected:
+                                current
+                        };
+                    }
+
+                } catch (
+                    error
+                ) {
+
+                    console.warn(
+                        `[NAV] ${methodName} 실패`,
+                        error
+                    );
+                }
+            }
+        }
+
+
+        return {
+
+            ok: false,
+
+            reason:
+                'WORLD_MAP 뒤로가기 실패',
+
+            current:
+                detect()
+        };
+    }
+
+
+    /* ============================================================
+     * WORLD_MINIMAP -> WORLD
+     * ============================================================ */
+
+    async function worldMinimapToWorld(
+        options = {}
+    ) {
+
+        let current =
+            detect();
+
+
+        if (
+            current.state ===
+            STATE.WORLD
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        if (
+            current.state !==
+            STATE.WORLD_MINIMAP
+        ) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    '현재 WORLD_MINIMAP 상태가 아님',
+
+                current
+            };
+        }
+
+
+        const minimapRoot =
+
+            findNodeByName(
+                'NWorldMinimap3D',
+                true
+            )
+
+            ||
+
+            findDirectPath(
+                'NWorldMap/UICanvas/PopLayer/UIFrameNone/CONTENT/NWorldMinimap3D'
+            );
+
+
+        if (!minimapRoot) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'NWorldMinimap3D 찾지 못함'
+            };
+        }
+
+
+        const candidates =
+            findBackCandidates(
+                minimapRoot
+            );
+
+
+        console.table(
+            candidates.map(
+                (row, index) => ({
+
+                    index,
+
+                    score:
+                        row.score,
+
+                    node:
+                        row.node.name,
+
+                    path:
+                        row.path,
+
+                    handlers:
+                        row.handlers
+                            .map(
+                                h =>
+                                    `${h.component}.${h.handler}`
+                            )
+                            .join(' | ')
+                })
+            )
+        );
+
+
+        for (
+            const candidate
+            of candidates
+        ) {
+
+            const click =
+                triggerButton(
+                    candidate.node
+                );
+
+
+            if (
+                !click.ok
+            )
+                continue;
+
+
+            const verified =
+                await waitForState(
+                    STATE.WORLD,
+                    {
+                        timeout:
+                            options.timeout ??
+                            5000,
+
+                        stable:
+                            2
+                    }
+                );
+
+
+            if (
+                verified.ok
+            ) {
+
+                return {
+
+                    ok: true,
+
+                    target: {
+
+                        node:
+                            candidate.node.name,
+
+                        path:
+                            candidate.path,
+
+                        score:
+                            candidate.score
+                    },
+
+                    click,
+
+                    verified
+                };
+            }
+        }
+
+
+        /*
+         * 상위 PopLayer/UIFrame close 버튼까지 확인
+         */
+
+        let parent =
+            minimapRoot.parent;
+
+
+        for (
+            let depth = 0;
+            depth < 5 &&
+            parent;
+            depth++
+        ) {
+
+            const parentCandidates =
+                findBackCandidates(
+                    parent
+                );
+
+
+            for (
+                const candidate
+                of parentCandidates
+            ) {
+
+                /*
+                 * worldmapBtn 제외
+                 */
+
+                if (
+                    candidate.node.name ===
+                    'worldmapBtn'
+                )
+                    continue;
+
+
+                const click =
+                    triggerButton(
+                        candidate.node
+                    );
+
+
+                if (
+                    !click.ok
+                )
+                    continue;
+
+
+                const verified =
+                    await waitForState(
+                        STATE.WORLD,
+                        {
+                            timeout:
+                                3000,
+
+                            stable:
+                                2
+                        }
+                    );
+
+
+                if (
+                    verified.ok
+                ) {
+
+                    return {
+
+                        ok: true,
+
+                        method:
+                            'parent-close',
+
+                        target: {
+
+                            node:
+                                candidate.node.name,
+
+                            path:
+                                candidate.path,
+
+                            score:
+                                candidate.score
+                        },
+
+                        verified
+                    };
+                }
+            }
+
+
+            parent =
+                parent.parent;
+        }
+
+
+        return {
+
+            ok: false,
+
+            reason:
+                'WORLD_MINIMAP 뒤로가기 실패',
+
+            candidates:
+                candidates
+                    .slice(0, 15)
+                    .map(
+                        row => ({
+
+                            node:
+                                row.node.name,
+
+                            path:
+                                row.path,
+
+                            score:
+                                row.score,
+
+                            handlers:
+                                row.handlers
+                                    .map(
+                                        h =>
+                                            `${h.component}.${h.handler}`
+                                    )
+                        })
+                    )
+        };
+    }
+
+
+    /* ============================================================
+     * WORLD_MAP -> WORLD
+     *
+     * 뒤로 두 번
+     * ============================================================ */
+
+    async function worldMapToWorld(
+        options = {}
+    ) {
+
+        let current =
+            detect();
+
+
+        if (
+            current.state ===
+            STATE.WORLD
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true
+            };
+        }
+
+
+        /*
+         * 1단계
+         * WORLD_MAP -> WORLD_MINIMAP
+         */
+
+        if (
+            current.state ===
+            STATE.WORLD_MAP
+        ) {
+
+            const step1 =
+                await worldMapToWorldMinimap(
+                    options
+                );
+
+
+            if (
+                !step1.ok
+            ) {
+
+                return {
+
+                    ok: false,
+
+                    stage:
+                        'WORLD_MAP_TO_WORLD_MINIMAP',
+
+                    detail:
+                        step1
+                };
+            }
+
+
+            current =
+                detect();
+
+
+            /*
+             * 한번에 WORLD까지 빠진 경우
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD
+            ) {
+
+                return {
+
+                    ok: true,
+
+                    direct:
+                        true,
+
+                    step1
+                };
+            }
+        }
+
+
+        /*
+         * 2단계
+         * WORLD_MINIMAP -> WORLD
+         */
+
+        if (
+            current.state ===
+            STATE.WORLD_MINIMAP
+        ) {
+
+            const step2 =
+                await worldMinimapToWorld(
+                    options
+                );
+
+
+            return {
+
+                ok:
+                    step2.ok,
+
+                step2
+            };
+        }
+
+
+        return {
+
+            ok: false,
+
+            reason:
+                'WORLD_MAP → WORLD 전환 중 상태 이상',
+
+            current:
+                detect()
+        };
+    }
+
+
+    /* ============================================================
+     * goto
+     * ============================================================ */
+
+    async function goto(
+        target,
+        options = {}
+    ) {
+
+        target =
+            String(
+                target || ''
+            ).toUpperCase();
+
+
+        let current =
+            detect();
+
+
+        console.log(
+            '[NAV]',
+            current.state,
+            '→',
+            target
+        );
+
+
+        if (
+            current.state ===
+            target
+        ) {
+
+            return {
+
+                ok: true,
+
+                alreadyThere:
+                    true,
+
+                state:
+                    target
+            };
+        }
+
+
+        /* ========================================================
+         * TARGET = WORLD_MAP
+         * ======================================================== */
+
+        if (
+            target ===
+            STATE.WORLD_MAP
+        ) {
+
+            /*
+             * BASE -> WORLD
+             */
+
+            if (
+                current.state ===
+                STATE.BASE
+            ) {
+
+                const step =
+                    await baseToWorld(
+                        options
+                    );
+
+
+                if (
+                    !step.ok
+                ) {
+
+                    return {
+
+                        ok: false,
+
+                        stage:
+                            'BASE_TO_WORLD',
+
+                        detail:
+                            step
+                    };
+                }
+
+
+                current =
+                    detect();
+            }
+
+
+            /*
+             * WORLD -> WORLD_MINIMAP
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD
+            ) {
+
+                const step =
+                    await worldToWorldMinimap(
+                        options
+                    );
+
+
+                if (
+                    !step.ok
+                ) {
+
+                    return {
+
+                        ok: false,
+
+                        stage:
+                            'WORLD_TO_WORLD_MINIMAP',
+
+                        detail:
+                            step
+                    };
+                }
+
+
+                current =
+                    detect();
+            }
+
+
+            /*
+             * WORLD_MINIMAP -> WORLD_MAP
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD_MINIMAP
+            ) {
+
+                return await worldMinimapToWorldMap(
+                    options
+                );
+            }
+        }
+
+
+        /* ========================================================
+         * TARGET = WORLD
+         * ======================================================== */
+
+        if (
+            target ===
+            STATE.WORLD
+        ) {
+
+            /*
+             * BASE -> WORLD
+             */
+
+            if (
+                current.state ===
+                STATE.BASE
+            ) {
+
+                return await baseToWorld(
+                    options
+                );
+            }
+
+
+            /*
+             * WORLD_MINIMAP -> WORLD
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD_MINIMAP
+            ) {
+
+                return await worldMinimapToWorld(
+                    options
+                );
+            }
+
+
+            /*
+             * WORLD_MAP -> WORLD_MINIMAP -> WORLD
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD_MAP
+            ) {
+
+                return await worldMapToWorld(
+                    options
+                );
+            }
+        }
+
+
+        /* ========================================================
+         * TARGET = BASE
+         * ======================================================== */
+
+        if (
+            target ===
+            STATE.BASE
+        ) {
+
+            /*
+             * WORLD_MAP -> WORLD
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD_MAP
+            ) {
+
+                const step =
+                    await worldMapToWorld(
+                        options
+                    );
+
+
+                if (
+                    !step.ok
+                ) {
+
+                    return {
+
+                        ok: false,
+
+                        stage:
+                            'WORLD_MAP_TO_WORLD',
+
+                        detail:
+                            step
+                    };
+                }
+
+
+                current =
+                    detect();
+            }
+
+
+            /*
+             * WORLD_MINIMAP -> WORLD
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD_MINIMAP
+            ) {
+
+                const step =
+                    await worldMinimapToWorld(
+                        options
+                    );
+
+
+                if (
+                    !step.ok
+                ) {
+
+                    return {
+
+                        ok: false,
+
+                        stage:
+                            'WORLD_MINIMAP_TO_WORLD',
+
+                        detail:
+                            step
+                    };
+                }
+
+
+                current =
+                    detect();
+            }
+
+
+            /*
+             * WORLD -> BASE
+             */
+
+            if (
+                current.state ===
+                STATE.WORLD
+            ) {
+
+                return await worldToBase(
+                    options
+                );
+            }
+        }
+
+
+        return {
+
+            ok: false,
+
+            reason:
+                '지원되지 않는 상태 전환',
+
+            from:
+                current.state,
+
+            to:
+                target,
+
+            current
+        };
+    }
+
+
+    /* ============================================================
+     * 진단
+     * ============================================================ */
+
+    function diagnose() {
+
+        const detected =
+            detect();
+
+
+        const signals =
+            getSignals();
+
+
+        const result = {
+
+            version:
+                VERSION,
+
+            detected,
+
+            signals:
+                simplifySignals(
+                    signals
+                ),
+
+            paths: {
+
+                minimap: {
+
+                    expected:
+                        PATH.MINIMAP,
+
+                    found:
+                        !!signals.minimapButtonNode,
+
+                    active:
+                        signals.minimapButton,
+
+                    actual:
+                        signals.minimapButtonNode
+                            ? nodePath(
+                                signals.minimapButtonNode
+                            )
+                            : null
+                },
+
+
+                worldmap: {
+
+                    expected:
+                        PATH.WORLD_MAP,
+
+                    found:
+                        !!signals.worldmapButtonNode,
+
+                    active:
+                        signals.worldmapButton,
+
+                    actual:
+                        signals.worldmapButtonNode
+                            ? nodePath(
+                                signals.worldmapButtonNode
+                            )
+                            : null
+                },
+
+
+                minimapRoot: {
+
+                    found:
+                        !!signals.minimapRootNode,
+
+                    active:
+                        signals.minimapRoot,
+
+                    actual:
+                        signals.minimapRootNode
+                            ? nodePath(
+                                signals.minimapRootNode
+                            )
+                            : null
+                },
+
+
+                serverPanel: {
+
+                    found:
+                        !!signals.serverPanelNode,
+
+                    active:
+                        signals.serverPanel,
+
+                    actual:
+                        signals.serverPanelNode
+                            ? nodePath(
+                                signals.serverPanelNode
+                            )
+                            : null
+                }
+            }
+        };
+
+
+        console.log(
+            '[TOPWAR_NAV diagnose]',
+            result
+        );
+
+
+        console.table([
+
+            {
+                item:
+                    'MinimapBtn',
+
+                found:
+                    result.paths
+                        .minimap
+                        .found,
+
+                active:
+                    result.paths
+                        .minimap
+                        .active,
+
+                path:
+                    result.paths
+                        .minimap
+                        .actual
+            },
+
+            {
+                item:
+                    'NWorldMinimap3D',
+
+                found:
+                    result.paths
+                        .minimapRoot
+                        .found,
+
+                active:
+                    result.paths
+                        .minimapRoot
+                        .active,
+
+                path:
+                    result.paths
+                        .minimapRoot
+                        .actual
+            },
+
+            {
+                item:
+                    'worldmapBtn',
+
+                found:
+                    result.paths
+                        .worldmap
+                        .found,
+
+                active:
+                    result.paths
+                        .worldmap
+                        .active,
+
+                path:
+                    result.paths
+                        .worldmap
+                        .actual
+            },
+
+            {
+                item:
+                    'WorldServerListPanel',
+
+                found:
+                    result.paths
+                        .serverPanel
+                        .found,
+
+                active:
+                    result.paths
+                        .serverPanel
+                        .active,
+
+                path:
+                    result.paths
+                        .serverPanel
+                        .actual
+            }
+
+        ]);
+
+
+        return result;
+    }
+
+
+    /* ============================================================
+     * CSS
+     * ============================================================ */
+
+    const style =
+        document.createElement(
+            'style'
+        );
+
+
+    installation.style = style;
+
+    style.id =
+        STYLE_ID;
+
+
+    style.textContent = `
+
+        #${UI_ID} {
+
+            position:fixed;
+
+            top:80px;
+            right:20px;
+
+            width:310px;
+
+            z-index:2147483647;
+
+            background:
+                rgba(20,20,24,.96);
+
+            color:#eee;
+
+            border:
+                1px solid #555;
+
+            border-radius:10px;
+
+            font-family:
+                Arial,sans-serif;
+
+            box-shadow:
+                0 8px 30px
+                rgba(0,0,0,.5);
+
+            overflow:hidden;
+
+            user-select:none;
+        }
+
+
+        #${UI_ID} .header {
+
+            height:38px;
+
+            display:flex;
+
+            align-items:center;
+
+            justify-content:
+                space-between;
+
+            padding:0 10px;
+
+            background:#29292f;
+
+            border-bottom:
+                1px solid #444;
+
+            cursor:move;
+        }
+
+
+        #${UI_ID} .title {
+
+            font-size:13px;
+
+            font-weight:bold;
+        }
+
+
+        #${UI_ID} .version {
+
+            font-size:9px;
+
+            color:#888;
+        }
+
+
+        #${UI_ID} .body {
+
+            padding:10px;
+        }
+
+
+        #${UI_ID} .state-box {
+
+            display:flex;
+
+            align-items:center;
+
+            justify-content:
+                space-between;
+
+            padding:10px;
+
+            margin-bottom:9px;
+
+            background:#151519;
+
+            border:
+                1px solid #3a3a40;
+
+            border-radius:7px;
+        }
+
+
+        #${UI_ID} .small {
+
+            font-size:10px;
+
+            color:#888;
+        }
+
+
+        #${UI_ID} .state {
+
+            margin-top:2px;
+
+            font-size:16px;
+
+            font-weight:bold;
+        }
+
+
+        #${UI_ID} .reason {
+
+            margin-top:3px;
+
+            max-width:240px;
+
+            font-size:9px;
+
+            color:#777;
+
+            word-break:
+                break-all;
+        }
+
+
+        #${UI_ID} .dot {
+
+            width:15px;
+            height:15px;
+
+            border-radius:50%;
+
+            background:#777;
+        }
+
+
+        #${UI_ID} .buttons {
+
+            display:grid;
+
+            grid-template-columns:
+                1fr 1fr 1fr;
+
+            gap:6px;
+        }
+
+
+        #${UI_ID} button {
+
+            cursor:pointer;
+        }
+
+
+        #${UI_ID} .move {
+
+            height:40px;
+
+            background:#333;
+
+            color:#eee;
+
+            border:
+                1px solid #555;
+
+            border-radius:6px;
+
+            font-size:11px;
+        }
+
+
+        #${UI_ID} .move.current {
+
+            background:#234623;
+
+            color:#9cff9c;
+
+            border-color:#6cc96c;
+        }
+
+
+        #${UI_ID} .move:disabled {
+
+            opacity:.4;
+        }
+
+
+        #${UI_ID} .tools {
+
+            display:grid;
+
+            grid-template-columns:
+                1fr 1fr;
+
+            gap:6px;
+
+            margin-top:7px;
+        }
+
+
+        #${UI_ID} .tool {
+
+            height:28px;
+
+            background:#28282e;
+
+            color:#aaa;
+
+            border:
+                1px solid #444;
+
+            border-radius:5px;
+
+            font-size:10px;
+        }
+
+
+        #${UI_ID} .log {
+
+            height:115px;
+
+            overflow:auto;
+
+            margin-top:8px;
+
+            padding:6px;
+
+            background:#101012;
+
+            border:
+                1px solid #333;
+
+            border-radius:5px;
+
+            font-family:
+                Consolas,monospace;
+
+            font-size:9px;
+
+            line-height:1.45;
+
+            color:#aaa;
+
+            white-space:
+                pre-wrap;
+        }
+
+
+        #${UI_ID} .collapse {
+
+            width:25px;
+            height:25px;
+
+            border:0;
+
+            border-radius:4px;
+
+            background:#444;
+
+            color:#ddd;
+        }
+
+
+        #${UI_ID}.collapsed .body {
+
+            display:none;
+        }
+
+    `;
+
+
+    (document.head || document.documentElement).appendChild(
+        style
+    );
+
+
+    /* ============================================================
+     * UI
+     * ============================================================ */
+
+    const root =
+        document.createElement(
+            'div'
+        );
+
+
+    installation.root = root;
+
+    root.id =
+        UI_ID;
+
+
+    root.innerHTML = `
+
+        <div class="header">
+
+            <div>
+
+                <span class="title">
+                    TopWar Navigator
+                </span>
+
+                <span class="version">
+                    v${VERSION}
+                </span>
+
+            </div>
+
+
+            <button
+                class="collapse"
+            >
+                −
+            </button>
+
+        </div>
+
+
+        <div class="body">
+
+            <div class="state-box">
+
+                <div>
+
+                    <div class="small">
+                        현재 위치
+                    </div>
+
+                    <div class="state">
+                        -
+                    </div>
+
+                    <div class="reason">
+                        -
+                    </div>
+
+                </div>
+
+
+                <div class="dot">
+                </div>
+
+            </div>
+
+
+            <div class="buttons">
+
+                <button
+                    class="move"
+                    data-target="BASE"
+                >
+                    기지
+                </button>
+
+                <button
+                    class="move"
+                    data-target="WORLD"
+                >
+                    월드
+                </button>
+
+                <button
+                    class="move"
+                    data-target="WORLD_MAP"
+                >
+                    월드맵
+                </button>
+
+            </div>
+
+
+            <div class="tools">
+
+                <button
+                    class="tool diagnose"
+                >
+                    진단
+                </button>
+
+                <button
+                    class="tool signal"
+                >
+                    신호
+                </button>
+
+            </div>
+
+
+            <div class="log">
+            </div>
+
+        </div>
+    `;
+
+
+    (document.body || document.documentElement).appendChild(
+        root
+    );
+
+
+    const stateElement =
+        root.querySelector(
+            '.state'
+        );
+
+
+    const reasonElement =
+        root.querySelector(
+            '.reason'
+        );
+
+
+    const dotElement =
+        root.querySelector(
+            '.dot'
+        );
+
+
+    const logElement =
+        root.querySelector(
+            '.log'
+        );
+
+
+    const moveButtons =
+        [
+            ...root.querySelectorAll(
+                '.move'
+            )
+        ];
+
+
+    /* ============================================================
+     * UI helper
+     * ============================================================ */
+
+    function stateColor(state) {
+
+        switch (state) {
+
+            case STATE.BASE:
+
+                return '#42a5f5';
+
+
+            case STATE.WORLD:
+
+                return '#66bb6a';
+
+
+            case STATE.WORLD_MINIMAP:
+
+                return '#ab47bc';
+
+
+            case STATE.WORLD_MAP:
+
+                return '#ffa726';
+
+
+            default:
+
+                return '#888';
+        }
+    }
+
+
+    function log(
+        message,
+        object
+    ) {
+
+        const time =
+            new Date()
+                .toLocaleTimeString();
+
+
+        let text =
+            `[${time}] ${message}`;
+
+
+        if (
+            object !==
+            undefined
+        ) {
+
+            try {
+
+                text +=
+                    '\n' +
+                    JSON.stringify(
+                        object,
+                        null,
+                        2
+                    );
+
+            } catch {}
+        }
+
+
+        logElement.textContent =
+
+            text +
+
+            '\n\n' +
+
+            logElement.textContent;
+
+
+        console.log(
+            '[TOPWAR_NAV]',
+            message,
+            object ?? ''
+        );
+    }
+
+
+    function refreshUnsafe() {
+
+        const current =
+            detect();
+
+
+        stateElement.textContent =
+
+            moving
+
+                ? `${current.state} · 이동중`
+
+                : current.state;
+
+
+        reasonElement.textContent =
+            current.reason;
+
+
+        dotElement.style.background =
+            stateColor(
+                current.state
+            );
+
+
+        /*
+         * WORLD_MINIMAP은
+         * 월드 버튼을 현재상태 처리하지 않음.
+         */
+
+        for (
+            const button
+            of moveButtons
+        ) {
+
+            button.classList.toggle(
+
+                'current',
+
+                button.dataset.target ===
+                current.state
+            );
+        }
+
+
+        return current;
+    }
+
+    function recordError(stage, error) {
+        const entry = { stage, message: error?.message || String(error), stack: error?.stack };
+        runtimeErrors.push(entry);
+        if (runtimeErrors.length > 30) runtimeErrors.shift();
+        console.error('[TOPWAR_NAV] ' + stage, error);
+        log(stage + ': ' + entry.message);
+        return { ok: false, reason: entry.message, stage };
+    }
+
+    function refresh() {
+        try { return refreshUnsafe(); }
+        catch (error) {
+            if (runtimeErrors.at(-1)?.message !== error.message) recordError('화면 감지', error);
+            stateElement.textContent = 'ERROR';
+            reasonElement.textContent = error.message;
+            return { state: STATE.UNKNOWN, reason: error.message };
+        }
+    }
+
+
+
+    /* ============================================================
+     * 실시간 watcher
+     * ============================================================ */
+
+    function startWatcher() {
+
+        if (watcher) {
+
+            clearInterval(
+                watcher
+            );
+        }
+
+
+        lastState =
+            refresh().state;
+
+
+        watcher =
+            setInterval(
+                () => {
+
+                    if (disposed) return;
+                    if (!root.isConnected) (document.body || document.documentElement).appendChild(root);
+                    if (!style.isConnected) (document.head || document.documentElement).appendChild(style);
+
+                    const current =
+                        refresh();
+
+
+                    if (
+                        current.state !==
+                        lastState
+                    ) {
+
+                        const previous =
+                            lastState;
+
+
+                        lastState =
+                            current.state;
+
+
+                        log(
+                            `${previous} → ${current.state}`
+                        );
+
+
+                        window.dispatchEvent(
+
+                            new CustomEvent(
+                                'topwar:navigation-state-change',
+                                {
+
+                                    detail: {
+
+                                        previous,
+
+                                        current:
+                                            current.state,
+
+                                        detected:
+                                            current,
+
+                                        time:
+                                            Date.now()
+                                    }
+                                }
+                            )
+                        );
+                    }
+
+                },
+
+                WATCH_INTERVAL
+            );
+    }
+
+
+    /* ============================================================
+     * UI 이동
+     * ============================================================ */
+
+    async function move(target) {
+
+        if (moving)
+            return;
+
+
+        moving =
+            true;
+
+
+        for (
+            const button
+            of moveButtons
+        ) {
+
+            button.disabled =
+                true;
+        }
+
+
+        try {
+
+            const before =
+                detect();
+
+
+            log(
+                `${before.state} → ${target}`
+            );
+
+
+            const result =
+                await goto(
+                    target
+                );
+
+
+            log(
+
+                result.ok
+                    ? `${target} 이동 성공`
+                    : `${target} 이동 실패`,
+
+                result
+            );
+
+
+            return result;
+
+        } catch (
+            error
+        ) {
+
+            const result = {
+
+                ok:
+                    false,
+
+                error:
+                    error?.message ||
+                    String(error)
+            };
+
+
+            log(
+                '이동 오류',
+                result
+            );
+
+
+            return result;
+
+        } finally {
+
+            moving =
+                false;
+
+
+            for (
+                const button
+                of moveButtons
+            ) {
+
+                button.disabled =
+                    false;
+            }
+
+
+            refresh();
+        }
+    }
+
+
+    /* ============================================================
+     * UI Event
+     * ============================================================ */
+
+    for (
+        const button
+        of moveButtons
+    ) {
+
+        button.addEventListener(
+
+            'click',
+
+            () =>
+
+                move(
+                    button.dataset.target
+                )
+        );
+    }
+
+
+    root
+        .querySelector(
+            '.diagnose'
+        )
+        .addEventListener(
+            'click',
+            () => {
+
+                const result =
+                    diagnose();
+
+
+                log(
+                    '진단',
+                    result
+                );
+            }
+        );
+
+
+    root
+        .querySelector(
+            '.signal'
+        )
+        .addEventListener(
+            'click',
+            () => {
+
+                const result =
+                    getSignals();
+
+
+                console.log(
+                    '[TOPWAR_NAV signals]',
+                    result
+                );
+
+
+                console.table([
+
+                    {
+                        signal:
+                            'MinimapBtn',
+
+                        active:
+                            result.minimapButton
+                    },
+
+                    {
+                        signal:
+                            'NWorldMinimap3D',
+
+                        active:
+                            result.minimapRoot
+                    },
+
+                    {
+                        signal:
+                            'worldmapBtn',
+
+                        active:
+                            result.worldmapButton
+                    },
+
+                    {
+                        signal:
+                            'WorldServerListPanel',
+
+                        active:
+                            result.serverPanel
+                    },
+
+                    {
+                        signal:
+                            'NWorldMap',
+
+                        active:
+                            result.nWorldMap
+                    }
+
+                ]);
+
+
+                log(
+                    '신호 확인',
+                    simplifySignals(
+                        result
+                    )
+                );
+            }
+        );
+
+
+    root
+        .querySelector(
+            '.collapse'
+        )
+        .addEventListener(
+            'click',
+            event => {
+
+                root.classList.toggle(
+                    'collapsed'
+                );
+
+
+                event.target.textContent =
+
+                    root.classList.contains(
+                        'collapsed'
+                    )
+
+                        ? '+'
+
+                        : '−';
+            }
+        );
+
+
+    /* ============================================================
+     * Drag
+     * ============================================================ */
+
+    const header =
+        root.querySelector(
+            '.header'
+        );
+
+
+    let dragging =
+        false;
+
+
+    let offsetX =
+        0;
+
+
+    let offsetY =
+        0;
+
+
+    header.addEventListener(
+        'mousedown',
+        event => {
+
+            if (
+                event.target.closest(
+                    'button'
+                )
+            )
+                return;
+
+
+            dragging =
+                true;
+
+
+            const rect =
+                root
+                    .getBoundingClientRect();
+
+
+            offsetX =
+                event.clientX -
+                rect.left;
+
+
+            offsetY =
+                event.clientY -
+                rect.top;
+        }
+    );
+
+
+    document.addEventListener(
+        'mousemove',
+        event => {
+
+            if (
+                !dragging
+            )
+                return;
+
+
+            root.style.left =
+                `${event.clientX - offsetX}px`;
+
+
+            root.style.top =
+                `${event.clientY - offsetY}px`;
+
+
+            root.style.right =
+                'auto';
+        },
+        { signal: uiEvents.signal }
+    );
+
+
+    document.addEventListener(
+        'mouseup',
+        () => {
+
+            dragging =
+                false;
+        },
+        { signal: uiEvents.signal }
+    );
+
+
+    /* ============================================================
+     * Destroy
+     * ============================================================ */
+
+    function destroy() {
+        disposed = true;
+        try { stopGameMacro(); } catch {}
+        uiEvents.abort();
+
+        if (watcher) {
+
+            clearInterval(
+                watcher
+            );
+
+
+            watcher =
+                null;
+        }
+
+
+        root.remove();
+
+
+        style.remove();
+
+
+        if (
+            window.TOPWAR_NAV ===
+            api
+        ) {
+
+            delete window.TOPWAR_NAV;
+        }
+    }
+
+
+    /* ============================================================
+     * Public API
+     * ============================================================ */
+
+
+    // Profile integration; the navigation functions above are unchanged from the supplied v0.4.0.
+    const profileModule = (() => {
+
+    /* ============================================================
+     * TOPWAR_PROFILE
+     *
+     * TOPWAR_NAV 위에 억지로 함수를 추가하지 않고
+     * 별도 모듈로 사용한다.
+     *
+     * 실행:
+     *
+     *   const data = await TOPWAR_PROFILE.collectAll();
+     *
+     * 결과:
+     *
+     *   window.TOPWAR_PROFILE_DATA
+     *
+     * ============================================================ */
+
+
+    const VERSION = '0.1.0';
+
+
+    const TAB_ORDER = [
+        'toggle1',   // 기지 외관
+        'toggle3',   // 대열 외관
+        'toggle4',   // 기지 효과
+        'toggle5',   // 이동 효과
+        'toggle6',   // 행군 참여
+        'toggle7',   // 수호 효과
+        'toggle8',   // 영광의 장식
+        'toggle10'   // 기지 오라
+    ];
+
+
+    const TAB_ORDER_MAP =
+        new Map(
+            TAB_ORDER.map(
+                (name, index) => [
+                    name,
+                    index
+                ]
+            )
+        );
+
+
+    /* ============================================================
+     * BASIC
+     * ============================================================ */
+
+
+    function sleep(ms) {
+
+        return new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    ms
+                )
+        );
+    }
+
+
+    function isActive(node) {
+
+        return !!node &&
+            node.active !== false &&
+            node.activeInHierarchy !== false;
+    }
+
+
+    function nodePath(node) {
+
+        const arr = [];
+
+        let cur =
+            node;
+
+
+        while (cur) {
+
+            arr.unshift(
+                cur.name || '?'
+            );
+
+            cur =
+                cur.parent;
+        }
+
+
+        return arr.join('/');
+    }
+
+
+    function walk(
+        root,
+        callback,
+        options = {}
+    ) {
+
+        if (!root)
+            return;
+
+
+        const includeInactive =
+            !!options.includeInactive;
+
+
+        const stack =
+            [root];
+
+
+        while (stack.length) {
+
+            const node =
+                stack.pop();
+
+
+            if (!node)
+                continue;
+
+
+            if (
+                !includeInactive &&
+                !isActive(node)
+            ) {
+                continue;
+            }
+
+
+            callback(node);
+
+
+            const children =
+                node.children || [];
+
+
+            for (
+                let i =
+                    children.length - 1;
+
+                i >= 0;
+
+                i--
+            ) {
+
+                stack.push(
+                    children[i]
+                );
+            }
+        }
+    }
+
+
+    function findChildPath(
+        root,
+        path
+    ) {
+
+        const parts =
+            String(path)
+                .split('/')
+                .filter(Boolean);
+
+
+        let cur =
+            root;
+
+
+        for (
+            const part
+            of parts
+        ) {
+
+            if (!cur)
+                return null;
+
+
+            cur =
+                cur.getChildByName?.(
+                    part
+                ) ||
+                (cur.children || [])
+                    .find(
+                        child =>
+                            child.name ===
+                            part
+                    ) ||
+                null;
+        }
+
+
+        return cur;
+    }
+
+
+    /* ============================================================
+     * TEXT
+     * ============================================================ */
+
+
+    function collectTexts(node) {
+
+        const values =
+            [];
+
+
+        walk(
+            node,
+            cur => {
+
+                try {
+
+                    const label =
+                        cur.getComponent?.(
+                            cc.Label
+                        );
+
+
+                    const text =
+                        String(
+                            label?.string ??
+                            ''
+                        ).trim();
+
+
+                    if (text) {
+
+                        values.push(
+                            text
+                        );
+                    }
+
+                } catch {}
+
+
+                try {
+
+                    const rich =
+                        cur.getComponent?.(
+                            cc.RichText
+                        );
+
+
+                    const text =
+                        String(
+                            rich?.string ??
+                            ''
+                        ).trim();
+
+
+                    if (text) {
+
+                        values.push(
+                            text
+                        );
+                    }
+
+                } catch {}
+
+            },
+            {
+                includeInactive:
+                    true
+            }
+        );
+
+
+        return [
+            ...new Set(values)
+        ];
+    }
+
+
+    function getText(node) {
+
+        return collectTexts(node)
+            .join(' / ');
+    }
+
+
+    /* ============================================================
+     * SPRITES
+     * ============================================================ */
+
+
+    
+
+
+    /* ============================================================
+     * BUTTON HANDLERS
+     * ============================================================ */
+
+
+    function getButtonHandlers(node) {
+
+        let button =
+            null;
+
+
+        try {
+
+            button =
+                node.getComponent?.(
+                    cc.Button
+                );
+
+        } catch {}
+
+
+        if (!button) {
+
+            return [];
+        }
+
+
+        return (
+            button.clickEvents || []
+        ).map(
+            event => ({
+
+                component:
+                    String(
+                        event?.component ||
+                        event?._componentName ||
+                        ''
+                    ),
+
+                handler:
+                    String(
+                        event?.handler ||
+                        event?._handler ||
+                        ''
+                    ),
+
+                customEventData:
+                    event?.customEventData ??
+                    event?._customEventData ??
+                    ''
+            })
+        );
+    }
+
+
+    function isSkinItemNode(node) {
+        const selected = collectToggles().find(tab => tab.toggle.isChecked)?.name;
+        const events = {
+            toggle1: ['towerDetailNode', 'itemClickCallBack'],
+            toggle3: ['armyLineSkinNode', 'itemClickCallBack'],
+            toggle4: ['CityEffectCellNode', 'onSelectClick'],
+            toggle5: ['TransportEffectNode', 'onItemClick'],
+            toggle6: ['SkinBaseItem', 'onItemClick'],
+            toggle7: ['SkinBaseItem', 'onItemClick'],
+            toggle8: ['ZSWEnigmaNode', 'onItemClick'],
+            toggle10: ['CastleHaloItem', 'itemClick']
+        };
+        const expected = events[selected];
+        return !!expected && getButtonHandlers(node).some(event => event.component === expected[0] && event.handler === expected[1]);
+    }
+
+
+    /* ============================================================
+     * COMPONENT STATE INSPECTION
+     *
+     * 보유 상태와 관련된 실제 필드가 존재하면 읽는다.
+     * ============================================================ */
+
+
+    function detectOwnership(itemNode) {
+        const evidence = [];
+        walk(itemNode, node => {
+            if (node.name === 'notHaveNode') evidence.push({ name: node.name, path: nodePath(node), active: node.active });
+        }, { includeInactive: true });
+        const allTrue = evidence.length && evidence.every(row => row.active === true);
+        const allFalse = evidence.length && evidence.every(row => row.active === false);
+        return { owned: allTrue ? false : allFalse ? true : null,
+            confidence: allTrue || allFalse ? 'HIGH' : 'UNKNOWN',
+            reason: allTrue ? 'notHaveNode 활성' : allFalse ? 'notHaveNode 비활성' : '확정 근거 없음 또는 충돌', evidence };
+    }
+
+
+    /* ============================================================
+     * PROFILE
+     * ============================================================ */
+
+
+    function findProfileRoot() {
+        // Use the proven NAV traversal. The profile walker prunes inactive ancestors
+        // and can miss a live panel below a scene/container traversal boundary.
+        return findNodeByName('UserInfoMainPanel', true);
+    }
+
+
+    /* ============================================================
+     * TOGGLES
+     * ============================================================ */
+
+
+    function collectToggles() {
+
+        const root =
+            findProfileRoot();
+
+
+        if (!root) {
+
+            return [];
+        }
+
+
+        const result =
+            [];
+
+
+        walk(
+            root,
+            node => {
+
+                let toggle =
+                    null;
+
+
+                try {
+
+                    toggle =
+                        node.getComponent?.(
+                            cc.Toggle
+                        );
+
+                } catch {}
+
+
+                if (!toggle)
+                    return;
+
+
+                /*
+                 * 현재 우리가 확인한
+                 * towerNode ToggleContainer만
+                 */
+                const path =
+                    nodePath(node);
+
+
+                if (
+                    !path.includes(
+                        '/towerNode/toggleNode/'
+                    )
+                ) {
+                    return;
+                }
+
+
+                result.push({
+
+                    node,
+
+                    toggle,
+
+                    name:
+                        node.name,
+
+                    text:
+                        getText(node) || {"toggle1":"기지 외관","toggle3":"대열 외관","toggle4":"기지 효과","toggle5":"이동 효과","toggle6":"행군 참여","toggle7":"수호 효과","toggle8":"영광의 장식","toggle10":"기지 오라"}[node.name],
+
+                    active:
+                        isActive(node),
+
+                    checked:
+                        !!toggle.isChecked,
+
+                    path
+                });
+
+            },
+            {
+                includeInactive:
+                    true
+            }
+        );
+
+
+        return result
+            .filter(
+                row =>
+                    row.active
+                    &&
+                    row.text
+                    &&
+                    TAB_ORDER_MAP.has(
+                        row.name
+                    )
+            )
+            .sort(
+                (a, b) =>
+                    TAB_ORDER_MAP.get(
+                        a.name
+                    )
+                    -
+                    TAB_ORDER_MAP.get(
+                        b.name
+                    )
+            );
+    }
+
+
+    /* ============================================================
+     * CONTENT
+     * ============================================================ */
+
+
+    function findTowerNode() {
+
+        const root =
+            findProfileRoot();
+
+
+        if (!root)
+            return null;
+
+
+        return findChildPath(
+            root,
+            'contentNode/towerNode'
+        );
+    }
+
+
+    function findContentRoot() {
+    const tower = findTowerNode();
+    if (!tower) return null;
+    const selected = collectToggles().filter(tab => tab.toggle.isChecked);
+    if (selected.length !== 1) return null;
+    // Confirmed by the user's 2026-09-14 runtime diagnostics, not guessed names.
+    const paths = {
+        toggle1: 'skinNode',
+        toggle3: 'armyparentNode/armyLineSkinNode',
+        toggle4: 'headFrameNode/CityEffectNode',
+        toggle5: 'transportParentNode/TransportEffectNode',
+        toggle6: 'marchEnigmaParent/MarchEnigmaNode',
+        toggle7: 'castleEnigmaParent/CastleEnigmaNode',
+        toggle8: 'zswEnigmaParent/ZSWEnigmaNode',
+        toggle10: 'castleHaloParent/CastleHaloNode'
+    };
+    const prefix = paths[selected[0].name];
+    const content = prefix && findChildPath(tower, prefix + '/allTowerNode/view/content');
+    return content && isActive(content) ? content : null;
+}
+
+
+    /* ============================================================
+     * DATA STABILITY
+     * ============================================================ */
+
+
+    function contentSignature() {
+        const content = findContentRoot();
+        if (!content) return '';
+        const items = collectCurrentItems();
+        // Animated labels and sprite frames do not determine list readiness.
+        // Item identity and explicit ownership markers must settle instead.
+        return items.length ? JSON.stringify(items.map(item => ({
+            id: item.id, key: item.key, path: item.path, owned: item.owned
+        })).sort((a, b) => a.key.localeCompare(b.key))) : '';
+    }
+
+
+    async function waitForContentStable(options = {}) {
+    const timeout = Number(options.timeout ?? 20000);
+    const interval = Number(options.interval ?? 150);
+    const settle = Number(options.settleMs ?? 1000);
+    if (![timeout, interval, settle].every(Number.isFinite) || timeout <= 0 || interval <= 0 || settle < 0) {
+        throw new Error('timeout/interval은 양수, settleMs는 0 이상의 유한한 숫자여야 합니다');
+    }
+    const panel = findProfileRoot();
+    const tab = collectToggles().find(row => row.toggle.isChecked)?.name;
+    const started = Date.now();
+    let previous = '', lastChange = started, changes = 0, lastCount = 0;
+    while (Date.now() - started < timeout) {
+        if (disposed || findProfileRoot() !== panel || collectToggles().find(row => row.toggle.isChecked)?.name !== tab) {
+            throw new Error('수집 중 프로필 또는 선택 탭 변경');
+        }
+        const signature = contentSignature();
+        if (signature !== previous) { previous = signature; lastChange = Date.now(); changes++; }
+        if (signature) {
+            lastCount = JSON.parse(signature).length;
+            if (Date.now() - lastChange >= settle) return {
+                ok: true, signature, elapsedMs: Date.now() - started, changes, itemCount: lastCount
+            };
+        }
+        await sleep(interval);
+    }
+    return { ok: false, signature: previous, elapsedMs: Date.now() - started, changes,
+        itemCount: lastCount, reason: previous ? '제한 시간 내 목록 안정화 미완료' : '선택 탭의 아이템 미확인' };
+}
+
+
+    /* ============================================================
+     * ITEM COLLECTION
+     * ============================================================ */
+
+
+    function itemKey(node) {
+        const parts = [];
+        for (let current = node; current; current = current.parent) {
+            parts.unshift(current.name + '[' + (current.parent?.children || []).indexOf(current) + ']');
+        }
+        return parts.join('/');
+    }
+
+    function collectCurrentItems() {
+
+        const content =
+            findContentRoot();
+
+
+        const tower =
+            findTowerNode();
+
+
+        if (!tower) {
+
+            return [];
+        }
+
+
+        const nodes =
+            [];
+
+
+        /*
+         * 가장 정확한 방법:
+         * allTowerNode/view/content의 직계 아이템
+         */
+        if (content) {
+
+            for (
+                const child
+                of content.children || []
+            ) {
+
+                if (
+                    !isActive(child)
+                ) {
+                    continue;
+                }
+
+
+                if (
+                    isSkinItemNode(
+                        child
+                    )
+                ) {
+
+                    nodes.push(
+                        child
+                    );
+                }
+            }
+        }
+
+
+        /*
+         * fallback:
+         * towerNode 전체에서 itemClickCallBack 탐색
+         */
+        if (
+            !nodes.length
+        ) {
+
+            walk(
+                content,
+                node => {
+
+                    if (
+                        isSkinItemNode(
+                            node
+                        )
+                    ) {
+
+                        nodes.push(
+                            node
+                        );
+                    }
+                }
+            );
+        }
+
+
+        const seen =
+            new Set();
+
+
+        return nodes
+            .filter(
+                node => {
+
+                    if (
+                        seen.has(node)
+                    ) {
+                        return false;
+                    }
+
+
+                    seen.add(node);
+
+                    return true;
+                }
+            )
+            .map(
+                node => {
+
+                    const ownership =
+                        detectOwnership(
+                            node
+                        );
+
+
+                    const texts =
+                        collectTexts(
+                            node
+                        );
+
+
+                    return {
+
+                        id:
+                            String(
+                                node.name ||
+                                ''
+                            ),
+
+                        name:
+                            texts[0] ||
+                            null,
+
+                        texts,
+
+                        owned:
+                            ownership.owned,
+
+                        ownership: {
+
+                            confidence:
+                                ownership
+                                    .confidence,
+
+                            reason:
+                                ownership
+                                    .reason,
+
+                            evidence:
+                                ownership
+                                    .evidence
+                        },
+
+                        path:
+                            nodePath(node),
+                        key: itemKey(node)
+                    };
+                }
+            );
+    }
+
+
+    /* ============================================================
+     * TAB LOAD
+     * ============================================================ */
+
+
+    async function loadTab(tab, options = {}) {
+        if (disposed) throw new Error('Navigator 종료됨');
+        const panel = findProfileRoot();
+        const beforeContent = findContentRoot();
+        const beforeSignature = contentSignature();
+        const wasChecked = !!tab.toggle.isChecked;
+        if (typeof tab.toggle.check !== 'function') throw new Error(tab.name + ': toggle.check 없음');
+        tab.toggle.check();
+        await sleep(Number(options.delay ?? 700));
+        if (disposed || findProfileRoot() !== panel || !tab.toggle.isChecked) throw new Error('프로필 또는 선택 탭 변경됨');
+        const stable = await waitForContentStable(options);
+        const afterSignature = contentSignature();
+        const changed = wasChecked || beforeContent !== findContentRoot() || beforeSignature !== afterSignature;
+        return { ok: stable.ok && changed && !disposed && findProfileRoot() === panel && tab.toggle.isChecked,
+            tab: tab.text, toggle: tab.name, beforeSignature, afterSignature, stable };
+    }
+
+
+    /* ============================================================
+     * SINGLE TAB
+     * ============================================================ */
+
+
+function inspectCurrentProfileItems() {
+    const panel = findProfileRoot();
+    const tower = findTowerNode();
+    const content = findContentRoot();
+    const describe = node => node ? {
+        name: node.name, path: nodePath(node), active: node.active,
+        activeInHierarchy: node.activeInHierarchy, children: node.children?.length || 0
+    } : null;
+    const candidates = [];
+    const itemButtons = [];
+    walk(panel, node => {
+        if (node.name === 'content' && /\/allTowerNode\/view\/content$/.test(nodePath(node))) candidates.push(describe(node));
+    }, { includeInactive: true });
+    walk(content, node => {
+        const handlers = getButtonHandlers(node);
+        if (handlers.length && itemButtons.length < 20) itemButtons.push({
+            ...describe(node), matches: isSkinItemNode(node), handlers
+        });
+    }, { includeInactive: true });
+    return {
+        panel: describe(panel), tower: describe(tower), content: describe(content),
+        selectedTabs: collectToggles().filter(tab => tab.toggle.isChecked).map(tab => tab.name),
+        contentCandidates: candidates, itemButtons,
+        matchedItems: collectCurrentItems().length
+    };
+}
+
+
+    async function collectTab(
+        tab,
+        options = {}
+    ) {
+
+        const load =
+            await loadTab(
+                tab,
+                options
+            );
+
+
+        const observedItems = collectCurrentItems();
+        const items = load.ok ? observedItems : [];
+        if (!load.ok) {
+            return { toggle: tab.name, name: tab.text, loaded: false, stable: !!load.stable?.ok,
+                count: null, ownedCount: null, unownedCount: null, unknownCount: null,
+                items: [], observedItems, observedCount: observedItems.length,
+                error: !load.stable?.ok ? '아이템 로딩 확인 실패' : '탭 전환 전후 데이터 변화 미확인',
+                diagnostics: inspectCurrentProfileItems(), load };
+        }
+
+
+        const owned =
+            items.filter(
+                item =>
+                    item.owned === true
+            );
+
+
+        const unowned =
+            items.filter(
+                item =>
+                    item.owned === false
+            );
+
+
+        const unknown =
+            items.filter(
+                item =>
+                    item.owned === null
+            );
+
+
+        const result = {
+
+            toggle:
+                tab.name,
+
+            name:
+                tab.text,
+
+            loaded:
+                load.ok,
+
+            stable:
+                load.stable?.ok ??
+                false,
+
+            count:
+                items.length,
+
+            ownedCount:
+                owned.length,
+
+            unownedCount:
+                unowned.length,
+
+            unknownCount:
+                unknown.length,
+
+            items
+        };
+
+
+        console.log(
+            `[PROFILE] ${tab.text}`,
+            {
+                total:
+                    result.count,
+
+                owned:
+                    result.ownedCount,
+
+                unowned:
+                    result.unownedCount,
+
+                unknown:
+                    result.unknownCount
+            }
+        );
+
+
+        return result;
+    }
+
+
+    /* ============================================================
+     * ALL
+     * ============================================================ */
+
+
+    async function collectAll(
+        options = {}
+    ) {
+
+        /*
+         * WORLD_MAP / WORLD_MINIMAP이면
+         * 기존 NAV가 막아줌.
+         */
+        if (![STATE.BASE, STATE.WORLD].includes(detect().state)) return { ok: false, reason: '현재 화면에서는 프로필 수집 불가' };
+        let profile = findProfileRoot();
+
+
+        if (!profile) {
+
+            if (
+                typeof openOwnProfile !==
+                'function'
+            ) {
+
+                return {
+
+                    ok: false,
+
+                    reason:
+                        'TOPWAR_NAV.openOwnProfile 없음'
+                };
+            }
+
+
+            const opened =
+                await openOwnProfile({
+                        timeout:
+                            options
+                                .profileTimeout ??
+                            3000
+                    });
+
+
+            if (!opened.ok) {
+
+                return {
+
+                    ok: false,
+
+                    stage:
+                        'OPEN_PROFILE',
+
+                    detail:
+                        opened
+                };
+            }
+
+
+            await sleep(
+                Number(
+                    options
+                        .profileDelay ??
+                    400
+                )
+            );
+
+
+            profile =
+                findProfileRoot();
+        }
+
+
+        if (!profile) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    'UserInfoMainPanel 확인 실패'
+            };
+        }
+
+
+        const tabs =
+            collectToggles();
+
+
+        if (!tabs.length) {
+
+            return {
+
+                ok: false,
+
+                reason:
+                    '프로필 탭 없음'
+            };
+        }
+
+
+        const result = {
+
+            ok: true,
+
+            version:
+                VERSION,
+
+            collectedAt:
+                new Date()
+                    .toISOString(),
+
+            tabCount:
+                tabs.length,
+
+            totalItems:
+                0,
+
+            ownedCount:
+                0,
+
+            unownedCount:
+                0,
+
+            unknownCount:
+                0,
+
+            tabs: {},
+
+            flat: []
+        };
+
+
+        for (
+            let index = 0;
+            index < tabs.length;
+            index++
+        ) {
+
+            const tab =
+                tabs[index];
+
+
+            console.log(
+                `[PROFILE ${index + 1}/${tabs.length}] ${tab.text}`
+            );
+
+
+            if (disposed || findProfileRoot() !== profile) { result.ok = false; break; }
+            let data;
+            try { data = await collectTab(tab, options); }
+            catch (error) {
+                recordError('프로필 탭 ' + tab.name, error);
+                data = { name: tab.text, toggle: tab.name, loaded: false, stable: false, count: null,
+                    ownedCount: null, unownedCount: null, unknownCount: null, items: [], error: error.message };
+            }
+            if (!data.loaded || !data.stable) result.ok = false;
+
+
+            result.tabs[
+                tab.text
+            ] =
+                data;
+
+
+            for (
+                const item
+                of data.items
+            ) {
+
+                result.flat.push({
+
+                    tab:
+                        tab.text,
+
+                    toggle:
+                        tab.name,
+
+                    ...item
+                });
+            }
+
+
+            result.totalItems +=
+                data.count;
+
+            result.ownedCount +=
+                data.ownedCount;
+
+            result.unownedCount +=
+                data.unownedCount;
+
+            result.unknownCount +=
+                data.unknownCount;
+        }
+
+
+        result.ok = result.ok && tabs.length === TAB_ORDER.length && Object.keys(result.tabs).length === TAB_ORDER.length;
+        if (!result.ok) {
+            result.confirmedItemCount = result.totalItems;
+            result.totalItems = result.ownedCount = result.unownedCount = result.unknownCount = null;
+        }
+        window.TOPWAR_PROFILE_DATA = result;
+
+
+        console.log(
+            '=============================='
+        );
+
+        console.log(
+            '[TOPWAR_PROFILE] 수집 완료'
+        );
+
+        console.table(
+            Object.values(
+                result.tabs
+            ).map(
+                tab => ({
+
+                    tab:
+                        tab.name,
+
+                    total:
+                        tab.count,
+
+                    owned:
+                        tab.ownedCount,
+
+                    unowned:
+                        tab.unownedCount,
+
+                    unknown:
+                        tab.unknownCount
+                })
+            )
+        );
+
+
+        console.log(
+            'TOTAL',
+            {
+                tabs:
+                    result.tabCount,
+
+                items:
+                    result.totalItems,
+
+                owned:
+                    result.ownedCount,
+
+                unowned:
+                    result.unownedCount,
+
+                unknown:
+                    result.unknownCount
+            }
+        );
+
+
+        console.log(
+            '최종 객체:',
+            result
+        );
+
+
+        return result;
+    }
+
+
+    /* ============================================================
+     * OWNED ONLY
+     * ============================================================ */
+
+
+    function getOwned(
+        data =
+            window.TOPWAR_PROFILE_DATA
+    ) {
+
+        if (!data?.flat) {
+
+            return [];
+        }
+
+
+        return data.flat.filter(
+            item =>
+                item.owned === true
+        );
+    }
+
+
+    function getUnowned(
+        data =
+            window.TOPWAR_PROFILE_DATA
+    ) {
+
+        if (!data?.flat) {
+
+            return [];
+        }
+
+
+        return data.flat.filter(
+            item =>
+                item.owned === false
+        );
+    }
+
+
+    function getUnknown(
+        data =
+            window.TOPWAR_PROFILE_DATA
+    ) {
+
+        if (!data?.flat) {
+
+            return [];
+        }
+
+
+        return data.flat.filter(
+            item =>
+                item.owned === null
+        );
+    }
+
+
+    /* ============================================================
+     * PUBLIC
+     * ============================================================ */
+
+
+    return {
+        inspectCurrentProfileItems,
+
+        version:
+            VERSION,
+
+        TAB_ORDER,
+
+        findProfileRoot,
+
+        collectToggles,
+
+        findContentRoot,
+
+        collectCurrentItems,
+
+        detectOwnership,
+
+        waitForContentStable,
+
+        collectTab,
+
+        collectAll,
+
+        getOwned,
+
+        getUnowned,
+
+        getUnknown
+    };
+
+
+})();
+
+    function findProfileRoot() { return profileModule.findProfileRoot(); }
+
+    function getProfileDiagnostics() {
+        const currentScene = scene();
+        const candidates = [];
+        walk(currentScene, node => {
+            if (/userinfo|profile/i.test(node.name || '')) candidates.push({
+                name: node.name, path: nodePath(node), active: node.active,
+                activeInHierarchy: node.activeInHierarchy
+            });
+        });
+        const panel = findProfileRoot();
+        return { scene: currentScene ? { name: currentScene.name, active: currentScene.active,
+            activeInHierarchy: currentScene.activeInHierarchy } : null,
+            panel: panel ? nodePath(panel) : null, candidates };
+    }
+
+    function findOwnProfileButton() {
+
+    const root =
+        scene();
+
+    if (!root)
+        return null;
+
+
+    const candidates = [];
+
+
+    walk(
+        root,
+        node => {
+
+            if (!isActive(node))
+                return;
+
+
+            let button = null;
+
+            try {
+
+                button =
+                    node.getComponent?.(
+                        cc.Button
+                    );
+
+            } catch {}
+
+
+            if (!button)
+                return;
+
+
+            if (
+                button.enabled === false ||
+                button.interactable === false
+            )
+                return;
+
+
+            const handlers =
+                button.clickEvents || [];
+
+
+            for (
+                const event
+                of handlers
+            ) {
+
+                const component =
+                    String(
+                        event?.component ||
+                        event?._componentName ||
+                        event?.componentName ||
+                        ''
+                    );
+
+
+                const handler =
+                    String(
+                        event?.handler ||
+                        event?._handler ||
+                        ''
+                    );
+
+
+                /*
+                 * 실제 캡처된 프로필 버튼
+                 */
+                if (
+                    component ===
+                        'NMainUI'
+                    &&
+                    handler ===
+                        'checkUserAuthor'
+                ) {
+
+                    candidates.push({
+
+                        node,
+
+                        button,
+
+                        event,
+
+                        component,
+
+                        handler,
+
+                        name:
+                            node.name,
+
+                        path:
+                            nodePath(node)
+                    });
+                }
+            }
+        }
+    );
+
+
+    /*
+     * AuthorBtn 우선
+     */
+    candidates.sort(
+        (a, b) => {
+
+            const aScore =
+                a.name ===
+                'AuthorBtn'
+                    ? 100
+                    : 0;
+
+            const bScore =
+                b.name ===
+                'AuthorBtn'
+                    ? 100
+                    : 0;
+
+
+            return (
+                bScore -
+                aScore
+            );
+        }
+    );
+
+
+    return (
+        candidates[0] ||
+        null
+    );
+}
+
+
+    async function openOwnProfile(options = {}) {
+
+    const current =
+        detect();
+
+
+    if (
+        current.state === STATE.WORLD_MAP ||
+        current.state === STATE.WORLD_MINIMAP
+    ) {
+
+        return {
+            ok: false,
+            reason:
+                'WORLD_MAP / WORLD_MINIMAP에서는 프로필을 열 수 없음',
+            current
+        };
+    }
+
+
+    /*
+     * 이미 열려있으면 성공
+     */
+    const already =
+        findProfileRoot?.();
+
+    if (already) {
+
+        return {
+            ok: true,
+            alreadyOpen: true,
+            path:
+                nodePath(already)
+        };
+    }
+
+
+    /*
+     * 현재 활성 AuthorBtn 찾기
+     */
+    const target =
+        findOwnProfileButton();
+
+
+    if (!target) {
+
+        return {
+            ok: false,
+            reason:
+                'NMainUI.checkUserAuthor가 연결된 AuthorBtn을 찾지 못함',
+            current
+        };
+    }
+
+
+    const node =
+        target.node;
+
+
+    let button = null;
+
+    try {
+
+        button =
+            node.getComponent?.(
+                cc.Button
+            );
+
+    } catch {}
+
+
+    if (!button) {
+
+        return {
+            ok: false,
+            reason:
+                'AuthorBtn에서 cc.Button을 찾지 못함',
+            target
+        };
+    }
+
+
+    /*
+     * 프로필 열림 확인
+     */
+    async function waitOpen(
+        timeout = 2000
+    ) {
+
+        const started =
+            Date.now();
+
+
+        while (
+            Date.now() - started <
+            timeout
+        ) {
+
+            const root =
+                findProfileRoot?.();
+
+
+            if (root) {
+
+                return {
+                    ok: true,
+                    root,
+                    path:
+                        nodePath(root)
+                };
+            }
+
+
+            await sleep(100);
+        }
+
+
+        return {
+            ok: false
+        };
+    }
+
+
+    const attempts = [];
+
+
+    /*
+     * ============================================================
+     * 1순위
+     * 실제 cc.EventHandler.emit()
+     *
+     * Cocos 버튼이 내부적으로 사용하는 방식에 가장 가까움
+     * ============================================================ */
+
+    for (
+        const event
+        of button.clickEvents || []
+    ) {
+
+        const componentName =
+            String(
+                event?.component ||
+                event?._componentName ||
+                ''
+            );
+
+
+        const handlerName =
+            String(
+                event?.handler ||
+                event?._handler ||
+                ''
+            );
+
+
+        if (
+            componentName !==
+                'NMainUI'
+            ||
+            handlerName !==
+                'checkUserAuthor'
+        ) {
+            continue;
+        }
+
+
+        try {
+
+            if (
+                typeof event.emit ===
+                'function'
+            ) {
+
+                /*
+                 * 중요:
+                 * 이벤트 객체가 아니라 Button 전달
+                 */
+                event.emit(
+                    [button]
+                );
+
+
+                attempts.push({
+                    method:
+                        'event.emit([button])',
+                    ok:
+                        true
+                });
+
+
+                const opened =
+                    await waitOpen(
+                        options.timeout ??
+                        2000
+                    );
+
+
+                if (!opened.ok) {
+                    return { ok: false, stage: 'PROFILE_PANEL_NOT_DETECTED',
+                        reason: '프로필 이벤트는 호출했지만 열린 패널을 확인하지 못함 (추가 클릭 중단)',
+                        attempts, diagnostics: getProfileDiagnostics() };
+                }
+                if (opened.ok) {
+
+                    return {
+
+                        ok: true,
+
+                        state:
+                            current.state,
+
+                        method:
+                            'event.emit([button])',
+
+                        target: {
+                            name:
+                                node.name,
+
+                            path:
+                                nodePath(node),
+
+                            component:
+                                componentName,
+
+                            handler:
+                                handlerName
+                        },
+
+                        profile: {
+                            path:
+                                opened.path
+                        },
+
+                        attempts
+                    };
+                }
+            }
+
+        } catch (
+            error
+        ) {
+
+            console.error('[TOPWAR_NAV] profile event', error);
+            attempts.push({
+
+                method:
+                    'event.emit([button])',
+
+                ok:
+                    false,
+
+                error:
+                    error?.message ||
+                    String(error)
+            });
+        }
+    }
+
+
+    /*
+     * ============================================================
+     * 2순위
+     * emitEvents(clickEvents, button)
+     *
+     * 이것도 이벤트 객체가 아니라 cc.Button 전달
+     * ============================================================ */
+
+    try {
+
+        if (
+            button.clickEvents?.length &&
+            cc.Component
+                ?.EventHandler
+                ?.emitEvents
+        ) {
+
+            cc.Component
+                .EventHandler
+                .emitEvents(
+                    button.clickEvents,
+                    button
+                );
+
+
+            attempts.push({
+                method:
+                    'emitEvents(clickEvents, button)',
+                ok:
+                    true
+            });
+
+
+            const opened =
+                await waitOpen(
+                    options.timeout ??
+                    2000
+                );
+
+
+            if (opened.ok) {
+
+                return {
+
+                    ok: true,
+
+                    state:
+                        current.state,
+
+                    method:
+                        'emitEvents(clickEvents, button)',
+
+                    target: {
+                        name:
+                            node.name,
+
+                        path:
+                            nodePath(node)
+                    },
+
+                    profile: {
+                        path:
+                            opened.path
+                    },
+
+                    attempts
+                };
+            }
+        }
+
+    } catch (
+        error
+    ) {
+
+        attempts.push({
+
+            method:
+                'emitEvents(clickEvents, button)',
+
+            ok:
+                false,
+
+            error:
+                error?.message ||
+                String(error)
+        });
+    }
+
+
+    /*
+     * ============================================================
+     * 3순위
+     * node.emit("click", button)
+     *
+     * 네가 직접 클릭했을 때 trace에도 이 이벤트가 찍힘
+     * ============================================================ */
+
+    try {
+
+        node.emit(
+            'click',
+            button
+        );
+
+
+        attempts.push({
+            method:
+                'node.emit("click", button)',
+            ok:
+                true
+        });
+
+
+        const opened =
+            await waitOpen(
+                options.timeout ??
+                2000
+            );
+
+
+        if (opened.ok) {
+
+            return {
+
+                ok: true,
+
+                state:
+                    current.state,
+
+                method:
+                    'node.emit("click", button)',
+
+                target: {
+                    name:
+                        node.name,
+
+                    path:
+                        nodePath(node)
+                },
+
+                profile: {
+                    path:
+                        opened.path
+                },
+
+                attempts
+            };
+        }
+
+    } catch (
+        error
+    ) {
+
+        attempts.push({
+
+            method:
+                'node.emit("click", button)',
+
+            ok:
+                false,
+
+            error:
+                error?.message ||
+                String(error)
+        });
+    }
+
+
+    return {
+
+        ok: false,
+
+        reason:
+            'AuthorBtn은 찾았지만 프로필이 열리지 않음',
+
+        state:
+            current.state,
+
+        target: {
+            name:
+                node.name,
+
+            path:
+                nodePath(node),
+
+            component:
+                target.component,
+
+            handler:
+                target.handler
+        },
+
+        attempts
+    };
+}
+
+        function profileCloseCandidates() {
+        const panel = findProfileRoot();
+        if (!panel) return [];
+        let scope = panel;
+        for (let n = panel.parent; n && n !== scene(); n = n.parent) {
+            if (/^UIFrame/.test(n.name || '')) { scope = n; break; }
+        }
+        const candidates = [];
+        walk(scope, node => {
+            if (!isActive(node)) return;
+            const button = node.getComponent?.(window.cc?.Button);
+            if (!button || button.enabled === false || button.interactable === false) return;
+            const events = (button.clickEvents || []).filter(event =>
+                isWindowCloseHandler(event.handler));
+            if (events.length === 1 && button.clickEvents.length === 1) candidates.push({node, button, event: events[0]});
+        });
+        return candidates;
+    }
+    async function closeOwnProfile(options = {}) {
+        if (!findProfileRoot()) return {ok:true, alreadyClosed:true};
+        const candidates = profileCloseCandidates();
+        const diagnostics = candidates.map(c => ({path:nodePath(c.node), component:c.event.component, handler:c.event.handler}));
+        if (candidates.length !== 1) return {ok:false, reason:'프로필 닫기 이벤트를 하나로 확인할 수 없음', candidates:diagnostics, buttons:listGameButtons(), closeButtons:listWindowCloseButtons()};
+        const {button,event} = candidates[0];
+        if (typeof event.emit !== 'function') return {ok:false,reason:'닫기 이벤트 emit 없음',candidates:diagnostics};
+        event.emit([button]);
+        const deadline = Date.now() + (options.timeout ?? 3000);
+        while (!disposed && findProfileRoot() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve,100));
+        return {ok:!disposed && !findProfileRoot(), reason:disposed ? '종료됨' : findProfileRoot() ? '닫기 이벤트 호출 후 창이 아직 열려 있음' : undefined, target:diagnostics[0]};
+    }
+    function selectedProfileTab(name) {
+        if (!findProfileRoot()) return null;
+        return profileModule.collectToggles().find(tab => name ? tab.name === name || tab.text === name : tab.toggle.isChecked);
+    }
+    function readCurrentProfileItems() {
+        const tab = selectedProfileTab();
+        if (!tab) return {ok:false,reason:'열린 프로필에서 선택된 탭을 확인할 수 없음'};
+        const items = profileModule.collectCurrentItems();
+        return {ok:!!profileModule.findContentRoot(), toggle:tab.name, name:tab.text, snapshot:true, count:items.length, items};
+    }
+    async function selectProfileTab(name) {
+        const tab = selectedProfileTab(name);
+        if (!tab) return {ok:false,reason:'프로필을 먼저 열거나 탭 이름을 확인하세요'};
+        tab.toggle.check();
+        return {ok:!!tab.toggle.isChecked,toggle:tab.name,name:tab.text};
+    }
+    async function collectProfileTab(name, options = {}) {
+        const tab = selectedProfileTab(name);
+        if (!tab) return {ok:false,reason:'프로필을 먼저 열거나 탭 이름을 확인하세요'};
+        const result = await profileModule.collectTab(tab, options);
+        return { ...result, ok:!!result.loaded && !!result.stable };
+    }
+
+        function isWindowCloseHandler(handler) {
+        const name=String(handler || '').replace(/callback/ig,'');
+        return /^(?:(?:on|btn|button|click|clicked|handle|close|back|return|pressed|tap|_))+$/i.test(name) && /close|back|return/i.test(name);
+    }
+    // General controls use live component references; no coordinates or guessed menu paths.
+    const gameButtonIds = new WeakMap();
+    let gameButtonSequence = 0;
+    const gameActionBindings = new Map();
+    const gameMacros = new Map();
+    const hiddenGameButtons = new Map();
+    const hiddenPanelButtons = new Set();
+    const controlsStorageKey = 'TOPWAR_NAV.controls.v1';
+    let macroRuntime = null;
+
+    try {
+        const saved = JSON.parse(localStorage.getItem(controlsStorageKey) || '{}');
+        for (const [key,value] of saved.hidden || []) hiddenGameButtons.set(key,value);
+        for (const [key,value] of saved.actions || Object.entries(previousNav?.getGameActions?.() || {})) gameActionBindings.set(key,value);
+        for (const [name,value] of saved.macros || Object.entries(previousNav?.getGameMacros?.() || {})) gameMacros.set(name,value);
+        for (const label of saved.panel || []) hiddenPanelButtons.add(label);
+    } catch (error) { console.warn('[TOPWAR_NAV] 버튼 설정 읽기 실패',error); }
+
+    function saveGameControls() {
+        try {
+            localStorage.setItem(controlsStorageKey,JSON.stringify({
+                hidden:[...hiddenGameButtons],
+                actions:[...gameActionBindings],
+                macros:[...gameMacros],
+                panel:[...hiddenPanelButtons]
+            }));
+            return true;
+        }
+        catch (error) { console.warn('[TOPWAR_NAV] 버튼 설정 저장 실패',error); return false; }
+    }
+    function gameControlKey(row) { return JSON.stringify([row.path,row.events]); }
+    function hideGameButton(id) {
+        const row=listGameButtons().find(row=>row.id===id);
+        if (!row) return {ok:false,reason:'현재 버튼을 찾지 못함'};
+        hiddenGameButtons.set(gameControlKey(row),row);
+        return {ok:true,persisted:saveGameControls()};
+    }
+    function restoreGameButton(key) { const ok=hiddenGameButtons.delete(key);return {ok,persisted:saveGameControls()}; }
+    function removeGameAction(name) { const ok=gameActionBindings.delete(name);return {ok,persisted:saveGameControls()}; }
+    let lastOpenedRoots = [];
+    function gameNodes() {
+        const nodes = new Set();
+        walk(scene(), node => { if (isActive(node)) nodes.add(node); });
+        return nodes;
+    }
+    function gameButtonRows() {
+        const rows = [];
+        if (!window.cc?.Button) return rows;
+        walk(scene(), node => {
+            if (!isActive(node)) return;
+            const toggle = window.cc.Toggle && node.getComponent?.(window.cc.Toggle);
+            const component = toggle || node.getComponent?.(window.cc.Button);
+            const listeners = ['click','toggle','touchstart','touchend'].filter(type => node.hasEventListener?.(type));
+            if (!component && !listeners.length) return;
+            const button = component || node;
+            const method = toggle && typeof toggle.check === 'function' ? 'toggle.check' :
+                (button.clickEvents || []).length ? 'clickEvents' :
+                listeners.includes('click') && typeof node.emit === 'function' ? 'node.click' : null;
+            if (!gameButtonIds.has(button)) gameButtonIds.set(button, 'button-' + ++gameButtonSequence);
+            const events = (toggle ? toggle.checkEvents || [] : button.clickEvents || []).filter(Boolean);
+            const texts = [];
+            walk(node, child => {
+                if (!isActive(child)) return;
+                for (const type of [window.cc.Label, window.cc.RichText].filter(Boolean)) {
+                    const value = child.getComponent?.(type)?.string;
+                    if (value && texts.length < 3) texts.push(String(value));
+                }
+            });
+            rows.push({node, button, events, toggle, method, listeners, id:gameButtonIds.get(button), name:node.name,
+                path:nodePath(node), text:[...new Set(texts)].join(' / '),
+                enabled:button.enabled !== false && button.interactable !== false,
+                supported:!!method && (method !== 'clickEvents' || events.every(e => typeof e.emit === 'function'))});
+        });
+        return rows;
+    }
+    function describeGameButton(row) {
+        return {id:row.id,name:row.name,path:row.path,text:row.text,enabled:row.enabled,supported:row.supported,method:row.method,listeners:row.listeners,checked:row.toggle ? !!row.toggle.isChecked : undefined,
+            events:row.events.map(e => ({component:e.component,handler:e.handler}))};
+    }
+    function listGameButtons() { return gameButtonRows().map(describeGameButton); }
+    function withinGameRoot(node, ancestor) {
+        for (let n=node;n;n=n.parent) if (n === ancestor) return true;
+        return false;
+    }
+    function listWindowCloseButtons() {
+        return gameButtonRows().filter(row => row.events.some(e => isWindowCloseHandler(e.handler)))
+            .map(row => ({...describeGameButton(row),inLastOpenedWindow:lastOpenedRoots.some(n => withinGameRoot(row.node,n))}));
+    }
+    async function pressGameButton(id, options = {}) {
+        const row = gameButtonRows().find(row => row.id === id);
+        if (!row) return {ok:false,reason:'버튼이 현재 화면에 없습니다. 목록을 새로 읽으세요.'};
+        if (!row.enabled || !row.supported) return {ok:false,reason:'비활성 항목이거나 실행 가능한 연결을 확인하지 못했습니다.',target:describeGameButton(row)};
+        const before = gameNodes();
+        // Dispatch once. Never retry after a callback may already have changed the game.
+        if (row.method === 'toggle.check') row.toggle.check();
+        else if (row.method === 'node.click') row.node.emit('click',row.button);
+        else for (const event of row.events) event.emit([row.button]);
+        await new Promise(resolve => setTimeout(resolve, Math.max(0,Math.min(options.waitMs ?? 500,5000))));
+        if (disposed) return {ok:false,reason:'종료됨',dispatched:true};
+        const after = gameNodes();
+        const added = [...after].filter(node => !before.has(node));
+        const roots = added.filter(node => !added.includes(node.parent));
+        if (roots.length) lastOpenedRoots = roots;
+        else lastOpenedRoots = lastOpenedRoots.filter(node => after.has(node));
+        return {ok:true,dispatched:true,target:describeGameButton(row),
+            opened:roots.map(nodePath),hidden:[...before].filter(node => !after.has(node)).map(nodePath),
+            closeButtons:listWindowCloseButtons()};
+    }
+    async function closeLastWindow(options = {}) {
+        const live = gameNodes();
+        lastOpenedRoots = lastOpenedRoots.filter(node => live.has(node));
+        if (!lastOpenedRoots.length) return {ok:false,reason:'추적 중인 창이 없습니다. 닫기 후보에서 직접 선택하세요.'};
+        const candidates = listWindowCloseButtons().filter(row => row.inLastOpenedWindow && row.enabled && row.supported);
+        if (candidates.length !== 1) return {ok:false,reason:'닫기 후보를 하나로 확정할 수 없습니다. 목록에서 선택하세요.',candidates};
+        const expected = lastOpenedRoots.slice();
+        const result = await pressGameButton(candidates[0].id,options);
+        const closed = expected.every(node => !gameNodes().has(node));
+        return {...result,ok:result.ok && closed,closed,reason:closed ? undefined : '닫기 이벤트 호출 후 창이 아직 활성 상태입니다.'};
+    }
+    function bindGameAction(name,id) {
+        const row = gameButtonRows().find(row => row.id === id);
+        if (!name || !row) return {ok:false,reason:'이름과 현재 버튼을 확인하세요.'};
+        const descriptor=describeGameButton(row);
+        gameActionBindings.set(name,descriptor);
+        return {ok:true,name,target:descriptor,persisted:saveGameControls()};
+    }
+    async function runGameAction(name,options) {
+        const binding=gameActionBindings.get(name);
+        if (!binding) return {ok:false,reason:'등록되지 않은 동작'};
+        const matches=gameButtonRows().filter(row => row.path === binding.path && JSON.stringify(describeGameButton(row).events) === JSON.stringify(binding.events));
+        if(matches.length !== 1) return {ok:false,reason:'저장된 동작의 버튼이 없거나 중복됩니다.'};
+        return pressGameButton(matches[0].id,options);
+    }
+
+
+    /* ============================================================
+     * MACRO ENGINE
+     *
+     * 저장된 동작 + 대기 + Navigator 기본 동작을 순서대로 실행한다.
+     * 저장된 동작은 실행할 때마다 현재 Scene에서 버튼을 다시 찾는다.
+     * ============================================================ */
+
+    const MACRO_BUILTINS = new Map([
+        ['프로필', options => openOwnProfile(options)],
+        ['프로필 닫기', options => closeOwnProfile(options)],
+        ['프로필 수집', options => profileModule.collectAll(options)],
+        ['기지', options => goto(STATE.BASE, options)],
+        ['월드', options => goto(STATE.WORLD, options)],
+        ['월드맵', options => goto(STATE.WORLD_MAP, options)]
+    ]);
+
+    function cloneMacroSteps(steps) {
+        return normalizeMacroSteps(steps).map(step => ({...step}));
+    }
+
+    function normalizeMacroSteps(steps) {
+        if (!Array.isArray(steps)) return [];
+        const normalized=[];
+        for (const source of steps) {
+            if (source?.type === 'wait') {
+                normalized.push({
+                    type:'wait',
+                    ms:Math.max(0,Math.min(600000,Number(source.ms) || 0))
+                });
+                continue;
+            }
+            if (source?.type !== 'action') continue;
+            const name=String(source.name || '').trim();
+            if (!name) continue;
+            normalized.push({
+                type:'action',
+                kind:source.kind === 'builtin' ? 'builtin' : 'saved',
+                name
+            });
+        }
+        return normalized;
+    }
+
+    function validateGameMacro(name,steps) {
+        name=String(name || '').trim();
+        if (!name) return {ok:false,reason:'매크로 이름을 입력하세요.'};
+        const normalized=normalizeMacroSteps(steps);
+        if (!normalized.length) return {ok:false,reason:'매크로 동작이 없습니다.'};
+        if (!normalized.some(step => step.type === 'action')) return {ok:false,reason:'실행할 동작이 하나 이상 필요합니다.'};
+        for (let index=0; index<normalized.length; index++) {
+            const step=normalized[index];
+            if (step.type !== 'action') continue;
+            if (step.kind === 'saved' && !gameActionBindings.has(step.name)) {
+                return {ok:false,reason:`저장된 동작 없음: ${step.name}`,step:index};
+            }
+            if (step.kind === 'builtin' && !MACRO_BUILTINS.has(step.name)) {
+                return {ok:false,reason:`기본 동작 없음: ${step.name}`,step:index};
+            }
+        }
+        return {ok:true,name,steps:normalized};
+    }
+
+    function saveGameMacro(name,steps) {
+        const checked=validateGameMacro(name,steps);
+        if (!checked.ok) return checked;
+        const macro={
+            version:1,
+            name:checked.name,
+            steps:checked.steps,
+            updatedAt:Date.now()
+        };
+        gameMacros.set(checked.name,macro);
+        return {ok:true,name:checked.name,macro,persisted:saveGameControls()};
+    }
+
+    function renameGameMacro(oldName,newName,steps) {
+        oldName=String(oldName || '').trim();
+        newName=String(newName || '').trim();
+        const checked=validateGameMacro(newName,steps);
+        if (!checked.ok) return checked;
+        if (oldName && oldName !== newName) gameMacros.delete(oldName);
+        const macro={
+            version:1,
+            name:newName,
+            steps:checked.steps,
+            updatedAt:Date.now()
+        };
+        gameMacros.set(newName,macro);
+        return {ok:true,name:newName,renamedFrom:oldName || undefined,macro,persisted:saveGameControls()};
+    }
+
+    function removeGameMacro(name) {
+        const ok=gameMacros.delete(String(name || '').trim());
+        return {ok,persisted:saveGameControls()};
+    }
+
+    function waitGameMacro(ms,runtime) {
+        ms=Math.max(0,Number(ms) || 0);
+        if (!ms) return Promise.resolve(!runtime.cancelled && !disposed);
+        return new Promise(resolve => {
+            let finished=false;
+            const finish=value => {
+                if (finished) return;
+                finished=true;
+                if (runtime.timer) clearTimeout(runtime.timer);
+                runtime.timer=null;
+                runtime.waitResolve=null;
+                resolve(value);
+            };
+            runtime.waitResolve=finish;
+            runtime.timer=setTimeout(() => finish(!runtime.cancelled && !disposed),ms);
+        });
+    }
+
+    function stopGameMacro() {
+        const runtime=macroRuntime;
+        if (!runtime) return {ok:true,alreadyStopped:true};
+        runtime.cancelled=true;
+        if (runtime.waitResolve) runtime.waitResolve(false);
+        return {ok:true,stopped:runtime.name,step:runtime.index};
+    }
+
+    async function runGameMacroAction(step,options={}) {
+        if (step.kind === 'saved') return runGameAction(step.name,options);
+        if (step.kind === 'builtin') {
+            const action=MACRO_BUILTINS.get(step.name);
+            if (!action) return {ok:false,reason:`기본 동작 없음: ${step.name}`};
+            return action(options);
+        }
+        return {ok:false,reason:`알 수 없는 매크로 동작: ${step.kind}`};
+    }
+
+    async function runGameMacro(name,options={}) {
+        name=String(name || '').trim();
+        if (macroRuntime) return {ok:false,reason:'이미 다른 매크로가 실행 중입니다.',running:macroRuntime.name};
+        const macro=gameMacros.get(name);
+        if (!macro) return {ok:false,reason:`등록되지 않은 매크로: ${name}`};
+        const steps=normalizeMacroSteps(macro.steps);
+        const runtime={
+            name,
+            startedAt:Date.now(),
+            index:-1,
+            total:steps.length,
+            phase:'START',
+            current:null,
+            cancelled:false,
+            timer:null,
+            waitResolve:null
+        };
+        macroRuntime=runtime;
+        const results=[];
+        try {
+            for (let index=0; index<steps.length; index++) {
+                if (disposed || runtime.cancelled) return {ok:false,cancelled:true,name,index,results};
+                const step=steps[index];
+                runtime.index=index;
+                runtime.current=step;
+                if (step.type === 'wait') {
+                    runtime.phase='WAIT';
+                    log(`[매크로] ${name} · ${step.ms / 1000}초 대기`);
+                    const continued=await waitGameMacro(step.ms,runtime);
+                    if (!continued) return {ok:false,cancelled:true,name,index,results};
+                    results.push({index,type:'wait',ms:step.ms,ok:true});
+                    continue;
+                }
+                runtime.phase='ACTION';
+                log(`[매크로] ${name} · ${step.name}`);
+                let result;
+                try {
+                    result=await runGameMacroAction(step,options);
+                } catch (error) {
+                    result={ok:false,reason:error?.message || String(error),error};
+                }
+                results.push({index,step,result});
+                if (!result?.ok) {
+                    return {
+                        ok:false,
+                        name,
+                        failedStep:index,
+                        failedAction:step.name,
+                        reason:result?.reason || '동작 실행 실패',
+                        result,
+                        results
+                    };
+                }
+                if (runtime.cancelled) return {ok:false,cancelled:true,name,index,results};
+            }
+            return {ok:true,name,elapsed:Date.now()-runtime.startedAt,results};
+        } finally {
+            if (runtime.timer) clearTimeout(runtime.timer);
+            if (macroRuntime === runtime) macroRuntime=null;
+        }
+    }
+
+    function getGameMacroStatus() {
+        if (!macroRuntime) return null;
+        return {
+            name:macroRuntime.name,
+            index:macroRuntime.index,
+            total:macroRuntime.total,
+            phase:macroRuntime.phase,
+            current:macroRuntime.current ? {...macroRuntime.current} : null,
+            startedAt:macroRuntime.startedAt,
+            cancelled:macroRuntime.cancelled
+        };
+    }
+    function mountGameControls(api) {
+        const section=document.createElement('div');
+
+        const makePanel=(id,title)=>{
+            const panel=document.createElement('details');panel.id=id;
+            panel.style.cssText='border-top:1px solid #425063;margin-top:6px;padding:4px 0';
+            const header=document.createElement('summary');header.textContent=title;
+            header.style.cssText='cursor:pointer;font-weight:bold;padding:8px';panel.appendChild(header);
+            root.querySelector('.body').appendChild(panel);
+            return panel;
+        };
+        const searchPanel=makePanel('topwar-nav-search','버튼 검색 · 관리');
+        const detailPanel=makePanel('topwar-nav-details','상세 버튼 · 저장한 동작');
+        const macroPanel=makePanel('topwar-nav-macro','연속 작업 · 매크로');
+        const savedList=document.createElement('div');detailPanel.appendChild(savedList);
+        const summary=document.createElement('summary'); summary.textContent='화면 버튼 · 창 열기/닫기';
+        summary.style.cssText='cursor:pointer;padding:8px'; // Section title is provided by the containing disclosure.
+        const body=document.createElement('div'); body.style.cssText='padding:8px;display:grid;gap:6px';section.appendChild(body);
+        const filter=document.createElement('input');filter.placeholder='이름 / 경로 / 이벤트 검색';filter.style.cssText='width:100%;box-sizing:border-box;color:#111';body.appendChild(filter);
+        const status=document.createElement('div');body.appendChild(status);
+        const toolbar=document.createElement('div');toolbar.style.cssText='display:flex;gap:4px;flex-wrap:wrap';body.appendChild(toolbar);
+        const list=document.createElement('div');list.style.cssText='max-height:260px;overflow:auto;display:grid;gap:5px';detailPanel.appendChild(list);
+        let closeOnly=false, hiddenOnly=false;
+        const existingButtons=[...root.querySelectorAll('button')].map(node=>({node,label:node.textContent}));
+        const applyPanelVisibility=()=>existingButtons.forEach(({node,label})=>{node.hidden=hiddenPanelButtons.has(label);node.style.display=node.hidden?'none':'';});
+        applyPanelVisibility();
+        const button=(parent,label,action)=>{const b=document.createElement('button');b.className='tool';b.textContent=label;b.addEventListener('click',action,{signal:uiEvents.signal});parent.appendChild(b);return b;};
+
+        /* -------------------- Macro editor UI -------------------- */
+        const macroBody=document.createElement('div');
+        macroBody.style.cssText='padding:8px;display:grid;gap:7px';
+        macroPanel.appendChild(macroBody);
+
+        const macroName=document.createElement('input');
+        macroName.placeholder='매크로 이름 (예: 암흑오딘 검색)';
+        macroName.style.cssText='width:100%;box-sizing:border-box;color:#111';
+        macroBody.appendChild(macroName);
+
+        const macroActionRow=document.createElement('div');
+        macroActionRow.style.cssText='display:flex;gap:4px';
+        macroBody.appendChild(macroActionRow);
+        const macroAction=document.createElement('select');
+        macroAction.style.cssText='min-width:0;flex:1;color:#111';
+        macroActionRow.appendChild(macroAction);
+
+        const macroWaitRow=document.createElement('div');
+        macroWaitRow.style.cssText='display:flex;gap:4px;align-items:center';
+        macroBody.appendChild(macroWaitRow);
+        const macroWait=document.createElement('input');
+        macroWait.type='number';macroWait.min='0.1';macroWait.step='0.1';macroWait.value='1';
+        macroWait.style.cssText='width:76px;color:#111';
+        macroWaitRow.appendChild(macroWait);
+        const waitUnit=document.createElement('span');waitUnit.textContent='초';macroWaitRow.appendChild(waitUnit);
+
+        const macroDraftList=document.createElement('div');
+        macroDraftList.style.cssText='border:1px solid #444;border-radius:4px;padding:5px;display:grid;gap:4px;max-height:240px;overflow:auto';
+        macroBody.appendChild(macroDraftList);
+
+        const macroControls=document.createElement('div');
+        macroControls.style.cssText='display:flex;gap:4px;flex-wrap:wrap';
+        macroBody.appendChild(macroControls);
+        const macroStatus=document.createElement('small');
+        macroStatus.style.cssText='color:#aaa;min-height:14px';
+        macroBody.appendChild(macroStatus);
+        const savedMacros=document.createElement('div');
+        savedMacros.style.cssText='border-top:1px solid #555;padding-top:7px;display:grid;gap:4px';
+        macroBody.appendChild(savedMacros);
+
+        let macroDraft=[];
+        let editingMacroName=null;
+
+        const renderMacroActions=()=>{
+            const previous=macroAction.value;
+            macroAction.replaceChildren();
+            const placeholder=document.createElement('option');
+            placeholder.value='';placeholder.textContent='동작 선택';macroAction.appendChild(placeholder);
+            for(const [name] of gameActionBindings){
+                const option=document.createElement('option');
+                option.value=JSON.stringify({kind:'saved',name});
+                option.textContent='[저장] '+name;
+                macroAction.appendChild(option);
+            }
+            for(const [name] of MACRO_BUILTINS){
+                const option=document.createElement('option');
+                option.value=JSON.stringify({kind:'builtin',name});
+                option.textContent='[기본] '+name;
+                macroAction.appendChild(option);
+            }
+            if([...macroAction.options].some(option=>option.value===previous)) macroAction.value=previous;
+        };
+
+        const renderMacroDraft=()=>{
+            macroDraftList.replaceChildren();
+            if(!macroDraft.length){
+                const empty=document.createElement('small');empty.textContent='동작과 대기를 순서대로 추가하세요.';macroDraftList.appendChild(empty);return;
+            }
+            macroDraft.forEach((step,index)=>{
+                const row=document.createElement('div');
+                row.style.cssText='display:flex;align-items:center;gap:3px;background:#202026;padding:4px;border-radius:3px';
+                const text=document.createElement('span');text.style.cssText='flex:1;overflow-wrap:anywhere';
+                text.textContent=step.type==='wait' ? `${index+1}. 대기 ${step.ms/1000}초` : `${index+1}. ${step.kind==='builtin'?'[기본]':'[저장]'} ${step.name}`;
+                row.appendChild(text);
+                const up=button(row,'↑',()=>{if(index<=0)return;[macroDraft[index-1],macroDraft[index]]=[macroDraft[index],macroDraft[index-1]];renderMacroDraft();});
+                up.disabled=index===0;
+                const down=button(row,'↓',()=>{if(index>=macroDraft.length-1)return;[macroDraft[index+1],macroDraft[index]]=[macroDraft[index],macroDraft[index+1]];renderMacroDraft();});
+                down.disabled=index===macroDraft.length-1;
+                button(row,'×',()=>{macroDraft.splice(index,1);renderMacroDraft();});
+                macroDraftList.appendChild(row);
+            });
+        };
+
+        const resetMacroEditor=()=>{
+            editingMacroName=null;
+            macroName.value='';
+            macroDraft=[];
+            renderMacroDraft();
+        };
+
+        const renderSavedMacros=()=>{
+            savedMacros.replaceChildren();
+            const title=document.createElement('strong');title.textContent='저장한 매크로';savedMacros.appendChild(title);
+            if(!gameMacros.size){
+                const empty=document.createElement('small');empty.textContent='저장된 매크로가 없습니다.';savedMacros.appendChild(empty);return;
+            }
+            for(const [name,macro] of gameMacros){
+                const row=document.createElement('div');row.style.cssText='display:flex;gap:3px;align-items:center';
+                const play=button(row,'▶ '+name,()=>run('매크로 '+name,()=>api.runGameMacro(name)));
+                play.style.flex='1';
+                button(row,'편집',()=>{
+                    editingMacroName=name;
+                    macroName.value=name;
+                    macroDraft=cloneMacroSteps(macro.steps);
+                    macroPanel.open=true;
+                    renderMacroDraft();
+                });
+                button(row,'삭제',()=>run('매크로 삭제 '+name,()=>api.removeGameMacro(name)));
+                savedMacros.appendChild(row);
+                const preview=document.createElement('small');
+                preview.style.cssText='color:#777;padding-left:3px;overflow-wrap:anywhere';
+                preview.textContent=normalizeMacroSteps(macro.steps).map(step=>step.type==='wait'?`${step.ms/1000}초`:`[${step.name}]`).join(' → ');
+                savedMacros.appendChild(preview);
+            }
+        };
+
+        const renderMacroStatus=()=>{
+            const state=api.getGameMacroStatus();
+            if(!state){macroStatus.textContent=editingMacroName?`편집 중: ${editingMacroName}`:'대기 중';return;}
+            const current=state.current?.type==='wait' ? `${state.current.ms/1000}초 대기` : state.current?.name || '';
+            macroStatus.textContent=`실행 중: ${state.name} · ${state.index+1}/${state.total} · ${current}`;
+        };
+
+        const renderMacroUI=()=>{
+            renderMacroActions();
+            renderMacroDraft();
+            renderSavedMacros();
+            renderMacroStatus();
+        };
+
+        const run=async(label,action)=>{
+            try{
+                const result=await action();
+                log(label+(result?.ok?' 완료':' 실패'),result);
+                render();
+            }catch(error){recordError(label,error);}
+        };
+
+        button(macroActionRow,'동작 추가',()=>{
+            if(!macroAction.value)return;
+            const selected=JSON.parse(macroAction.value);
+            macroDraft.push({type:'action',kind:selected.kind,name:selected.name});
+            renderMacroDraft();
+        });
+        button(macroWaitRow,'대기 추가',()=>{
+            const seconds=Number(macroWait.value);
+            if(!Number.isFinite(seconds)||seconds<=0)return;
+            macroDraft.push({type:'wait',ms:Math.round(seconds*1000)});
+            renderMacroDraft();
+        });
+        button(macroControls,'저장',()=>run('매크로 저장',()=>{
+            const name=macroName.value.trim();
+            const result=editingMacroName ? api.renameGameMacro(editingMacroName,name,macroDraft) : api.saveGameMacro(name,macroDraft);
+            if(result.ok){editingMacroName=name;macroDraft=cloneMacroSteps(result.macro.steps);}
+            return result;
+        }));
+        button(macroControls,'새로 만들기',()=>{resetMacroEditor();renderMacroUI();});
+        button(macroControls,'■ 중지',()=>{const result=api.stopGameMacro();log('매크로 중지',result);renderMacroStatus();});
+
+        const macroUiTimer=setInterval(renderMacroStatus,250);
+        uiEvents.signal.addEventListener('abort',()=>clearInterval(macroUiTimer),{once:true});
+
+        const render=()=>{
+            list.replaceChildren();
+            const all=hiddenOnly?[...hiddenGameButtons.values()]:closeOnly?listWindowCloseButtons():listGameButtons();
+            const query=filter.value.toLowerCase();
+            const rows=all.filter(row=>(hiddenOnly || !hiddenGameButtons.has(gameControlKey(row))) && JSON.stringify(row).toLowerCase().includes(query));
+            status.textContent=rows.length+'개 · 실행은 이벤트 호출 결과이며 창 열림 보장은 아닙니다.';
+            for(const row of rows){
+                const item=document.createElement('div');item.style.cssText='border-top:1px solid #555;padding:5px 0;overflow-wrap:anywhere';list.appendChild(item);
+                const label=document.createElement('div');label.textContent=(row.text||row.name)+(row.inLastOpenedWindow?' · 방금 연 창':'');item.appendChild(label);
+                const detail=document.createElement('small');detail.textContent=row.path+' · '+(row.method || '추가 조사 필요')+' · '+(row.listeners || []).join(', ')+' · '+row.events.map(e=>e.component+'.'+e.handler).join(', ');item.appendChild(detail);
+                const actions=document.createElement('div');item.appendChild(actions);
+                if(hiddenOnly){button(actions,'목록 복구',()=>run('목록 복구',()=>restoreGameButton(gameControlKey(row))));continue;}
+                button(actions,'목록에서 제거',()=>run('목록 제거',()=>api.hideGameButton(row.id)));
+                const execute=button(actions,closeOnly?'닫기 실행':'실행',()=>run(row.name,()=>api.pressGameButton(row.id)));
+                execute.disabled=!row.enabled||!row.supported;
+                if(!row.supported){const note=document.createElement('div');note.textContent='실행 연결 미확인 · 버튼 조사 출력 필요';item.appendChild(note);}
+                const name=document.createElement('input');name.placeholder='저장 이름 (예: 검색 열기)';name.style.cssText='width:155px;color:#111';actions.appendChild(name);
+                button(actions,'동작 저장',()=>run('동작 저장',()=>api.bindGameAction(name.value.trim(),row.id)));
+            }
+            savedList.replaceChildren();
+            const savedTitle=document.createElement('strong');savedTitle.textContent='저장한 동작';savedList.appendChild(savedTitle);
+            for(const [name] of gameActionBindings) {
+                const row=document.createElement('div');savedList.appendChild(row);
+                button(row,name,()=>run(name,()=>api.runGameAction(name)));
+                button(row,'삭제',()=>run('동작 삭제',()=>api.removeGameAction(name)));
+            }
+            renderMacroActions();
+            renderSavedMacros();
+            renderMacroStatus();
+        };
+        button(toolbar,'버튼 새로 읽기',()=>{closeOnly=false;hiddenOnly=false;detailPanel.open=true;render();});
+        button(toolbar,'닫기 후보',()=>{closeOnly=true;hiddenOnly=false;render();});
+        button(toolbar,'방금 연 창 닫기',()=>run('창 닫기',()=>api.closeLastWindow()));
+        button(toolbar,'버튼 조사 출력',()=>run('버튼 조사',()=>({ok:true,buttons:listGameButtons()})));
+        button(toolbar,'제거한 목록 / 복구',()=>{hiddenOnly=true;render();});
+        const management=document.createElement('details');body.appendChild(management);
+        const title=document.createElement('summary');title.textContent='기존 패널 버튼 관리';management.appendChild(title);
+        for(const {node,label} of existingButtons){
+            const line=document.createElement('label');line.style.display='block';management.appendChild(line);
+            const check=document.createElement('input');check.type='checkbox';check.checked=!hiddenPanelButtons.has(label);line.appendChild(check);
+            line.appendChild(document.createTextNode(label));
+            check.addEventListener('change',()=>{if(check.checked)hiddenPanelButtons.delete(label);else hiddenPanelButtons.add(label);saveGameControls();applyPanelVisibility();},{signal:uiEvents.signal});
+        }
+        filter.addEventListener('input',render,{signal:uiEvents.signal});
+        searchPanel.appendChild(section);
+
+        root.querySelector('.body').style.cssText+=';max-height:75vh;overflow:auto';
+        // Lazy scan keeps UI installation independent of scene errors.
+        status.textContent='버튼 새로 읽기를 누르세요.';
+        renderMacroUI();
+    }
+
+
+    async function runProfileTask(task) {
+        if (disposed || moving || profileBusy) return { ok: false, reason: '종료되었거나 작업 진행 중' };
+        profileBusy = true;
+        const previousDisabled = moveButtons.map(button => button.disabled);
+        moveButtons.forEach(button => { button.disabled = true; });
+        try { return await task(); }
+        catch (error) { return recordError('프로필', error); }
+        finally {
+            profileBusy = false;
+            moveButtons.forEach((button, i) => { button.disabled = previousDisabled[i]; });
+        }
+    }
+
+    const api = {
+        integrationVersion: '0.4.0-profile.12-macro.1',
+        hideGameButton, restoreGameButton, removeGameAction,
+        getHiddenGameButtons: () => Object.fromEntries(hiddenGameButtons),
+        listGameButtons,
+        listWindowCloseButtons,
+        pressGameButton: (id, options) => runProfileTask(() => pressGameButton(id, options)),
+        closeLastWindow: options => runProfileTask(() => closeLastWindow(options)),
+        bindGameAction,
+        runGameAction: (name, options) => runProfileTask(() => runGameAction(name, options)),
+        getGameActions: () => Object.fromEntries(gameActionBindings),
+        saveGameMacro,
+        renameGameMacro,
+        removeGameMacro,
+        runGameMacro: (name, options) => runProfileTask(() => runGameMacro(name, options)),
+        stopGameMacro,
+        getGameMacros: () => Object.fromEntries(gameMacros),
+        getGameMacroStatus,
+        closeOwnProfile: options => runProfileTask(() => closeOwnProfile(options)),
+        selectProfileTab: name => runProfileTask(() => selectProfileTab(name)),
+        collectProfileTab: (name, options) => runProfileTask(() => collectProfileTab(name, options)),
+        collectCurrentProfileTab: options => runProfileTask(() => collectProfileTab(null, options)),
+        readCurrentProfileItems,
+        inspectProfileClose: () => ({panel:getProfileDiagnostics(), candidates:profileCloseCandidates().map(c => ({path:nodePath(c.node),component:c.event.component,handler:c.event.handler})), buttons:listGameButtons(), closeButtons:listWindowCloseButtons()}),
+        getProfileDiagnostics,
+        inspectProfileItems: profileModule.inspectCurrentProfileItems,
+        findOwnProfileButton,
+        findProfileRoot,
+        openOwnProfile: options => runProfileTask(() => openOwnProfile(options)),
+        collectProfileData: options => runProfileTask(() => profileModule.collectAll(options)),
+        collectProfileToggles: profileModule.collectToggles,
+        getOwnedProfileItems: profileModule.getOwned,
+        getUnownedProfileItems: profileModule.getUnowned,
+        getUnknownProfileItems: profileModule.getUnknown,
+        getProfileData: () => window.TOPWAR_PROFILE_DATA,
+        getErrors: () => runtimeErrors.slice(),
+
+
+        version:
+            VERSION,
+
+        STATE,
+
+        PATH,
+
+
+        detect,
+
+        diagnose,
+
+        getSignals,
+
+        goto,
+
+        waitForState,
+
+
+        baseToWorld,
+
+        worldToBase,
+
+
+        worldToWorldMinimap,
+
+        worldMinimapToWorld,
+
+        worldMinimapToWorldMap,
+
+        worldToWorldMap,
+
+        worldMapToWorldMinimap,
+
+        worldMapToWorld,
+
+
+        findDirectPath,
+
+        findNodeByName,
+
+        findComponent,
+
+        triggerButton,
+
+        findBackCandidates,
+
+
+        ui: {
+
+            root,
+
+            refresh,
+
+            move,
+
+            log
+        },
+
+
+        destroy
+    };
+
+
+
+    for (const [label, action] of [
+        ['프로필', () => api.openOwnProfile()],
+        ['프로필 수집', () => api.collectProfileData()],
+        ['프로필 닫기', () => api.closeOwnProfile()]
+    ]) {
+        const button = document.createElement('button');
+        button.className = 'tool';
+        button.textContent = label;
+        button.addEventListener('click', async () => {
+            const result = await action();
+            log(label + (result.ok ? ' 완료' : ' 실패'), result);
+        });
+        root.querySelector('.signal').parentElement.appendChild(button);
+    }
+
+    const controls = document.createElement('details');
+    controls.innerHTML = '<summary style="cursor:pointer;padding:8px">개별 작업</summary>';
+    const controlGrid = document.createElement('div');
+    controlGrid.style.cssText = 'display:grid;grid-template-columns:1fr 1fr;gap:5px;padding:8px;max-height:45vh;overflow:auto';
+    controls.appendChild(controlGrid);
+    root.querySelector('.body').appendChild(controls);
+    const actions = [
+        ['기지 → 월드', () => runProfileTask(() => api.baseToWorld())],
+        ['월드 → 기지', () => runProfileTask(() => api.worldToBase())],
+        ['월드 → 미니맵', () => runProfileTask(() => api.worldToWorldMinimap())],
+        ['미니맵 → 월드', () => runProfileTask(() => api.worldMinimapToWorld())],
+        ['미니맵 → 월드맵', () => runProfileTask(() => api.worldMinimapToWorldMap())],
+        ['월드맵 → 미니맵', () => runProfileTask(() => api.worldMapToWorldMinimap())],
+        ...Object.entries({"toggle1":"기지 외관","toggle3":"대열 외관","toggle4":"기지 효과","toggle5":"이동 효과","toggle6":"행군 참여","toggle7":"수호 효과","toggle8":"영광의 장식","toggle10":"기지 오라"}).map(([name,label]) => [label + ' 선택', () => api.selectProfileTab(name)]),
+        ['현재 목록 읽기', () => api.readCurrentProfileItems()],
+        ['현재 탭 수집', () => api.collectCurrentProfileTab()],
+        ['아이템 조사', () => ({ok:true,data:api.inspectProfileItems()})],
+        ['닫기 조사', () => ({ok:true,data:api.inspectProfileClose()})],
+        ['보유 결과', () => ({ok:true,items:api.getOwnedProfileItems()})],
+        ['미보유 결과', () => ({ok:true,items:api.getUnownedProfileItems()})],
+        ['불확실 결과', () => ({ok:true,items:api.getUnknownProfileItems()})]
+    ];
+    for (const [label, action] of actions) {
+        const button = document.createElement('button');
+        button.className = 'tool'; button.textContent = label;
+        button.addEventListener('click', async () => {
+            try { const result = await action(); log(label + (result.ok ? ' 완료' : ' 실패'), result); }
+            catch (error) { recordError(label,error); }
+        }, {signal:uiEvents.signal});
+        controlGrid.appendChild(button);
+    }
+    // Integrated build: standalone navigation control grid is intentionally not mounted.
+    // Commit replacement after the original UI and integrated API are ready.
+    try { previousNav?.destroy?.(); } catch (error) { recordError('이전 UI 정리', error); }
+    document.querySelectorAll('#' + UI_ID).forEach(node => { if (node !== root) node.remove(); });
+    document.querySelectorAll('#' + STYLE_ID).forEach(node => { if (node !== style) node.remove(); });
+    // Integrated build: keep navigation UI hidden; automation uses the API internally.
+    try { root.style.display = 'none'; } catch {}
+    window.TOPWAR_NAV = api;
+    installation.committed = true;
+
+
+    /* ============================================================
+     * 시작
+     * ============================================================ */
+
+    const initial =
+        refresh();
+
+
+    log(
+        'Navigator 설치 완료',
+        {
+
+            version:
+                VERSION,
+
+            state:
+                initial.state,
+
+            reason:
+                initial.reason,
+
+            watchInterval:
+                WATCH_INTERVAL
+        }
+    );
+
+
+    startWatcher();
+
+
+    console.log(
+
+        `%c[TOPWAR_NAV ${VERSION}] installed`,
+
+        'color:#00e676;font-weight:bold'
+    );
+
+    } catch (error) {
+        if (!installation.committed) {
+            installation.root?.remove();
+            installation.style?.remove();
+            installation.events?.abort();
+        }
+        console.error('[TOPWAR_NAV] 초기화 실패 (기존 인스턴스 보존)', error);
+    }
+})();
+
+
+
+/* ============================================================================
+ * TopWar navigation/recovery bridge - V2.14.9.39
+ * Persistent recovery payload is intentionally minimal:
+ *   { mode, serverId, startedAt }
+ * Ephemeral reload guards live only in sessionStorage.
+ * ========================================================================== */
+(function installTopwarRecoveryBridge() {
+  "use strict";
+
+  if (window.TOPWAR_RECOVERY?.version === "2.14.9.39") return;
+
+  const VERSION = "2.14.9.39";
+  const RECOVERY_KEY = "TOPWAR_ACTIVE_RECOVERY_V1";
+  const PENDING_KEY = "TOPWAR_RECOVERY_RELOAD_PENDING_V1";
+  const ATTEMPT_KEY = "TOPWAR_RECOVERY_ATTEMPT_V1";
+  const ARMED_KEY = "TOPWAR_RECOVERY_RESUME_ARMED_V1";
+  const MAX_AGE_MS = 60 * 60 * 1000;
+  const MAX_RELOAD_ATTEMPTS = 3;
+  const MODES = new Set(["top100", "reward", "map", "mapReward"]);
+
+  let reloadScheduled = false;
+  let bootstrapRunning = false;
+  let bootstrapDone = false;
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, Number(ms) || 0));
+
+  function normalizeMode(mode) {
+    const value = String(mode || "").trim();
+    return MODES.has(value) ? value : null;
+  }
+
+  function read() {
+    try {
+      const row = JSON.parse(localStorage.getItem(RECOVERY_KEY) || "null");
+      const mode = normalizeMode(row?.mode);
+      const startedAt = Number(row?.startedAt);
+      const serverId = Number(row?.serverId);
+      if (!mode || !Number.isFinite(startedAt) || startedAt <= 0) return null;
+      return {
+        mode,
+        serverId: Number.isFinite(serverId) && serverId > 0 ? serverId : null,
+        startedAt
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function write(row) {
+    const mode = normalizeMode(row?.mode);
+    const startedAt = Number(row?.startedAt);
+    const serverId = Number(row?.serverId);
+    if (!mode || !Number.isFinite(startedAt) || startedAt <= 0) return null;
+    const normalized = {
+      mode,
+      serverId: Number.isFinite(serverId) && serverId > 0 ? serverId : null,
+      startedAt
+    };
+    localStorage.setItem(RECOVERY_KEY, JSON.stringify(normalized));
+    return normalized;
+  }
+
+  function ageMs(row = read()) {
+    return row ? Math.max(0, Date.now() - Number(row.startedAt || 0)) : Infinity;
+  }
+
+  function isWithinResumeWindow(row = read()) {
+    return !!row && ageMs(row) <= MAX_AGE_MS;
+  }
+
+  function begin(mode, options = {}) {
+    mode = normalizeMode(mode);
+    if (!mode) throw new Error(`알 수 없는 복구 모드: ${mode}`);
+
+    // 이전 버전의 상세 진행상태는 복구에 사용하지 않는다.
+    // V2.14.9.39부터 영구 복구정보는 RECOVERY_KEY의 mode/serverId/startedAt 세 필드뿐이다.
+    try { localStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
+    try { sessionStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
+    try { localStorage.removeItem("REALPOWER_STANDALONE_SERVER_QUEUE"); } catch {}
+
+    const armed = (() => {
+      try { return sessionStorage.getItem(ARMED_KEY) === mode; }
+      catch { return false; }
+    })();
+    const existing = read();
+    const resume = armed && existing?.mode === mode && isWithinResumeWindow(existing);
+
+    const row = write({
+      mode,
+      serverId: resume ? existing.serverId : null,
+      startedAt: resume ? existing.startedAt : Date.now()
+    });
+
+    console.log("[TopWar Recovery] 작업 시작 마커", {
+      ...row,
+      resume,
+      ageMinutes: row ? Math.round(ageMs(row) / 60000) : null
+    });
+    return row;
+  }
+
+  function updateServer(serverId, expectedMode = null) {
+    const row = read();
+    const id = Number(serverId);
+    if (!row || !Number.isFinite(id) || id <= 0) return false;
+    if (expectedMode && row.mode !== normalizeMode(expectedMode)) return false;
+    write({ ...row, serverId: id });
+    return true;
+  }
+
+  function clear(reason = "manual-or-complete") {
+    const previous = read();
+    try { localStorage.removeItem(RECOVERY_KEY); } catch {}
+    try { sessionStorage.removeItem(ARMED_KEY); } catch {}
+    try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+    console.log("[TopWar Recovery] 복구 마커 제거", { reason, previous });
+    return previous;
+  }
+
+  function hasActiveAutomation() {
+    const state = window.TOPWAR?.state || {};
+    const rp = window.REALPOWER?.getState?.() || {};
+    return !!(
+      state.watch133?.running ||
+      state.fullScan?.running ||
+      state.ui?.serverSurvey?.running ||
+      state.ui?.serverSurveyBatch?.running ||
+      state.cityRewardFinder?.running ||
+      rp.running === true
+    );
+  }
+
+  async function waitForNavigation(timeout = 30000) {
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const nav = window.TOPWAR_NAV;
+      if (nav?.detect && nav?.goto) return nav;
+      await sleep(100);
+    }
+    throw new Error("TOPWAR_NAV 준비 시간 초과");
+  }
+
+  async function ensureNavigation(target, options = {}) {
+    const nav = await waitForNavigation(options.timeout ?? 30000);
+    const wanted = String(target || "").toUpperCase();
+    let current = nav.detect?.();
+
+    if (wanted !== "WORLD_MINIMAP") {
+      const result = await nav.goto(wanted, options);
+      if (!result?.ok) throw new Error(`화면 이동 실패: ${current?.state || "UNKNOWN"} → ${wanted} (${result?.reason || result?.stage || "unknown"})`);
+      return result;
+    }
+
+    if (current?.state === "WORLD_MINIMAP") {
+      return { ok: true, alreadyThere: true, state: "WORLD_MINIMAP" };
+    }
+
+    if (current?.state === "BASE") {
+      const step = await nav.baseToWorld(options);
+      if (!step?.ok) throw new Error(`BASE → WORLD 이동 실패: ${step?.reason || "unknown"}`);
+      current = nav.detect?.();
+    }
+
+    if (current?.state === "WORLD_MAP") {
+      const step = await nav.worldMapToWorldMinimap(options);
+      if (!step?.ok) throw new Error(`WORLD_MAP → WORLD_MINIMAP 이동 실패: ${step?.reason || "unknown"}`);
+      return step;
+    }
+
+    if (current?.state === "WORLD") {
+      const step = await nav.worldToWorldMinimap(options);
+      if (!step?.ok) throw new Error(`WORLD → WORLD_MINIMAP 이동 실패: ${step?.reason || "unknown"}`);
+      return step;
+    }
+
+    current = nav.detect?.();
+    if (current?.state === "WORLD_MINIMAP") return { ok: true, state: "WORLD_MINIMAP" };
+    throw new Error(`WORLD_MINIMAP으로 이동할 수 없는 현재 상태: ${current?.state || "UNKNOWN"}`);
+  }
+
+  function consumeResumeServerList(mode, serverIds) {
+    mode = normalizeMode(mode);
+    const ids = Array.from(new Set((serverIds || []).map(Number).filter(id => Number.isFinite(id) && id > 0)));
+    if (!mode || !ids.length) return ids;
+
+    let armed = false;
+    try { armed = sessionStorage.getItem(ARMED_KEY) === mode; } catch {}
+    if (!armed) return ids;
+
+    // 한 번의 재시작에서 첫 사이클에만 적용한다.
+    try { sessionStorage.removeItem(ARMED_KEY); } catch {}
+
+    const row = read();
+    if (!row || row.mode !== mode || !isWithinResumeWindow(row) || !row.serverId) {
+      console.log("[TopWar Recovery] 이어서 시작할 서버 없음 - 처음부터", { mode, row });
+      return ids;
+    }
+
+    const index = ids.findIndex(id => id === Number(row.serverId));
+    if (index < 0) {
+      console.warn("[TopWar Recovery] 저장 서버가 최신 목록에 없어 처음부터 시작", { mode, serverId: row.serverId });
+      return ids;
+    }
+
+    const resumed = ids.slice(index);
+    console.warn("[TopWar Recovery] 마지막 조사 서버부터 이어서 시작", {
+      mode,
+      serverId: row.serverId,
+      originalCount: ids.length,
+      resumedCount: resumed.length,
+      ageMinutes: Math.round(ageMs(row) / 60000)
+    });
+    return resumed;
+  }
+
+  function stopForReload() {
+    try { window.TOPWAR?.stopWatch133?.(); } catch {}
+    try { window.TOPWAR?.requestStopServerSurvey?.(); } catch {}
+    try { window.REALPOWER?.stopInfiniteLoop?.(); } catch {}
+  }
+
+  function requestReload(reason, info = null, options = {}) {
+    if (reloadScheduled) return true;
+    const marker = read();
+    if (!marker) return false;
+    if (options.force !== true && !hasActiveAutomation()) return false;
+
+    let attempts = 0;
+    try { attempts = Number(sessionStorage.getItem(ATTEMPT_KEY) || 0) || 0; } catch {}
+    if (attempts >= MAX_RELOAD_ATTEMPTS) {
+      console.error("[TopWar Recovery] 연속 자동 새로고침 한도 초과 - 수동 확인 필요", {
+        attempts,
+        reason,
+        marker,
+        info
+      });
+      try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+      return false;
+    }
+
+    reloadScheduled = true;
+    try {
+      sessionStorage.setItem(ATTEMPT_KEY, String(attempts + 1));
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify({ reason, at: Date.now() }));
+    } catch {}
+
+    console.error("[TopWar Recovery] 자동 새로고침 예약", {
+      reason,
+      attempts: attempts + 1,
+      marker,
+      info
+    });
+
+    stopForReload();
+    setTimeout(() => location.reload(), Number(options.delayMs ?? 350));
+    return true;
+  }
+
+  function modeButton(mode) {
+    const selectors = {
+      top100: "#tw26-realpower",
+      reward: "#tw26-thief",
+      map: "#tw26-survey",
+      mapReward: "#tw26-survey-rewards"
+    };
+    return document.querySelector(selectors[mode] || "");
+  }
+
+  async function bootstrapRecovery() {
+    if (bootstrapDone || bootstrapRunning) return;
+
+    let pending = null;
+    try { pending = JSON.parse(sessionStorage.getItem(PENDING_KEY) || "null"); } catch {}
+    if (!pending) return;
+
+    const original = read();
+    if (!original) {
+      try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+      return;
+    }
+
+    bootstrapRunning = true;
+    try {
+      const deadline = Date.now() + 60000;
+      while (Date.now() < deadline) {
+        const topwarReady = !!(window.TOPWAR?.state && window.TOPWAR_NAV?.detect);
+        const socketReady = (window.TOPWAR?.getOpenTopwarSockets?.()?.length ?? 0) > 0;
+        const rpReady = original.mode !== "top100" || !!window.REALPOWER?.startAllServersInfiniteLoop;
+        const button = modeButton(original.mode);
+        if (topwarReady && socketReady && rpReady && button && !button.disabled) break;
+        await sleep(250);
+      }
+
+      const button = modeButton(original.mode);
+      if (!button) throw new Error(`복구 실행 버튼을 찾지 못했습니다: ${original.mode}`);
+      if ((window.TOPWAR?.getOpenTopwarSockets?.()?.length ?? 0) <= 0) throw new Error("복구 전 WebSocket OPEN 확인 실패");
+
+      let marker = read();
+      const expired = !isWithinResumeWindow(marker);
+      if (expired) {
+        marker = write({ mode: marker.mode, serverId: null, startedAt: Date.now() });
+        console.warn("[TopWar Recovery] 기존 조사 시작 후 1시간 초과 - 처음부터 재시작", marker);
+      } else {
+        console.warn("[TopWar Recovery] 1시간 이내 작업 복구", {
+          ...marker,
+          ageMinutes: Math.round(ageMs(marker) / 60000)
+        });
+      }
+
+      try { sessionStorage.setItem(ARMED_KEY, marker.mode); } catch {}
+      try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+      bootstrapDone = true;
+      button.click();
+
+      // 30초 동안 재차 reload되지 않고 실제 자동화가 살아 있으면 연속 실패 카운터를 초기화한다.
+      setTimeout(() => {
+        if (hasActiveAutomation()) {
+          try { sessionStorage.removeItem(ATTEMPT_KEY); } catch {}
+        }
+      }, 30000);
+    } catch (error) {
+      console.error("[TopWar Recovery] 자동 복구 시작 실패", error);
+      bootstrapDone = true;
+      try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+    } finally {
+      bootstrapRunning = false;
+    }
+  }
+
+  const api = {
+    version: VERSION,
+    key: RECOVERY_KEY,
+    maxAgeMs: MAX_AGE_MS,
+    read,
+    begin,
+    updateServer,
+    clear,
+    ageMs,
+    isWithinResumeWindow,
+    hasActiveAutomation,
+    ensureNavigation,
+    consumeResumeServerList,
+    requestReload,
+    bootstrapRecovery,
+    status() {
+      let attempts = 0;
+      let pending = null;
+      let armed = null;
+      try { attempts = Number(sessionStorage.getItem(ATTEMPT_KEY) || 0) || 0; } catch {}
+      try { pending = JSON.parse(sessionStorage.getItem(PENDING_KEY) || "null"); } catch {}
+      try { armed = sessionStorage.getItem(ARMED_KEY); } catch {}
+      return { marker: read(), attempts, pending, armed, active: hasActiveAutomation() };
+    }
+  };
+
+  window.TOPWAR_RECOVERY = api;
+  const timer = setInterval(() => {
+    void bootstrapRecovery();
+    if (bootstrapDone) clearInterval(timer);
+  }, 500);
+
+  console.log("%c[TopWar Recovery V2.14.9.39] installed", "color:#00e676;font-weight:bold");
+})();
+
 
 /* ============================================================================
  * TopWar DataHub client
@@ -564,6 +8140,7 @@
       const keep = new Set([
         TOPWAR_GITHUB_TOKEN_STORAGE_KEY,
         "TOPWAR_DATAHUB_SETTINGS_V1",
+        "TOPWAR_ACTIVE_RECOVERY_V1",
         TOPWAR_STORAGE_CLEANUP_MARKER
       ]);
 
@@ -701,11 +8278,11 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.14.9.37";
+  const VERSION = "2.14.9.39";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
-    console.warn("[TopWar Unified Automation V2.14.9.37] already installed");
+    console.warn("[TopWar Unified Automation V2.14.9.39] already installed");
     return;
   }
   window[INSTALL_KEY] = true;
@@ -1921,6 +9498,7 @@
   function stopAllAutomationForConnectionFailure(reason, info = null) {
     const guard = state.connectionGuard;
     if (!guard?.enabled || guard.stopping) return false;
+    const recoveryWasActive = window.TOPWAR_RECOVERY?.hasActiveAutomation?.() === true;
     guard.stopping = true;
     guard.disconnected = true;
     guard.reason = reason || "server connection failed";
@@ -1945,7 +9523,11 @@
     state.ui.serverSurvey.current = { phase: "connectionFailure", reason: guard.reason };
     state.ui.serverSurveyBatch.current = { phase: "connectionFailure", reason: guard.reason };
 
+    try { window.REALPOWER?.stopInfiniteLoop?.(); } catch {}
     console.error("[TopWar] 서버 연결 실패 감지 - 모든 자동화 중지", { reason: guard.reason, info, detectedAt: guard.detectedAt });
+    if (recoveryWasActive) {
+      window.TOPWAR_RECOVERY?.requestReload?.("websocket-disconnected", { reason: guard.reason, info }, { force: true });
+    }
     guard.stopping = false;
     return true;
   }
@@ -2048,7 +9630,7 @@
       state.connectionGuard.lastCloseReason = event.reason || null;
       setTimeout(() => {
         if (state.connectionGuard.enabled && getOpenTopwarSockets().length === 0 &&
-            (state.watch133?.running || state.fullScan?.running || state.ui?.serverSurvey?.running || state.ui?.serverSurveyBatch?.running)) {
+            (state.watch133?.running || state.fullScan?.running || state.ui?.serverSurvey?.running || state.ui?.serverSurveyBatch?.running || window.REALPOWER?.getState?.()?.running === true || window.TOPWAR_RECOVERY?.hasActiveAutomation?.())) {
           stopAllAutomationForConnectionFailure("all game sockets closed", { url: ws.url, code: event.code, reason: event.reason, wasClean: event.wasClean });
         }
       }, 1200);
@@ -2058,7 +9640,7 @@
       state.connectionGuard.lastSocketErrorAt = now();
       setTimeout(() => {
         if (state.connectionGuard.enabled && getOpenTopwarSockets().length === 0 &&
-            (state.watch133?.running || state.fullScan?.running || state.ui?.serverSurvey?.running || state.ui?.serverSurveyBatch?.running)) {
+            (state.watch133?.running || state.fullScan?.running || state.ui?.serverSurvey?.running || state.ui?.serverSurveyBatch?.running || window.REALPOWER?.getState?.()?.running === true || window.TOPWAR_RECOVERY?.hasActiveAutomation?.())) {
           stopAllAutomationForConnectionFailure("game socket error", { url: ws.url, readyState: ws.readyState });
         }
       }, 1200);
@@ -2717,6 +10299,11 @@
     }
 
     monitor.overThreshold = isOver;
+
+    const recoveryMemoryLimitReached = Number(snapshot.ratio || 0) >= 0.9;
+    if (recoveryMemoryLimitReached && window.TOPWAR_RECOVERY?.hasActiveAutomation?.()) {
+      window.TOPWAR_RECOVERY?.requestReload?.("memory-threshold-90", snapshot);
+    }
     return snapshot;
   }
 
@@ -4231,7 +11818,7 @@
 
   function help() {
     console.log(`
-[TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle]
+[TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix]
 
 133 감시 + 자동 공유:
 await TOPWAR.watchPointTypeAndNotify({
@@ -4456,12 +12043,12 @@ TOPWAR.clearThiefQueue()
     });
   }, 0);
 
-  console.log("%c[TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle] core installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix] core installed", "color:#00e676;font-weight:bold");
   console.log("[TopWar] 사용법: TOPWAR.help()");
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.37 - Integrated Survey + Finder UI
+ * TopWar Unified Automation V2.14.9.39 - Integrated Survey + Finder UI
  * - V2.3 core scanner 위에 붙는 단일 통합 모듈
  * - 기존 후속 패치들을 이 모듈 하나로 통합
  * - 서버번호 입력 UI
@@ -4478,13 +12065,13 @@ TOPWAR.clearThiefQueue()
   "use strict";
 
   if (!window.TOPWAR) {
-    console.error("[TopWar Unified V2.14.9.37] TOPWAR 객체가 없습니다.");
+    console.error("[TopWar Unified V2.14.9.39] TOPWAR 객체가 없습니다.");
     return;
   }
 
   const TOPWAR = window.TOPWAR;
   const state = TOPWAR.state;
-  const VERSION = "2.14.9.37";
+  const VERSION = "2.14.9.39";
   const PANEL_ID = "topwar-unified-control-panel-v26";
   const LEGACY_PANEL_IDS = [
     "topwar-thief-watch-panel",
@@ -5074,6 +12661,7 @@ TOPWAR.clearThiefQueue()
   }
 
   async function surveySeasonServerList(options = {}) {
+    await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP", { timeout: options.navigationTimeout ?? 30000 });
     openTransferSeasonSurveyPanel();
     let panel;
     try {
@@ -9366,6 +16954,10 @@ TOPWAR.clearThiefQueue()
 
     ensureState();
 
+    const recoveryMode = options.includeRewards === true ? "mapReward" : "map";
+    const allServerIds = serverIds.slice();
+    serverIds = window.TOPWAR_RECOVERY?.consumeResumeServerList?.(recoveryMode, serverIds) ?? serverIds;
+
     if (state.ui.serverSurvey.running || state.ui.serverSurveyBatch.running) {
       return {
         ok: false,
@@ -9449,6 +17041,7 @@ TOPWAR.clearThiefQueue()
           }
 
           const serverId = serverIds[index];
+          window.TOPWAR_RECOVERY?.updateServer?.(serverId, recoveryMode);
 
           state.ui.serverSurveyBatch.current = {
             phase: "serverSurvey",
@@ -9543,6 +17136,8 @@ TOPWAR.clearThiefQueue()
         if (!repeatUntilStopped) {
           break;
         }
+
+        if (cycle === 1) serverIds = allServerIds.slice();
 
         state.ui.serverSurveyBatch.current = {
           phase: "repeatDelay",
@@ -9768,7 +17363,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR Unified V2.14.9.37</span>
+        <span>TOPWAR Unified V2.14.9.39</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -10125,8 +17720,17 @@ TOPWAR.clearThiefQueue()
 
     function shuffleServerIds(serverIds) {
       const ids = parseServerIdsStrict(serverIds).slice();
+      const recoverySeed = Number(window.TOPWAR_RECOVERY?.read?.()?.startedAt);
+      let seededState = Number.isFinite(recoverySeed) ? (recoverySeed >>> 0) : null;
+      const random = seededState == null ? Math.random : () => {
+        seededState = (seededState + 0x6D2B79F5) >>> 0;
+        let t = seededState;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
       for (let i = ids.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
+        const j = Math.floor(random() * (i + 1));
         [ids[i], ids[j]] = [ids[j], ids[i]];
       }
       return ids;
@@ -10375,6 +17979,7 @@ TOPWAR.clearThiefQueue()
             if (!state.watch133.running) break;
 
             const serverId = ids[index];
+            window.TOPWAR_RECOVERY?.updateServer?.(serverId, "reward");
             state.watch133.multiServer = {
               ...state.watch133.multiServer,
               running: true,
@@ -11085,7 +18690,8 @@ TOPWAR.clearThiefQueue()
 
     async function runUnifiedFinderForServers(serverIds, overrides = {}) {
       const requestedIds = parseServerIdsStrict(serverIds);
-      const ids = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
+      const allIds = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
+      let ids = window.TOPWAR_RECOVERY?.consumeResumeServerList?.("reward", allIds) ?? allIds;
       if (!ids.length) return { ok: false, reason: "serverIds is required" };
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
         return { ok: false, reason: "server survey is running" };
@@ -11143,6 +18749,7 @@ TOPWAR.clearThiefQueue()
             if (!state.watch133.running || state.connectionGuard?.disconnected) break;
 
             const serverId = ids[index];
+            window.TOPWAR_RECOVERY?.updateServer?.(serverId, "reward");
             state.watch133.multiServer = {
               ...state.watch133.multiServer,
               running: true,
@@ -11193,6 +18800,7 @@ TOPWAR.clearThiefQueue()
           }
 
           if (!state.watch133.running || state.connectionGuard?.disconnected) break;
+          if (cycle === 1 && ids !== allIds) ids = allIds.slice();
           await sleep(Number(overrides.betweenCycleDelay ?? 1000));
         }
       } catch (error) {
@@ -11402,6 +19010,7 @@ TOPWAR.clearThiefQueue()
 
       if (state.watch133?.running) {
         TOPWAR.stopWatch133?.();
+        window.TOPWAR_RECOVERY?.clear?.("manual-stop-reward");
       } else {
         if (state.connectionGuard?.disconnected) { alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요."); return; }
         if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
@@ -11413,9 +19022,19 @@ TOPWAR.clearThiefQueue()
           return;
         }
 
+        window.TOPWAR_RECOVERY?.begin?.("reward");
+        try {
+          await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
+        } catch (error) {
+          window.TOPWAR_RECOVERY?.clear?.("reward-navigation-failed");
+          alert(`보상탐색 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
+          return;
+        }
+
         const serverIds = await resolveMapSurveyServerIds();
 
         if (!serverIds.length) {
+          window.TOPWAR_RECOVERY?.clear?.("reward-no-server");
           alert(explicitInputServerIds().length
             ? "입력한 서버 중 현재 지도 대상 및 담당 필터에 해당하는 서버가 없습니다. 역할을 전체 (필터 없음)로 선택하거나 서버 목록을 확인하세요."
             : lastServerListError
@@ -11430,17 +19049,18 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar Unified V2.14.9.37 UI] 도둑+도시보상 통합찾기 종료:", result);
+            console.log("[TopWar Unified V2.14.9.39 UI] 도둑+도시보상 통합찾기 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar Unified V2.14.9.37 UI] 통합찾기 실패 원인:", result.reason);
+              console.error("[TopWar Unified V2.14.9.39 UI] 통합찾기 실패 원인:", result.reason);
               alert(`도둑+도시보상 실행 실패\n\n${result.reason}`);
             }
             render();
           })
           .catch(error => {
             state.watch133.running = false;
+            if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar Unified V2.14.9.37 UI] 도둑+도시보상 통합찾기 오류:", error);
+            console.error("[TopWar Unified V2.14.9.39 UI] 도둑+도시보상 통합찾기 오류:", error);
             alert(`도둑+도시보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
@@ -11455,6 +19075,7 @@ ${lastServerListError}`
 
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
         requestStopServerSurvey();
+        window.TOPWAR_RECOVERY?.clear?.("manual-stop-map");
       } else {
         if (state.connectionGuard?.disconnected) { alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요."); return; }
         if (state.watch133?.running) {
@@ -11466,9 +19087,22 @@ ${lastServerListError}`
           return;
         }
 
+        const includeRewards = surveyButton.dataset.includeRewards === "true";
+        delete surveyButton.dataset.includeRewards;
+        const recoveryMode = includeRewards ? "mapReward" : "map";
+        window.TOPWAR_RECOVERY?.begin?.(recoveryMode);
+        try {
+          await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
+        } catch (error) {
+          window.TOPWAR_RECOVERY?.clear?.("map-navigation-failed");
+          alert(`지도조사 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
+          return;
+        }
+
         const serverIds = await resolveMapSurveyServerIds();
 
         if (!serverIds.length) {
+          window.TOPWAR_RECOVERY?.clear?.("map-no-server");
           alert(explicitInputServerIds().length
             ? "입력한 서버 중 현재 지도 대상 및 담당 필터에 해당하는 서버가 없습니다. 역할을 전체 (필터 없음)로 선택하거나 서버 목록을 확인하세요."
             : lastServerListError
@@ -11494,8 +19128,6 @@ ${lastServerListError}`
           return;
         }
 
-        const includeRewards = surveyButton.dataset.includeRewards === "true";
-        delete surveyButton.dataset.includeRewards;
         surveyRunner.call(topwarApi || null, {
           serverIds,
           includeRewards,
@@ -11520,6 +19152,7 @@ ${lastServerListError}`
             render();
           })
           .catch(error => {
+            if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("map-error");
             console.error("[TopWar V2.7 UI] 반복 서버조사 실패:", error);
             alert(`지도조사 오류\n\n${error?.message || String(error)}`);
             render();
@@ -11686,7 +19319,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar Unified V2.14.9.37 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[TopWar Unified V2.14.9.39 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -11706,7 +19339,7 @@ ${lastServerListError}`
     bootUi();
   }
 
-  console.log("%c[TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle] UI installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.39 - Navigation + Auto Recovery + Top100 Cycle Fix] UI installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -12675,7 +20308,7 @@ ${lastServerListError}`
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.37 Runtime Integration
+ * TopWar Unified Automation V2.14.9.39 Runtime Integration
  * - 도둑 상세창의 현재 라운드 감지
  * - 서버별 1회 조사 → GitHub 업로드 → Soft Reset
  * - 반복 조사와 Soft Reset을 하나의 runMultiServerSurvey 래퍼로 통합
@@ -13536,6 +21169,13 @@ ${lastServerListError}`
     const originalServerIds = serverIds.slice();
     serverIds = sortServerIdsByPopularity(serverIds, { enabled: popularFirst });
 
+    const recoveryMode = normalizedOptions.includeRewards === true ? "mapReward" : "map";
+    const recoveryFirstCycleIds = window.TOPWAR_RECOVERY?.consumeResumeServerList?.(recoveryMode, serverIds) ?? serverIds;
+    const recoveryStartServerId = recoveryFirstCycleIds[0] ?? null;
+    const recoveryStartIndex = recoveryStartServerId == null
+      ? 0
+      : Math.max(0, serverIds.findIndex(serverId => String(serverId) === String(recoveryStartServerId)));
+
     if (popularFirst && serverIds.join(",") !== originalServerIds.join(",")) {
       console.log("[TopWar V2.8] 인기 서버 우선 정렬 적용:", {
         before: originalServerIds,
@@ -13551,7 +21191,7 @@ ${lastServerListError}`
     const savedIndex = savedServerId == null
       ? -1
       : serverIds.findIndex(serverId => String(serverId) === String(savedServerId));
-    const firstCycleStartIndex = savedIndex >= 0 ? savedIndex : 0;
+    const firstCycleStartIndex = savedIndex >= 0 ? savedIndex : recoveryStartIndex;
 
     if (savedIndex >= 0) {
       console.log("[TopWar V2.10.3] 저장된 서버부터 조사를 재개합니다:", {
@@ -13615,6 +21255,7 @@ ${lastServerListError}`
 
       for (let index = cycleStartIndex; index < serverIds.length; index++) {
         const serverId = serverIds[index];
+        window.TOPWAR_RECOVERY?.updateServer?.(serverId, recoveryMode);
 
         if (shouldStop()) {
           cycleResult.stopped = true;
@@ -13632,14 +21273,16 @@ ${lastServerListError}`
           serverIds
         };
 
-        writeServerSurveyResume({
-          status: "running",
-          mode: session.mode,
-          cycle,
-          currentIndex: index,
-          currentServerId: serverId,
-          startedAt: session.startedAt
-        });
+        if (normalizedOptions.resumeFromSavedServer !== false) {
+          writeServerSurveyResume({
+            status: "running",
+            mode: session.mode,
+            cycle,
+            currentIndex: index,
+            currentServerId: serverId,
+            startedAt: session.startedAt
+          });
+        }
 
         let row;
 
@@ -13723,16 +21366,18 @@ ${lastServerListError}`
 
         const nextIndex = index < serverIds.length - 1 ? index + 1 : 0;
         const nextCycle = index < serverIds.length - 1 ? cycle : cycle + 1;
-        writeServerSurveyResume({
-          status: index < serverIds.length - 1 ? "betweenServers" : "cycleComplete",
-          mode: session.mode,
-          cycle: nextCycle,
-          currentIndex: nextIndex,
-          currentServerId: serverIds[nextIndex],
-          lastCompletedServerId: serverId,
-          lastCompletedAt: nowIso(),
-          startedAt: session.startedAt
-        });
+        if (normalizedOptions.resumeFromSavedServer !== false) {
+          writeServerSurveyResume({
+            status: index < serverIds.length - 1 ? "betweenServers" : "cycleComplete",
+            mode: session.mode,
+            cycle: nextCycle,
+            currentIndex: nextIndex,
+            currentServerId: serverIds[nextIndex],
+            lastCompletedServerId: serverId,
+            lastCompletedAt: nowIso(),
+            startedAt: session.startedAt
+          });
+        }
 
         if (index < serverIds.length - 1) {
           const keepGoing = await waitInterruptible(
@@ -13837,7 +21482,7 @@ ${lastServerListError}`
     closeVisiblePopupsForSoftReset: closeVisiblePopups
   });
 
-  console.log("%c[TopWar Unified Automation V2.14.9.37 Runtime] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.39 Runtime] installed", "color:#00e676;font-weight:bold");
 })();
 /* ---------------------------------------------------------------------------
  * TopWar V2.9 Storage Policy Override
@@ -17382,6 +25027,11 @@ function migrateLegacyRealPowerToken() {
 
 
 const loopRuntime = {stopRequested: false,runningPromise: null,abortController: null,mode: "idle",progress: {currentIndex: 0,total: 0,currentServerId: null,phase: "idle"}};
+// V2.14.9.39: 전체 서버 진행 큐는 페이지 런타임에서만 유지한다.
+// V2.14.9.39: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
+// 새로고침 복구는 TOPWAR_ACTIVE_RECOVERY_V1의 mode/serverId/startedAt만 사용한다.
+let runtimeServerQueue = null;
+try { localStorage.removeItem(QUEUE_KEY); } catch {}
 
 const DEFAULT_SETTINGS = {owner: "hiphop5782",repo: "topwar-webutil-vite",branch: "main",
 
@@ -18705,8 +26355,17 @@ function orderRealPowerServers(servers, options = {}) {
   }
 
   if (mode === "random") {
+    const recoverySeed = Number(window.TOPWAR_RECOVERY?.read?.()?.startedAt);
+    let seededState = Number.isFinite(recoverySeed) ? (recoverySeed >>> 0) : null;
+    const random = seededState == null ? Math.random : () => {
+      seededState = (seededState + 0x6D2B79F5) >>> 0;
+      let t = seededState;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
     for (let i = rows.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = Math.floor(random() * (i + 1));
       [rows[i], rows[j]] = [rows[j], rows[i]];
     }
     return rows;
@@ -24186,6 +31845,7 @@ if (loopRuntime.abortController || loopRuntime.runningPromise) {
   await new Promise(resolve => setTimeout(resolve, 50));
 }
 
+runtimeServerQueue = null;
 localStorage.removeItem(QUEUE_KEY);
 localStorage.removeItem(STATE_KEY);
 await deletePendingFiles();
@@ -24369,7 +32029,7 @@ return (
 
 }
 
-function loadServerQueue() {const queue = readLocal(QUEUE_KEY, null);if (!queue || typeof queue !== "object") return null;queue.servers = Array.isArray(queue.servers)? queue.servers.map(normalizeServerQueueItem).filter(row => Number.isFinite(row.serverNumber)): [];return queue;}
+function loadServerQueue() {const queue = runtimeServerQueue;if (!queue || typeof queue !== "object") return null;queue.servers = Array.isArray(queue.servers)? queue.servers.map(normalizeServerQueueItem).filter(row => Number.isFinite(row.serverNumber)): [];return queue;}
 
 function saveServerQueue(servers, patch = {}) {const previous = loadServerQueue();
 
@@ -24396,13 +32056,13 @@ const queue = {
 // patch에 servers가 실수로 포함돼도 항상 정규화된 배열을 사용한다.
 queue.servers = compactServers;
 
-writeLocal(QUEUE_KEY, queue);
+runtimeServerQueue = queue;
 renderPanelSafe();
 return queue;
 
 }
 
-function clearServerQueue() {localStorage.removeItem(QUEUE_KEY);renderPanelSafe();return true;}
+function clearServerQueue() {runtimeServerQueue = null;try { localStorage.removeItem(QUEUE_KEY); } catch {}renderPanelSafe();return true;}
 
 function createQueueFromServerIds(serverIds) {const ids = Array.isArray(serverIds)? serverIds: String(serverIds || "").split(/[,\s]+/).map(Number).filter(Number.isFinite);
 
@@ -24630,6 +32290,7 @@ try {
     const serverNumber = server.serverNumber;
 
     if (!Number.isFinite(serverNumber)) continue;
+    window.TOPWAR_RECOVERY?.updateServer?.(serverNumber, "top100");
 
     updateProgress({
       currentIndex: i + 1,
@@ -24888,23 +32549,39 @@ const promise = (async () => {
   saveState({ running: true, mode: "infinite-all-servers" });
   updateProgress({
     currentIndex: 0,
-    total: loadServerQueue()?.servers?.length || 0,
+    total: 0,
     currentServerId: null,
     phase: "starting"
   });
   pushLog("전체 서버 무한반복 시작");
 
   let cycleNumber = 0;
-  let rebuildQueueForNextCycle = false;
 
-  try {
+  async function ensureTop100WorldMapReady(phase, cycleNo) {
     while (!loopRuntime.stopRequested && !controller.signal.aborted) {
       throwIfStopped();
+      try {
+        updateProgress({ currentIndex: 0, currentServerId: null, phase });
+        await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP");
+        throwIfStopped();
+        return true;
+      } catch (error) {
+        if (isStopError(error) || loopRuntime.stopRequested || controller.signal.aborted) throw error;
+        pushLog(
+          `전체 서버 사이클 ${cycleNo} WORLD_MAP 준비 실패 - 같은 단계 재시도`,
+          error?.message || String(error)
+        );
+        updateProgress({ phase: `${phase}-retry-waiting` });
+        await sleep(Number(settings.loopDelayMs ?? 3000));
+      }
+    }
+    throwIfStopped();
+    return false;
+  }
 
-      const nextCycleNumber = cycleNumber + 1;
-
-      // 실제 Top100 사이클은 반드시 최신 시즌 분류를 새로 읽은 뒤에만 시작한다.
-      // 실패 시 이전 캐시로 강행하지 않고 사이클 시작을 보류하여 다음 루프에서 다시 시도한다.
+  async function refreshSeasonListOnceForCycle(cycleNo) {
+    while (!loopRuntime.stopRequested && !controller.signal.aborted) {
+      throwIfStopped();
       try {
         const refreshSeasonList = window.TOPWAR?.resolveTop100ServerIds;
         if (typeof refreshSeasonList !== "function") {
@@ -24916,7 +32593,7 @@ const promise = (async () => {
           currentServerId: null,
           phase: "refreshing-season-list"
         });
-        pushLog(`전체 서버 사이클 ${nextCycleNumber} 시작 전 시즌별 서버 목록 새로 조사`);
+        pushLog(`전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 시작`);
 
         const seasonalIds = await refreshSeasonList();
         throwIfStopped();
@@ -24925,44 +32602,85 @@ const promise = (async () => {
           throw new Error("새로 조사한 시즌별 서버 목록이 비어 있습니다.");
         }
 
-        pushLog(`시즌별 서버 목록 갱신 완료: ${seasonalIds.length}개`, {
-          cycle: nextCycleNumber,
+        pushLog(`전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 완료: ${seasonalIds.length}개`, {
           firstServers: seasonalIds.slice(0, 20)
         });
+        return seasonalIds;
       } catch (error) {
         if (isStopError(error) || loopRuntime.stopRequested || controller.signal.aborted) throw error;
         pushLog(
-          `전체 서버 사이클 ${nextCycleNumber} 시즌별 서버 목록 갱신 실패 - 사이클 시작 보류`,
+          `전체 서버 사이클 ${cycleNo} 시즌별 서버 목록 조사 실패 - 시즌 단계만 재시도`,
           error?.message || String(error)
         );
         updateProgress({ phase: "season-list-retry-waiting" });
         await sleep(Number(settings.loopDelayMs ?? 3000));
-        continue;
+        // 시즌 조사 자체가 실패한 경우에만 시즌 단계를 다시 수행한다.
       }
+    }
+    throwIfStopped();
+    return [];
+  }
 
-      // 시즌 캐시가 갱신된 직후 WorldServerListPanel.m_data도 다시 읽어
-      // 이번 사이클의 실제 Top100 대상/순서를 최신 상태로 만든다.
-      // Top100 대상 자체는 계속 WorldServerListPanel 전체이며 시즌 목록으로 필터링하지 않는다.
-      let cycleServerIds;
+  async function readWorldServerIdsAfterSeason(cycleNo) {
+    // 중요: 시즌조사가 정상 완료된 뒤에는 여기서 실패해도 시즌조사로 되돌아가지 않는다.
+    // WORLD_MAP 복구와 WorldServerListPanel.m_data 읽기만 반복한다.
+    while (!loopRuntime.stopRequested && !controller.signal.aborted) {
+      throwIfStopped();
+
+      await ensureTop100WorldMapReady("preparing-world-server-list", cycleNo);
+
       try {
-        cycleServerIds = orderRealPowerServers(getAllServers2(), settings)
+        const ids = orderRealPowerServers(getAllServers2(), settings)
           .map(server => Number(server?.serverNumber))
           .filter(id => Number.isFinite(id) && id > 0);
+
+        if (!ids.length) {
+          throw new Error("WorldServerListPanel.m_data 서버 목록이 비어 있습니다.");
+        }
+
+        pushLog(`전체 서버 사이클 ${cycleNo} Top100 본 조사 서버목록 준비 완료: ${ids.length}개`, {
+          firstServers: ids.slice(0, 20)
+        });
+        return ids;
       } catch (error) {
+        if (isStopError(error) || loopRuntime.stopRequested || controller.signal.aborted) throw error;
         pushLog(
-          `전체 서버 사이클 ${nextCycleNumber} World 서버 목록 새로 읽기 실패 - 사이클 시작 보류`,
+          `전체 서버 사이클 ${cycleNo} World 서버 목록 읽기 실패 - 시즌조사 없이 WORLD_MAP 단계만 재시도`,
           error?.message || String(error)
         );
         updateProgress({ phase: "world-server-list-retry-waiting" });
         await sleep(Number(settings.loopDelayMs ?? 3000));
-        continue;
       }
+    }
 
+    throwIfStopped();
+    return [];
+  }
+
+  try {
+    while (!loopRuntime.stopRequested && !controller.signal.aborted) {
+      throwIfStopped();
+
+      const nextCycleNumber = cycleNumber + 1;
+
+      // ------------------------------------------------------------
+      // Top100 한 사이클의 순서를 강제한다.
+      // 1) WORLD_MAP 준비
+      // 2) 시즌조사 정확히 1회 성공
+      // 3) WORLD_MAP 재준비
+      // 4) WorldServerListPanel.m_data 전체 서버 읽기
+      // 5) 완료 플래그가 없는 새 큐 생성
+      // 6) Top100 본 조사
+      // ------------------------------------------------------------
+      await ensureTop100WorldMapReady("preparing-season-survey", nextCycleNumber);
+      await refreshSeasonListOnceForCycle(nextCycleNumber);
+
+      let cycleServerIds = await readWorldServerIdsAfterSeason(nextCycleNumber);
+      throwIfStopped();
+
+      cycleServerIds = window.TOPWAR_RECOVERY?.consumeResumeServerList?.("top100", cycleServerIds) ?? cycleServerIds;
       if (!cycleServerIds.length) {
-        pushLog(`전체 서버 사이클 ${nextCycleNumber} World 서버 목록이 비어 있어 사이클 시작 보류`);
-        updateProgress({ phase: "world-server-list-retry-waiting" });
-        await sleep(Number(settings.loopDelayMs ?? 3000));
-        continue;
+        throw new Error("Top100 본 조사 대상 서버 목록이 비어 있습니다.");
       }
 
       cycleNumber = nextCycleNumber;
@@ -24970,28 +32688,24 @@ const promise = (async () => {
       const cycleSettings = {
         ...settings,
         allServers: true,
-        serverIds: cycleServerIds
+        serverIds: cycleServerIds,
+        // 핵심: 이전 사이클의 lastSuccessAt/playerCount/allianceCount를 절대 재사용하지 않는다.
+        // 복구가 필요한 경우는 TOPWAR_RECOVERY가 serverIds 자체를 마지막 서버부터 잘라서 전달한다.
+        forceRefreshAllServers: true
       };
-      const queue = loadServerQueue();
 
-      if (rebuildQueueForNextCycle || !isReusableAllServerQueue(queue)) {
-        if (!rebuildQueueForNextCycle && queue?.servers?.length) {
-          pushLog(
-            `전체 서버 모드에서 ${queue.servers.length}개짜리 단일/테스트 큐 감지 - 전체 목록으로 교체`
-          );
-        }
+      updateProgress({
+        currentIndex: 0,
+        total: cycleServerIds.length,
+        currentServerId: null,
+        phase: "starting-top100-survey"
+      });
+      pushLog(`전체 서버 사이클 ${cycleNumber} Top100 본 조사 시작`, {
+        total: cycleServerIds.length,
+        firstServers: cycleServerIds.slice(0, 20)
+      });
 
-        // 시즌 목록을 방금 새로 읽었으므로 popular 모드도 최신 시즌/그룹 기준으로 정렬된다.
-        initializeAllServerQueue(cycleSettings);
-        rebuildQueueForNextCycle = false;
-      } else if (queue.allServers !== true) {
-        saveServerQueue(queue.servers, {
-          allServers: true,
-          source: queue.source || "recovered-all-server-queue",
-          total: queue.servers.length
-        });
-      }
-
+      // runOneCycle 내부에서 forceRefreshAllServers=true를 확인해 완료정보 없는 새 큐를 만든다.
       const cycleResult = await runOneCycle(cycleSettings);
 
       if (
@@ -25002,16 +32716,10 @@ const promise = (async () => {
         break;
       }
 
-      rebuildQueueForNextCycle = !!(
-        cycleResult?.total > 0 &&
-        cycleResult?.completed >= cycleResult?.total &&
-        settings.refreshAllServerListEachCycle !== false
-      );
-
       pushLog(
         cycleResult?.ok === false
-          ? `전체 서버 사이클 ${cycleNumber} 오류 후 재개 대기`
-          : `전체 서버 사이클 ${cycleNumber} 완료`,
+          ? `전체 서버 사이클 ${cycleNumber} Top100 본 조사 오류 후 다음 사이클 대기`
+          : `전체 서버 사이클 ${cycleNumber} 시즌조사 -> Top100 본 조사 완료`,
         {
           completed: cycleResult?.completed,
           total: cycleResult?.total,
@@ -25759,25 +33467,8 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     ).trim().toLowerCase();
 
     const normalized = ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
-
-    // Top100 실제 대상은 WorldServerListPanel.m_data 전체다.
-    // 시즌별 서버 목록은 startInfiniteLoop()가 각 사이클 시작 직전에 반드시 새로 조사한다.
-    // 여기서 미리 조사하면 첫 사이클에서 동일 조사가 두 번 실행되므로 World 서버 목록만 준비한다.
-    let serverIds = [];
-    try {
-      const rows = rp()?.getAllServers2?.() || [];
-      serverIds = rows
-        .map(row => Number(row?.serverNumber ?? row?.serverId ?? row?.server))
-        .filter(id => Number.isFinite(id) && id > 0);
-      console.log("[REALPOWER Unified UI] Top100 전체 서버 목록:", {
-        worldServerCount: serverIds.length,
-        source: "WorldServerListPanel.m_data",
-        seasonalRefresh: "each-cycle-start"
-      });
-    }
-    catch (error) { console.warn("[REALPOWER Unified UI] 전체 서버목록 준비 실패:", error); }
-
-    return { mode: normalized, serverIds };
+    // 실제 서버 목록은 각 Top100 사이클 시작 시 WORLD_MAP으로 이동해 시즌 목록과 함께 새로 읽는다.
+    return { mode: normalized, serverIds: [] };
   }
 
   async function startOrStop() {
@@ -25790,6 +33481,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     const state = rpState();
     if (state.running === true) {
       api.stopInfiniteLoop?.();
+      window.TOPWAR_RECOVERY?.clear?.("manual-stop-top100");
       update();
       return;
     }
@@ -25801,17 +33493,23 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     if (!await ensureSharedToken()) return;
 
-    const { mode: serverOrderMode, serverIds } = await resolveSharedServerOrderMode();
-    if (!serverIds.length) {
-      alert("전체 서버목록을 읽지 못했습니다. 월드맵에서 서버 목록 창을 연 뒤 다시 시도하세요.");
+    window.TOPWAR_RECOVERY?.begin?.("top100");
+    try {
+      await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP");
+    } catch (error) {
+      window.TOPWAR_RECOVERY?.clear?.("top100-navigation-failed");
+      alert(`Top100 시작 전 서버목록 화면 이동 실패\n\n${error?.message || String(error)}`);
       return;
     }
+
+    const { mode: serverOrderMode } = await resolveSharedServerOrderMode();
 
     // Top100은 맵 901 데이터가 필요 없으므로 이전 지도조사의 대형 런타임 캐시를 먼저 해제한다.
     try { topwar()?.clearCollected?.({ keepWatch: true }); } catch {}
 
-    api.startAllServersInfiniteLoop?.({ serverOrderMode, serverIds }).catch(error => {
+    api.startAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
       if (!api.isStopError?.(error)) {
+        window.TOPWAR_RECOVERY?.clear?.("top100-start-error");
         console.error("[REALPOWER Unified UI] 조사 실패:", error);
         alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
       }
@@ -25830,14 +33528,19 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     if (!await ensureSharedToken()) return;
     if (!confirm("전투력 조사 진행상태와 임시 저장 데이터를 지우고 처음부터 시작할까요?\nGitHub 토큰은 유지됩니다.")) return;
 
-    const { mode: serverOrderMode, serverIds } = await resolveSharedServerOrderMode();
-    if (!serverIds.length) {
-      alert("전체 서버목록을 읽지 못했습니다. 월드맵에서 서버 목록 창을 연 뒤 다시 시도하세요.");
+    window.TOPWAR_RECOVERY?.begin?.("top100");
+    try {
+      await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP");
+    } catch (error) {
+      window.TOPWAR_RECOVERY?.clear?.("top100-reset-navigation-failed");
+      alert(`Top100 시작 전 서버목록 화면 이동 실패\n\n${error?.message || String(error)}`);
       return;
     }
+
+    const { mode: serverOrderMode } = await resolveSharedServerOrderMode();
     try { topwar()?.clearCollected?.({ keepWatch: true }); } catch {}
 
-    api.resetAndStartAllServersInfiniteLoop?.({ serverOrderMode, serverIds }).catch(error => {
+    api.resetAndStartAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
       if (!api.isStopError?.(error)) {
         console.error("[REALPOWER Unified UI] 초기화 후 시작 실패:", error);
         alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
