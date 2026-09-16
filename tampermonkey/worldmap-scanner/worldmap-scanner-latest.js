@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.35 - Synchronized Season Group Collection
+// @name         TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.36
-// @description  Unified TopWar survey with persistent 90% JavaScript heap warnings and compact UI gauge
+// @version      2.14.9.37
+// @description  Unified TopWar automation with stable season-group refresh at the start of every Top100 cycle
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -701,11 +701,11 @@
 
   const topwarLogControl = installTopwarConsoleControl();
 
-  const VERSION = "2.13.3-datahub-settings-fix";
+  const VERSION = "2.14.9.37";
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
-    console.warn("[TopWar] V2.8 Clean already installed");
+    console.warn("[TopWar Unified Automation V2.14.9.37] already installed");
     return;
   }
   window[INSTALL_KEY] = true;
@@ -4231,7 +4231,7 @@
 
   function help() {
     console.log(`
-[TopWar Unified Automation V2.8 Clean]
+[TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle]
 
 133 감시 + 자동 공유:
 await TOPWAR.watchPointTypeAndNotify({
@@ -4456,12 +4456,12 @@ TOPWAR.clearThiefQueue()
     });
   }, 0);
 
-  console.log("%c[TopWar Unified Automation V2.8 Clean] core installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle] core installed", "color:#00e676;font-weight:bold");
   console.log("[TopWar] 사용법: TOPWAR.help()");
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Integrated Survey + Thief UI V2.6
+ * TopWar Unified Automation V2.14.9.37 - Integrated Survey + Finder UI
  * - V2.3 core scanner 위에 붙는 단일 통합 모듈
  * - 기존 후속 패치들을 이 모듈 하나로 통합
  * - 서버번호 입력 UI
@@ -4478,13 +4478,13 @@ TOPWAR.clearThiefQueue()
   "use strict";
 
   if (!window.TOPWAR) {
-    console.error("[TopWar V2.6] TOPWAR 객체가 없습니다.");
+    console.error("[TopWar Unified V2.14.9.37] TOPWAR 객체가 없습니다.");
     return;
   }
 
   const TOPWAR = window.TOPWAR;
   const state = TOPWAR.state;
-  const VERSION = "2.11.1-unified-finder";
+  const VERSION = "2.14.9.37";
   const PANEL_ID = "topwar-unified-control-panel-v26";
   const LEGACY_PANEL_IDS = [
     "topwar-thief-watch-panel",
@@ -4739,37 +4739,75 @@ TOPWAR.clearThiefQueue()
 
   function seasonServerContentSignature(content) {
     if (!content) return "";
-    const bounds = seasonServerViewportBounds(content);
     const values = [];
     (function walk(node) {
       if (!node || node.active === false || node.activeInHierarchy === false) return;
       const text = String(node.getComponent?.(cc.Label)?.string || "").trim();
-      if (/^S\d+$/.test(text)) {
-        const point = seasonSurveyWorldPosition(node);
-        if (seasonSurveyPointInBounds(point, bounds)) values.push(`${text}@${Math.round(point.y)}`);
-      }
+      // 화면 Y좌표는 ScrollView 관성/레이아웃 보정 중 계속 흔들릴 수 있으므로
+      // 안정화 signature에는 서버 번호만 사용한다.
+      if (/^S\d+$/.test(text) && text !== "S999") values.push(text);
       for (const child of node.children || []) walk(child);
     })(content);
-    return values.sort().join("|");
+    return [...new Set(values)]
+      .sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+      .join("|");
   }
 
   async function waitForSeasonServerContent(panel, previousSignature = "", options = {}) {
-    const timeout = Math.max(1000, Number(options.timeout ?? 7000));
+    const timeout = Math.max(1000, Number(options.timeout ?? 10000));
+    const pollDelay = Math.max(50, Number(options.pollDelay ?? 120));
+    const stableMs = Math.max(200, Number(options.stableMs ?? 450));
+    const sameSignatureFallbackMs = Math.max(
+      stableMs,
+      Number(options.sameSignatureFallbackMs ?? 1800)
+    );
     const startedAt = Date.now();
     let lastSignature = "";
-    let stableCount = 0;
+    let stableSince = 0;
+    let normalizedContent = null;
+
     while (Date.now() - startedAt < timeout) {
       const content = findSeasonServerContent(panel);
-      const signature = seasonServerContentSignature(content);
-      if (content && signature) {
-        stableCount = signature === lastSignature ? stableCount + 1 : 0;
-        if (stableCount >= 3 && (signature !== previousSignature || Date.now() - startedAt >= 1500)) {
-          return content;
+
+      if (content) {
+        // 시즌/그룹 전환 직후 이전 스크롤의 관성이나 위치 보정이 남아 있으면
+        // signature가 계속 흔들릴 수 있다. 판정 전에 스크롤을 즉시 멈추고 상단으로 정규화한다.
+        if (content !== normalizedContent) {
+          const scrollView = findSeasonServerScrollView(content);
+          if (scrollView) {
+            try { scrollView.stopAutoScroll?.(); } catch {}
+            try { scrollView.scrollToTop?.(0); } catch {}
+          }
+          normalizedContent = content;
+          await sleep(120);
         }
-        lastSignature = signature;
+
+        const signature = seasonServerContentSignature(content);
+        if (signature) {
+          const current = Date.now();
+          if (signature !== lastSignature) {
+            lastSignature = signature;
+            stableSince = current;
+          }
+
+          const stableFor = current - stableSince;
+          const elapsed = current - startedAt;
+          const changed = !previousSignature || signature !== previousSignature;
+
+          if (stableFor >= stableMs && (changed || elapsed >= sameSignatureFallbackMs)) {
+            return content;
+          }
+        }
       }
-      await sleep(150);
+
+      await sleep(pollDelay);
     }
+
+    console.warn("[TopWar Server Seasons] content 안정화 실패", {
+      previousSignature,
+      lastSignature,
+      elapsed: Date.now() - startedAt
+    });
     throw new Error("시즌 서버 목록 교체/안정화 대기 시간 초과");
   }
 
@@ -5063,7 +5101,7 @@ TOPWAR.clearThiefQueue()
         const previousSeasonSignature = seasonServerContentSignature(serverContent);
         await selectServerSeason(toggleContainer, seasonNode, { loadDelay: options.seasonLoadDelay ?? 1200 });
         serverContent = await waitForSeasonServerContent(panel, previousSeasonSignature, {
-          timeout: options.contentLoadTimeout ?? 7000
+          timeout: options.contentLoadTimeout ?? 10000
         });
         await resetSeasonServerScroll(serverContent, options);
 
@@ -5084,7 +5122,7 @@ TOPWAR.clearThiefQueue()
               loadDelay: options.groupLoadDelay ?? options.seasonLoadDelay ?? 1200
             });
             const currentContent = await waitForSeasonServerContent(panel, previousGroupSignature, {
-              timeout: options.contentLoadTimeout ?? 7000
+              timeout: options.contentLoadTimeout ?? 10000
             });
             await resetSeasonServerScroll(currentContent, options);
             const groupResult = await collectServerSeason(currentContent, `${seasonName}/${control.label}`, {
@@ -9730,7 +9768,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR</span>
+        <span>TOPWAR Unified V2.14.9.37</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -11392,9 +11430,9 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar V2.11.1 UI] 도둑+도시보상 통합찾기 종료:", result);
+            console.log("[TopWar Unified V2.14.9.37 UI] 도둑+도시보상 통합찾기 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar V2.11.1 UI] 통합찾기 실패 원인:", result.reason);
+              console.error("[TopWar Unified V2.14.9.37 UI] 통합찾기 실패 원인:", result.reason);
               alert(`도둑+도시보상 실행 실패\n\n${result.reason}`);
             }
             render();
@@ -11402,7 +11440,7 @@ ${lastServerListError}`
           .catch(error => {
             state.watch133.running = false;
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar V2.11.1 UI] 도둑+도시보상 통합찾기 오류:", error);
+            console.error("[TopWar Unified V2.14.9.37 UI] 도둑+도시보상 통합찾기 오류:", error);
             alert(`도둑+도시보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
@@ -11648,7 +11686,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar V2.6 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[TopWar Unified V2.14.9.37 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -11668,7 +11706,7 @@ ${lastServerListError}`
     bootUi();
   }
 
-  console.log("%c[TopWar Integrated Survey + UI V2.9.6] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.37 - Season Refresh Every Cycle] UI installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -12637,7 +12675,7 @@ ${lastServerListError}`
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar V2.8 Clean Runtime Integration
+ * TopWar Unified Automation V2.14.9.37 Runtime Integration
  * - 도둑 상세창의 현재 라운드 감지
  * - 서버별 1회 조사 → GitHub 업로드 → Soft Reset
  * - 반복 조사와 Soft Reset을 하나의 runMultiServerSurvey 래퍼로 통합
@@ -13799,7 +13837,7 @@ ${lastServerListError}`
     closeVisiblePopupsForSoftReset: closeVisiblePopups
   });
 
-  console.log("%c[TopWar V2.8 Clean Runtime] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.37 Runtime] installed", "color:#00e676;font-weight:bold");
 })();
 /* ---------------------------------------------------------------------------
  * TopWar V2.9 Storage Policy Override
@@ -24857,22 +24895,95 @@ const promise = (async () => {
   pushLog("전체 서버 무한반복 시작");
 
   let cycleNumber = 0;
+  let rebuildQueueForNextCycle = false;
 
   try {
     while (!loopRuntime.stopRequested && !controller.signal.aborted) {
       throwIfStopped();
-      cycleNumber++;
 
+      const nextCycleNumber = cycleNumber + 1;
+
+      // 실제 Top100 사이클은 반드시 최신 시즌 분류를 새로 읽은 뒤에만 시작한다.
+      // 실패 시 이전 캐시로 강행하지 않고 사이클 시작을 보류하여 다음 루프에서 다시 시도한다.
+      try {
+        const refreshSeasonList = window.TOPWAR?.resolveTop100ServerIds;
+        if (typeof refreshSeasonList !== "function") {
+          throw new Error("TOPWAR.resolveTop100ServerIds를 찾지 못했습니다.");
+        }
+
+        updateProgress({
+          currentIndex: 0,
+          currentServerId: null,
+          phase: "refreshing-season-list"
+        });
+        pushLog(`전체 서버 사이클 ${nextCycleNumber} 시작 전 시즌별 서버 목록 새로 조사`);
+
+        const seasonalIds = await refreshSeasonList();
+        throwIfStopped();
+
+        if (!Array.isArray(seasonalIds) || !seasonalIds.length) {
+          throw new Error("새로 조사한 시즌별 서버 목록이 비어 있습니다.");
+        }
+
+        pushLog(`시즌별 서버 목록 갱신 완료: ${seasonalIds.length}개`, {
+          cycle: nextCycleNumber,
+          firstServers: seasonalIds.slice(0, 20)
+        });
+      } catch (error) {
+        if (isStopError(error) || loopRuntime.stopRequested || controller.signal.aborted) throw error;
+        pushLog(
+          `전체 서버 사이클 ${nextCycleNumber} 시즌별 서버 목록 갱신 실패 - 사이클 시작 보류`,
+          error?.message || String(error)
+        );
+        updateProgress({ phase: "season-list-retry-waiting" });
+        await sleep(Number(settings.loopDelayMs ?? 3000));
+        continue;
+      }
+
+      // 시즌 캐시가 갱신된 직후 WorldServerListPanel.m_data도 다시 읽어
+      // 이번 사이클의 실제 Top100 대상/순서를 최신 상태로 만든다.
+      // Top100 대상 자체는 계속 WorldServerListPanel 전체이며 시즌 목록으로 필터링하지 않는다.
+      let cycleServerIds;
+      try {
+        cycleServerIds = orderRealPowerServers(getAllServers2(), settings)
+          .map(server => Number(server?.serverNumber))
+          .filter(id => Number.isFinite(id) && id > 0);
+      } catch (error) {
+        pushLog(
+          `전체 서버 사이클 ${nextCycleNumber} World 서버 목록 새로 읽기 실패 - 사이클 시작 보류`,
+          error?.message || String(error)
+        );
+        updateProgress({ phase: "world-server-list-retry-waiting" });
+        await sleep(Number(settings.loopDelayMs ?? 3000));
+        continue;
+      }
+
+      if (!cycleServerIds.length) {
+        pushLog(`전체 서버 사이클 ${nextCycleNumber} World 서버 목록이 비어 있어 사이클 시작 보류`);
+        updateProgress({ phase: "world-server-list-retry-waiting" });
+        await sleep(Number(settings.loopDelayMs ?? 3000));
+        continue;
+      }
+
+      cycleNumber = nextCycleNumber;
+
+      const cycleSettings = {
+        ...settings,
+        allServers: true,
+        serverIds: cycleServerIds
+      };
       const queue = loadServerQueue();
 
-      if (!isReusableAllServerQueue(queue)) {
-        if (queue?.servers?.length) {
+      if (rebuildQueueForNextCycle || !isReusableAllServerQueue(queue)) {
+        if (!rebuildQueueForNextCycle && queue?.servers?.length) {
           pushLog(
             `전체 서버 모드에서 ${queue.servers.length}개짜리 단일/테스트 큐 감지 - 전체 목록으로 교체`
           );
         }
 
-        initializeAllServerQueue(settings);
+        // 시즌 목록을 방금 새로 읽었으므로 popular 모드도 최신 시즌/그룹 기준으로 정렬된다.
+        initializeAllServerQueue(cycleSettings);
+        rebuildQueueForNextCycle = false;
       } else if (queue.allServers !== true) {
         saveServerQueue(queue.servers, {
           allServers: true,
@@ -24881,10 +24992,7 @@ const promise = (async () => {
         });
       }
 
-      const cycleResult = await runOneCycle({
-        ...settings,
-        allServers: true
-      });
+      const cycleResult = await runOneCycle(cycleSettings);
 
       if (
         loopRuntime.stopRequested ||
@@ -24894,16 +25002,11 @@ const promise = (async () => {
         break;
       }
 
-      if (
+      rebuildQueueForNextCycle = !!(
+        cycleResult?.total > 0 &&
         cycleResult?.completed >= cycleResult?.total &&
         settings.refreshAllServerListEachCycle !== false
-      ) {
-        try {
-          initializeAllServerQueue(settings);
-        } catch (error) {
-          pushLog("다음 사이클 전체 서버 목록 갱신 실패", error?.message || String(error));
-        }
-      }
+      );
 
       pushLog(
         cycleResult?.ok === false
@@ -25657,25 +25760,22 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     const normalized = ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
 
-    // 시즌 패널은 분류/인기순 데이터를 갱신하기 위해 조사한다.
-    // Top100 대상 자체는 반드시 WorldServerListPanel.m_data 전체에서 가져온다.
-    let seasonalIds = [];
+    // Top100 실제 대상은 WorldServerListPanel.m_data 전체다.
+    // 시즌별 서버 목록은 startInfiniteLoop()가 각 사이클 시작 직전에 반드시 새로 조사한다.
+    // 여기서 미리 조사하면 첫 사이클에서 동일 조사가 두 번 실행되므로 World 서버 목록만 준비한다.
     let serverIds = [];
     try {
-      seasonalIds = await tw?.resolveTop100ServerIds?.() ||
-        tw?.getCachedRemoteServerList?.()?.allServers ||
-        [];
       const rows = rp()?.getAllServers2?.() || [];
       serverIds = rows
         .map(row => Number(row?.serverNumber ?? row?.serverId ?? row?.server))
         .filter(id => Number.isFinite(id) && id > 0);
       console.log("[REALPOWER Unified UI] Top100 전체 서버 목록:", {
         worldServerCount: serverIds.length,
-        seasonalServerCount: seasonalIds.length,
-        source: "WorldServerListPanel.m_data"
+        source: "WorldServerListPanel.m_data",
+        seasonalRefresh: "each-cycle-start"
       });
     }
-    catch (error) { console.warn("[REALPOWER Unified UI] 시즌별 서버목록 준비 실패:", error); }
+    catch (error) { console.warn("[REALPOWER Unified UI] 전체 서버목록 준비 실패:", error); }
 
     return { mode: normalized, serverIds };
   }
