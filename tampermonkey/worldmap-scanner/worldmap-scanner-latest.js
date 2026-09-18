@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.42 - Recovery UI Ready Wait Fix
+// @name         TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.42
+// @version      2.14.9.43
 // @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -4753,7 +4753,7 @@
      * ============================================================ */
 
 
-    
+
 
 
     /* ============================================================
@@ -7225,7 +7225,7 @@ function inspectCurrentProfileItems() {
 
 
 /* ============================================================================
- * TopWar navigation/recovery bridge - V2.14.9.42
+ * TopWar navigation/recovery bridge - V2.14.9.43
  * Persistent recovery payload is intentionally minimal:
  *   { mode, serverId, startedAt }
  * Ephemeral reload guards live only in sessionStorage.
@@ -7299,7 +7299,7 @@ function inspectCurrentProfileItems() {
     if (!mode) throw new Error(`알 수 없는 복구 모드: ${mode}`);
 
     // 이전 버전의 상세 진행상태는 복구에 사용하지 않는다.
-    // V2.14.9.42부터 영구 복구정보는 RECOVERY_KEY의 mode/serverId/startedAt 세 필드뿐이다.
+    // V2.14.9.43부터 영구 복구정보는 RECOVERY_KEY의 mode/serverId/startedAt 세 필드뿐이다.
     try { localStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
     try { sessionStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
     try { localStorage.removeItem("REALPOWER_STANDALONE_SERVER_QUEUE"); } catch {}
@@ -7667,7 +7667,7 @@ function inspectCurrentProfileItems() {
     if (bootstrapDone) clearInterval(timer);
   }, 500);
 
-  console.log("%c[TopWar Recovery V2.14.9.42] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Recovery V2.14.9.43] installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -8364,7 +8364,7 @@ function inspectCurrentProfileItems() {
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
-    console.warn("[TopWar Unified Automation V2.14.9.42] already installed");
+    console.warn("[TopWar Unified Automation V2.14.9.43] already installed");
     return;
   }
   window[INSTALL_KEY] = true;
@@ -11900,7 +11900,7 @@ function inspectCurrentProfileItems() {
 
   function help() {
     console.log(`
-[TopWar Unified Automation V2.14.9.42 - Recovery UI Ready Wait Fix]
+[TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix]
 
 133 감시 + 자동 공유:
 await TOPWAR.watchPointTypeAndNotify({
@@ -12125,12 +12125,12 @@ TOPWAR.clearThiefQueue()
     });
   }, 0);
 
-  console.log("%c[TopWar Unified Automation V2.14.9.42 - Recovery UI Ready Wait Fix] core installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix] core installed", "color:#00e676;font-weight:bold");
   console.log("[TopWar] 사용법: TOPWAR.help()");
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.42 - Integrated Survey + Finder UI
+ * TopWar Unified Automation V2.14.9.43 - Integrated Survey + Finder UI
  * - V2.3 core scanner 위에 붙는 단일 통합 모듈
  * - 기존 후속 패치들을 이 모듈 하나로 통합
  * - 서버번호 입력 UI
@@ -12147,7 +12147,7 @@ TOPWAR.clearThiefQueue()
   "use strict";
 
   if (!window.TOPWAR) {
-    console.error("[TopWar Unified V2.14.9.42] TOPWAR 객체가 없습니다.");
+    console.error("[TopWar Unified V2.14.9.43] TOPWAR 객체가 없습니다.");
     return;
   }
 
@@ -17521,7 +17521,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR Unified V2.14.9.42</span>
+        <span>TOPWAR Unified V2.14.9.43</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -18053,7 +18053,7 @@ TOPWAR.clearThiefQueue()
         }
 
         const ordered = applyServerOrder(allIds, getServerOrderMode());
-        console.log("[TopWar V2.14.9.42 UI] 최신 시즌 분류 서버 조사 완료:", {
+        console.log("[TopWar V2.14.9.43 UI] 최신 시즌 분류 서버 조사 완료:", {
           count: ordered.length,
           first: ordered.slice(0, 20),
           uploadOk: survey?.serverUpload?.ok !== false
@@ -19225,9 +19225,9 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar Unified V2.14.9.42 UI] 도둑+도시보상 통합찾기 종료:", result);
+            console.log("[TopWar Unified V2.14.9.43 UI] 도둑+도시보상 통합찾기 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar Unified V2.14.9.42 UI] 통합찾기 실패 원인:", result.reason);
+              console.error("[TopWar Unified V2.14.9.43 UI] 통합찾기 실패 원인:", result.reason);
               alert(`도둑+도시보상 실행 실패\n\n${result.reason}`);
             }
             render();
@@ -19236,7 +19236,7 @@ ${lastServerListError}`
             state.watch133.running = false;
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar Unified V2.14.9.42 UI] 도둑+도시보상 통합찾기 오류:", error);
+            console.error("[TopWar Unified V2.14.9.43 UI] 도둑+도시보상 통합찾기 오류:", error);
             alert(`도둑+도시보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
@@ -19495,7 +19495,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar Unified V2.14.9.42 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[TopWar Unified V2.14.9.43 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -19515,7 +19515,7 @@ ${lastServerListError}`
     bootUi();
   }
 
-  console.log("%c[TopWar Unified Automation V2.14.9.42 - Recovery UI Ready Wait Fix] UI installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix] UI installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -20278,6 +20278,8 @@ ${lastServerListError}`
 
     const upload = await window.TOPWAR_DATAHUB.uploadThieves({
       version: 1,
+      mode: "partial",
+      completed: false,
       serverId,
       detectedAt: observedAt,
       count: detected.length,
@@ -20321,6 +20323,8 @@ ${lastServerListError}`
 
     const upload = await window.TOPWAR_DATAHUB.uploadThieves({
       version: 1,
+      mode: "snapshot",
+      completed: true,
       serverId,
       scannedAt: serverResult.scannedAt || new Date().toISOString(),
       count: Array.isArray(serverResult.locations) ? serverResult.locations.length : 0,
@@ -20484,7 +20488,7 @@ ${lastServerListError}`
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.42 Runtime Integration
+ * TopWar Unified Automation V2.14.9.43 Runtime Integration
  * - 도둑 상세창의 현재 라운드 감지
  * - 서버별 1회 조사 → GitHub 업로드 → Soft Reset
  * - 반복 조사와 Soft Reset을 하나의 runMultiServerSurvey 래퍼로 통합
@@ -21658,7 +21662,7 @@ ${lastServerListError}`
     closeVisiblePopupsForSoftReset: closeVisiblePopups
   });
 
-  console.log("%c[TopWar Unified Automation V2.14.9.42 Runtime] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.43 Runtime] installed", "color:#00e676;font-weight:bold");
 })();
 /* ---------------------------------------------------------------------------
  * TopWar V2.9 Storage Policy Override
@@ -25203,8 +25207,8 @@ function migrateLegacyRealPowerToken() {
 
 
 const loopRuntime = {stopRequested: false,runningPromise: null,abortController: null,mode: "idle",progress: {currentIndex: 0,total: 0,currentServerId: null,phase: "idle"}};
-// V2.14.9.42: 전체 서버 진행 큐는 페이지 런타임에서만 유지한다.
-// V2.14.9.42: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
+// V2.14.9.43: 전체 서버 진행 큐는 페이지 런타임에서만 유지한다.
+// V2.14.9.43: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
 // 새로고침 복구는 TOPWAR_ACTIVE_RECOVERY_V1의 mode/serverId/startedAt만 사용한다.
 let runtimeServerQueue = null;
 try { localStorage.removeItem(QUEUE_KEY); } catch {}
