@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.47 - Reward Tracker Reliable Batch + Diagnostics
+// @name         TopWar Unified Automation V2.14.9.49 - Fort Auto-Learn + Fast Reward Scan
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.47
+// @version      2.14.9.49
 // @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -7225,7 +7225,7 @@ function inspectCurrentProfileItems() {
 
 
 /* ============================================================================
- * TopWar navigation/recovery bridge - V2.14.9.43
+ * TopWar navigation/recovery bridge - V2.14.9.48
  * Persistent recovery payload is intentionally minimal:
  *   { mode, serverId, startedAt }
  * Ephemeral reload guards live only in sessionStorage.
@@ -7235,7 +7235,7 @@ function inspectCurrentProfileItems() {
 
   if (window.TOPWAR_RECOVERY?.version === "2.14.9.42") return;
 
-  const VERSION = "2.14.9.42";
+  const VERSION = "2.14.9.48";
   const RECOVERY_KEY = "TOPWAR_ACTIVE_RECOVERY_V1";
   const PENDING_KEY = "TOPWAR_RECOVERY_RELOAD_PENDING_V1";
   const ATTEMPT_KEY = "TOPWAR_RECOVERY_ATTEMPT_V1";
@@ -7299,7 +7299,7 @@ function inspectCurrentProfileItems() {
     if (!mode) throw new Error(`알 수 없는 복구 모드: ${mode}`);
 
     // 이전 버전의 상세 진행상태는 복구에 사용하지 않는다.
-    // V2.14.9.43부터 영구 복구정보는 RECOVERY_KEY의 mode/serverId/startedAt 세 필드뿐이다.
+    // V2.14.9.48부터 영구 복구정보는 RECOVERY_KEY의 mode/serverId/startedAt 세 필드뿐이다.
     try { localStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
     try { sessionStorage.removeItem("TOPWAR_SERVER_SURVEY_RESUME_V1"); } catch {}
     try { localStorage.removeItem("REALPOWER_STANDALONE_SERVER_QUEUE"); } catch {}
@@ -7667,7 +7667,7 @@ function inspectCurrentProfileItems() {
     if (bootstrapDone) clearInterval(timer);
   }, 500);
 
-  console.log("%c[TopWar Recovery V2.14.9.43] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Recovery V2.14.9.48] installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -8364,7 +8364,7 @@ function inspectCurrentProfileItems() {
   const INSTALL_KEY = "__TOPWAR_UNIFIED_SCANNER_V23_AUTO_SHARE__";
 
   if (window[INSTALL_KEY]) {
-    console.warn("[TopWar Unified Automation V2.14.9.43] already installed");
+    console.warn("[TopWar Unified Automation V2.14.9.48] already installed");
     return;
   }
   window[INSTALL_KEY] = true;
@@ -8677,6 +8677,174 @@ function inspectCurrentProfileItems() {
   function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, Number(ms) || 0));
   }
+
+  // ========================================================================
+  // Guild Fortress cache (pointType=13)
+  // - 지도+보상 전체 스캔에서 확인한 길드 보루 좌표를 서버별로 영구 저장한다.
+  // - 보상탐색은 캐시가 있으면 보루만 순회하고, 캐시가 없거나 불완전하면 최초 1회 전체 지도를 스캔해 자동 학습한다.
+  // - 전체 스캔이 정상 완료된 서버만 complete=true 캐시로 승격되며 다음 사이클부터 초고속 보루 모드가 된다.
+  // - 데이터가 작으므로 localStorage를 사용한다. 게임 원본 payload는 저장하지 않는다.
+  // ========================================================================
+  const FORT_CACHE_STORAGE_KEY = "TOPWAR_GUILD_FORT_CACHE_V1";
+
+  function readFortCacheStore() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(FORT_CACHE_STORAGE_KEY) || "{}");
+      if (!parsed || typeof parsed !== "object") throw new Error("invalid fort cache");
+      parsed.version = 1;
+      parsed.servers ??= {};
+      return parsed;
+    } catch {
+      return { version: 1, updatedAt: null, servers: {} };
+    }
+  }
+
+  function writeFortCacheStore(store) {
+    const next = store && typeof store === "object" ? store : { version: 1, servers: {} };
+    next.version = 1;
+    next.updatedAt = now();
+    next.servers ??= {};
+    localStorage.setItem(FORT_CACHE_STORAGE_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  function normalizeFortLocation(value) {
+    const x = Number(value?.x);
+    const y = Number(value?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y };
+  }
+
+  function captureFortPoints(points, targetServerId, outputMap, fallbackServerId = null) {
+    if (!(outputMap instanceof Map) || !Array.isArray(points)) return { added: 0, total: outputMap instanceof Map ? outputMap.size : 0 };
+    const target = Number(targetServerId);
+    const fallback = Number(fallbackServerId);
+    let added = 0;
+
+    for (const point of points) {
+      if (Number(point?.pointType) !== 13) continue;
+      const x = Number(point?.x);
+      const y = Number(point?.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+      const rawServerId = point?.k ?? point?.p?.w ?? point?.p?.cMid ?? fallback;
+      const fortServerId = Number(rawServerId);
+      if (!Number.isFinite(fortServerId) || fortServerId <= 0) continue;
+      if (Number.isFinite(target) && target > 0 && fortServerId !== target) continue;
+
+      const key = `${fortServerId}:${x}:${y}`;
+      if (!outputMap.has(key)) added++;
+      outputMap.set(key, { x, y });
+    }
+
+    return { added, total: outputMap.size };
+  }
+
+  function getFortCacheEntry(serverId) {
+    const id = Number(serverId);
+    if (!Number.isFinite(id) || id <= 0) return null;
+    const store = readFortCacheStore();
+    const raw = store.servers?.[String(Math.trunc(id))];
+    if (!raw || typeof raw !== "object") return null;
+
+    const unique = new Map();
+    for (const item of raw.forts || []) {
+      const fort = normalizeFortLocation(item);
+      if (!fort) continue;
+      unique.set(`${fort.x}:${fort.y}`, fort);
+    }
+
+    return {
+      version: 1,
+      serverId: Math.trunc(id),
+      updatedAt: raw.updatedAt ?? null,
+      scannedAt: raw.scannedAt ?? raw.updatedAt ?? null,
+      complete: raw.complete !== false,
+      totalMoves: Number(raw.totalMoves ?? 0),
+      failCount: Number(raw.failCount ?? 0),
+      count: unique.size,
+      forts: [...unique.values()].sort((a, b) => a.y - b.y || a.x - b.x)
+    };
+  }
+
+  function getFortLocations(serverId) {
+    return getFortCacheEntry(serverId)?.forts ?? [];
+  }
+
+  function saveFortLocations(serverId, forts, meta = {}) {
+    const id = Number(serverId);
+    if (!Number.isFinite(id) || id <= 0) {
+      return { ok: false, reason: "invalid serverId", serverId };
+    }
+
+    const unique = new Map();
+    for (const item of Array.isArray(forts) ? forts : []) {
+      const fort = normalizeFortLocation(item);
+      if (!fort) continue;
+      unique.set(`${fort.x}:${fort.y}`, fort);
+    }
+
+    const normalized = [...unique.values()].sort((a, b) => a.y - b.y || a.x - b.x);
+    const store = readFortCacheStore();
+    const key = String(Math.trunc(id));
+    const scannedAt = meta.scannedAt || now();
+
+    store.servers[key] = {
+      serverId: Math.trunc(id),
+      updatedAt: now(),
+      scannedAt,
+      complete: meta.complete !== false,
+      totalMoves: Number(meta.totalMoves ?? 0),
+      failCount: Number(meta.failCount ?? 0),
+      count: normalized.length,
+      forts: normalized
+    };
+    writeFortCacheStore(store);
+
+    const result = { ok: true, ...store.servers[key] };
+    console.log(`[TopWar Fort Cache] server=${key} 보루 ${normalized.length}개 저장`, result);
+    return result;
+  }
+
+  function clearFortCache(serverId = null) {
+    const store = readFortCacheStore();
+    if (serverId == null || serverId === "") {
+      localStorage.removeItem(FORT_CACHE_STORAGE_KEY);
+      return { ok: true, all: true };
+    }
+    const id = Number(serverId);
+    if (!Number.isFinite(id) || id <= 0) return { ok: false, reason: "invalid serverId" };
+    delete store.servers[String(Math.trunc(id))];
+    writeFortCacheStore(store);
+    return { ok: true, serverId: Math.trunc(id) };
+  }
+
+  function fortCacheStatus(serverId = null) {
+    if (serverId != null && serverId !== "") return getFortCacheEntry(serverId);
+    const store = readFortCacheStore();
+    const rows = Object.keys(store.servers || {})
+      .map(id => getFortCacheEntry(Number(id)))
+      .filter(Boolean)
+      .sort((a, b) => a.serverId - b.serverId);
+    console.table(rows.map(row => ({
+      serverId: row.serverId,
+      forts: row.count,
+      complete: row.complete,
+      failCount: row.failCount,
+      scannedAt: row.scannedAt
+    })));
+    return rows;
+  }
+
+  Object.assign(api, {
+    fortCacheStorageKey: FORT_CACHE_STORAGE_KEY,
+    getFortCacheEntry,
+    getFortLocations,
+    captureFortPoints,
+    saveFortLocations,
+    clearFortCache,
+    fortCacheStatus
+  });
 
   function pushLimited(arr, item, limit = state.maxRecentPackets) {
     arr.push(item);
@@ -9436,6 +9604,8 @@ function inspectCurrentProfileItems() {
 
       const activeSurveyServerId = state.ui?.serverSurvey?.current?.serverId ??
         state.ui?.serverSurveyBatch?.current?.serverId ??
+        state.watch133?.current?.serverId ??
+        state.cityRewardFinder?.current?.serverId ??
         range()?.k ?? null;
       const collectedServerId = Number(detail?.k) > 0 ? detail.k : activeSurveyServerId;
       // 수동 보상 추적은 기존 지도/보상 자동조사와 완전히 별도의 경량 옵저버다.
@@ -9454,6 +9624,17 @@ function inspectCurrentProfileItems() {
       const rewardSurvey = state.ui?.serverSurvey;
       if (rewardSurvey?.running === true && rewardSurvey?.includeRewards === true) {
         rewardSurvey.rewardMap ??= new Map();
+        rewardSurvey.fortMap ??= new Map();
+
+        // 지도+보상 전체 스캔에서 길드 보루(pointType=13)를 서버별로 기억한다.
+        // 다음 보상탐색에서는 이 좌표들만 이동하므로 전체 격자 스캔이 필요 없다.
+        captureFortPoints(
+          detail.pointList,
+          rewardSurvey.current?.serverId ?? collectedServerId,
+          rewardSurvey.fortMap,
+          collectedServerId
+        );
+
         let capturedRewards = 0;
         for (const point of detail.pointList) {
           if (Number(point?.pointType) !== 1) continue;
@@ -9503,6 +9684,28 @@ function inspectCurrentProfileItems() {
           });
         }
       }
+
+      // 보상탐색 자동 학습 모드: 보루 캐시가 없는 서버를 전체 스캔할 때 901에서 보루를 직접 축적한다.
+      if (state.watch133?.running === true) {
+        state.watch133.fortMap ??= new Map();
+        captureFortPoints(
+          detail.pointList,
+          state.watch133.current?.serverId ?? collectedServerId,
+          state.watch133.fortMap,
+          collectedServerId
+        );
+      }
+
+      if (state.cityRewardFinder?.running === true) {
+        state.cityRewardFinder.fortMap ??= new Map();
+        captureFortPoints(
+          detail.pointList,
+          state.cityRewardFinder.current?.serverId ?? collectedServerId,
+          state.cityRewardFinder.fortMap,
+          collectedServerId
+        );
+      }
+
       if (state.debug.log901) console.log("[TopWar 901 collected]", {
         seq: packet.seq,
         pointList: detail.pointList.length,
@@ -11904,7 +12107,7 @@ function inspectCurrentProfileItems() {
 
   function help() {
     console.log(`
-[TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix]
+[TopWar Unified Automation V2.14.9.48 - Recovery UI Ready Wait Fix]
 
 133 감시 + 자동 공유:
 await TOPWAR.watchPointTypeAndNotify({
@@ -12129,12 +12332,12 @@ TOPWAR.clearThiefQueue()
     });
   }, 0);
 
-  console.log("%c[TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix] core installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.48 - Recovery UI Ready Wait Fix] core installed", "color:#00e676;font-weight:bold");
   console.log("[TopWar] 사용법: TOPWAR.help()");
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.43 - Integrated Survey + Finder UI
+ * TopWar Unified Automation V2.14.9.48 - Integrated Survey + Finder UI
  * - V2.3 core scanner 위에 붙는 단일 통합 모듈
  * - 기존 후속 패치들을 이 모듈 하나로 통합
  * - 서버번호 입력 UI
@@ -12151,7 +12354,7 @@ TOPWAR.clearThiefQueue()
   "use strict";
 
   if (!window.TOPWAR) {
-    console.error("[TopWar Unified V2.14.9.43] TOPWAR 객체가 없습니다.");
+    console.error("[TopWar Unified V2.14.9.48] TOPWAR 객체가 없습니다.");
     return;
   }
 
@@ -16825,6 +17028,7 @@ TOPWAR.clearThiefQueue()
       includeRewards: surveyOptions.includeRewards === true,
       liveThiefKeys: new Set(),
       rewardMap: new Map(),
+      fortMap: new Map(),
       startedAt: nowIso(),
       finishedAt: null,
       current: {
@@ -16893,6 +17097,21 @@ TOPWAR.clearThiefQueue()
             result.stages.rewardCollect = { ok: false, error: error?.message || String(error) };
             result.errors.push({ stage: "rewardCollect", message: error?.message || String(error) });
           }
+        }
+
+        // 보루 캐시는 전체 지도 스캔이 끝난 즉시 저장한다.
+        // 이후 동맹 상세 수집/업로드 단계가 실패해도 다음 보상탐색에서 사용할 수 있다.
+        if (surveyOptions.includeRewards === true && typeof TOPWAR.saveFortLocations === "function") {
+          const fortMap = state.ui.serverSurvey.fortMap instanceof Map ? state.ui.serverSurvey.fortMap : new Map();
+          const mapSummary = result.stages?.mapScan?.summary ?? result.stages?.mapScan ?? {};
+          const totalMoves = Number(mapSummary?.totalMoves ?? result.stages?.mapScan?.totalMoves ?? 0);
+          const failCount = Number(mapSummary?.failCount ?? result.stages?.mapScan?.failCount ?? 0);
+          result.fortCache = TOPWAR.saveFortLocations(serverId, [...fortMap.values()], {
+            scannedAt: nowIso(),
+            complete: totalMoves > 0 && failCount === 0,
+            totalMoves,
+            failCount
+          });
         }
       } else {
         result.stages.mapScan = {
@@ -17077,6 +17296,7 @@ TOPWAR.clearThiefQueue()
       state.ui.serverSurvey.result = slimServerSurveyResult(result);
       state.ui.serverSurvey.liveThiefKeys?.clear?.();
       state.ui.serverSurvey.rewardMap?.clear?.();
+      state.ui.serverSurvey.fortMap?.clear?.();
       cleanupIntegratedSurveyResidue({ phase: "server-finished" });
 
       console.log("[TopWar V2.6] 서버조사 종료:", result.summary ?? result);
@@ -17527,7 +17747,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR Unified V2.14.9.43</span>
+        <span>TOPWAR Unified V2.14.9.48</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -17566,8 +17786,8 @@ TOPWAR.clearThiefQueue()
 
         <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px;">
           <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">보상탐색</button>
-          <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">지도조사</button>
-          <button id="tw26-survey-rewards" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:11px;font-weight:700;cursor:pointer;">지도+보상</button>
+          <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:11px;font-weight:700;cursor:pointer;">지도+보상</button>
+          <button id="tw26-survey-rewards" style="display:none;">지도+보상</button>
         </div>
 
         <div id="tw26-status" style="
@@ -18059,7 +18279,7 @@ TOPWAR.clearThiefQueue()
         }
 
         const ordered = applyServerOrder(allIds, getServerOrderMode());
-        console.log("[TopWar V2.14.9.43 UI] 최신 시즌 분류 서버 조사 완료:", {
+        console.log("[TopWar V2.14.9.48 UI] 최신 시즌 분류 서버 조사 완료:", {
           count: ordered.length,
           first: ordered.slice(0, 20),
           uploadOk: survey?.serverUpload?.ok !== false
@@ -18385,27 +18605,36 @@ TOPWAR.clearThiefQueue()
 
       const range = controller.getWorldMapDataInstance?.()?.status?.viewport?.range;
       const subMap = options.subMap ?? range?.sub ?? 0;
-      const startX = Number(options.startX ?? 50);
-      const startY = Number(options.startY ?? 50);
-      const endX = Number(options.endX ?? 750);
-      const endY = Number(options.endY ?? 875);
-      const stepX = Number(options.stepX ?? 80);
-      const stepY = Number(options.stepY ?? 75);
       const scale = Number(options.scale ?? 0.27);
 
-      let xs, ys;
-      try {
-        xs = TOPWAR.buildScanCoords(startX, endX, stepX, "x");
-        ys = TOPWAR.buildScanCoords(startY, endY, stepY, "y");
-      } catch (error) {
-        return { ok: false, completed: false, serverId: targetServerId, reason: error?.message || String(error) };
+      const fortCache = TOPWAR.getFortCacheEntry?.(targetServerId) ?? null;
+      const forts = Array.isArray(fortCache?.forts) ? fortCache.forts : [];
+      const fastFortMode = forts.length > 0 && fortCache?.complete !== false;
+
+      let xs = [];
+      let ys = [];
+      let plan = [];
+
+      if (fastFortMode) {
+        // FAST MODE: 전체 격자 대신 저장된 길드 보루 좌표만 1회씩 방문한다.
+        xs = [...new Set(forts.map(row => Number(row.x)).filter(Number.isFinite))];
+        ys = [...new Set(forts.map(row => Number(row.y)).filter(Number.isFinite))];
+        plan = forts.map(row => ({ y: Number(row.y), xOrder: [Number(row.x)] }));
+        console.log(`[TopWar Unified Finder] server=${targetServerId} 보루 캐시 ${forts.length}개 사용 → 고속 모드`);
+      } else {
+        // AUTO-LEARN MODE: 캐시가 없거나 불완전하면 이 서버만 기존 전체 지도 스캔을 수행한다.
+        // 스캔 중 901에서 pointType=13을 수집하고 정상 완료 시 캐시로 저장한다.
+        xs = TOPWAR.buildScanCoords(Number(options.startX ?? 50), Number(options.endX ?? 750), Number(options.stepX ?? 80), "x");
+        ys = TOPWAR.buildScanCoords(Number(options.startY ?? 50), Number(options.endY ?? 875), Number(options.stepY ?? 75), "y");
+        plan = TOPWAR.buildScanPlan(xs, ys, {
+          startCorner: options.startCorner ?? "top-left",
+          snake: options.snake !== false
+        });
+        console.warn(`[TopWar Unified Finder] server=${targetServerId} 보루 캐시 없음/불완전 → 최초 전체 스캔으로 자동 학습`);
       }
 
-      const plan = TOPWAR.buildScanPlan(xs, ys, {
-        startCorner: options.startCorner ?? "top-left",
-        snake: options.snake !== false
-      });
-      const totalMoves = plan.reduce((sum, row) => sum + row.xOrder.length, 0);
+      state.watch133.fortMap = new Map();
+      const totalMoves = plan.reduce((sum, row) => sum + (Array.isArray(row.xOrder) ? row.xOrder.length : 0), 0);
       const startedAt = nowIso();
       const startedMs = Date.now();
       const rewardMap = new Map();
@@ -18437,7 +18666,7 @@ TOPWAR.clearThiefQueue()
       dedicatedThiefBuffer.stats.lastScanStartedAt = nowIso();
 
       state.watch133.current = {
-        phase: "unifiedScan",
+        phase: fastFortMode ? "fortFastScan" : "fortLearningScan",
         cycle: meta.cycle ?? null,
         serverId: targetServerId,
         serverIndex: meta.serverIndex ?? null,
@@ -18451,7 +18680,7 @@ TOPWAR.clearThiefQueue()
         failCount: 0
       };
 
-      console.log(`[TopWar Unified Finder] 서버 ${targetServerId} 스캔 시작: ${totalMoves} moves`);
+      console.log(`[TopWar Unified Finder] 서버 ${targetServerId} ${fastFortMode ? `보루 고속 스캔 시작: ${forts.length} forts` : `보루 자동학습 전체 스캔 시작: ${totalMoves} moves`}`);
 
       for (const row of plan) {
         for (const x of row.xOrder) {
@@ -18627,13 +18856,9 @@ TOPWAR.clearThiefQueue()
                 cycle: meta.cycle ?? null,
                 detectedAt: nowIso(),
                 newDetectedCount: newThieves.length,
-                scanProgress: {
-                  moveIndex,
-                  totalMoves,
-                  scanXs: xs.slice(),
-                  scanYs: ys.slice(),
-                  confirmedScanCells: [...confirmedThiefScanCells]
-                }
+                scanProgress: fastFortMode
+                  ? { mode: "fort-fast", moveIndex, totalMoves, scanXs: [], scanYs: [], confirmedScanCells: [] }
+                  : { moveIndex, totalMoves, scanXs: xs.slice(), scanYs: ys.slice(), confirmedScanCells: [...confirmedThiefScanCells] }
               });
 
               if (liveUpload?.ok) {
@@ -18700,7 +18925,7 @@ TOPWAR.clearThiefQueue()
           }
 
           state.watch133.current = {
-            phase: "unifiedScan",
+            phase: fastFortMode ? "fortFastScan" : "fortLearningScan",
             cycle: meta.cycle ?? null,
             serverId: targetServerId,
             serverIndex: meta.serverIndex ?? null,
@@ -18749,6 +18974,9 @@ TOPWAR.clearThiefQueue()
         startedAt,
         finishedAt,
         elapsedSec: Math.round((Date.now() - startedMs) / 1000),
+        scanMode: fastFortMode ? "fort-fast" : "full-auto-learn",
+        fortCount: fastFortMode ? forts.length : (state.watch133.fortMap?.size ?? 0),
+        fortCacheComplete: fastFortMode ? (fortCache?.complete !== false) : false,
         totalMoves,
         moveIndex,
         failCount,
@@ -18785,6 +19013,20 @@ TOPWAR.clearThiefQueue()
         return result;
       }
 
+      // 전체 스캔 fallback이 정상 완료된 경우에만 이번 서버의 보루 캐시를 유효 상태로 저장한다.
+      if (!fastFortMode && typeof TOPWAR.saveFortLocations === "function") {
+        const learnedForts = [...(state.watch133.fortMap instanceof Map ? state.watch133.fortMap.values() : [])];
+        result.fortCache = TOPWAR.saveFortLocations(targetServerId, learnedForts, {
+          scannedAt: finishedAt,
+          complete: failCount === 0,
+          totalMoves,
+          failCount
+        });
+        result.fortCount = learnedForts.length;
+        result.fortCacheComplete = result.fortCache?.complete === true;
+        console.log(`[TopWar Unified Finder] server=${targetServerId} 보루 자동학습 완료: ${learnedForts.length}개, complete=${result.fortCacheComplete}`);
+      }
+
       if (options.githubUpload !== false) {
         const thiefServerResult = typeof TOPWAR.buildCompletedThiefServerResult === "function"
           ? TOPWAR.buildCompletedThiefServerResult(targetServerId, thieves, {
@@ -18812,16 +19054,27 @@ TOPWAR.clearThiefQueue()
         };
 
         // 서로 다른 저장소이므로 한쪽 실패가 다른쪽 업로드를 막지 않게 독립 처리한다.
-        try {
-          if (typeof TOPWAR.uploadCompletedThiefServer !== "function") {
-            throw new Error("uploadCompletedThiefServer not installed");
+        if (fastFortMode) {
+          // 보루만 방문한 결과는 전체 지도 authoritative snapshot이 아니다.
+          // 따라서 기존 탐사선 위치를 통째로 교체하지 않고, 위의 live upsert만 허용한다.
+          result.thiefUpload = {
+            ok: true,
+            skipped: true,
+            serverId: targetServerId,
+            reason: "fort-fast scan: authoritative thief snapshot skipped"
+          };
+        } else {
+          try {
+            if (typeof TOPWAR.uploadCompletedThiefServer !== "function") {
+              throw new Error("uploadCompletedThiefServer not installed");
+            }
+            result.thiefUpload = await TOPWAR.uploadCompletedThiefServer(thiefServerResult);
+            state.watch133.lastGithubUpload = result.thiefUpload;
+          } catch (error) {
+            result.thiefUpload = { ok: false, serverId: targetServerId, error: error?.message || String(error) };
+            state.watch133.lastGithubUpload = result.thiefUpload;
+            console.error("[TopWar Unified Finder] 도둑 DataHub 업로드 실패:", error);
           }
-          result.thiefUpload = await TOPWAR.uploadCompletedThiefServer(thiefServerResult);
-          state.watch133.lastGithubUpload = result.thiefUpload;
-        } catch (error) {
-          result.thiefUpload = { ok: false, serverId: targetServerId, error: error?.message || String(error) };
-          state.watch133.lastGithubUpload = result.thiefUpload;
-          console.error("[TopWar Unified Finder] 도둑 DataHub 업로드 실패:", error);
         }
 
         try {
@@ -18862,6 +19115,7 @@ TOPWAR.clearThiefQueue()
       confirmedThiefScanCells.clear();
       dedicatedThiefBuffer.events = [];
       dedicatedThiefBuffer.activeTargetServerId = null;
+      if (state.watch133?.fortMap instanceof Map) state.watch133.fortMap.clear();
       if (dedicatedThiefBuffer.stats) {
         dedicatedThiefBuffer.stats.lastCaptured = null;
         dedicatedThiefBuffer.stats.lastCollected = null;
@@ -18877,19 +19131,21 @@ TOPWAR.clearThiefQueue()
       const allIds = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
       let ids = window.TOPWAR_RECOVERY?.consumeResumeServerList?.("reward", allIds) ?? allIds;
       if (!ids.length) return { ok: false, reason: "serverIds is required" };
+
+
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
         return { ok: false, reason: "server survey is running" };
       }
 
       const requiredApis = [
+        "getFortCacheEntry",
+        "saveFortLocations",
         "buildScanCoords",
         "buildScanPlan",
         "moveMapToStableUnified",
         "clearCollected",
         "collectRewardsFromRecent901",
-        "buildCompletedThiefServerResult",
         "uploadDetectedThieves",
-        "uploadCompletedThiefServer",
         "uploadRewardServerResults"
       ];
       const missingApis = requiredApis.filter(name => typeof TOPWAR[name] !== "function");
@@ -19070,7 +19326,7 @@ TOPWAR.clearThiefQueue()
       const logStatus = window.TOPWAR_LOG_CONTROL?.status?.() ?? { programLogs: true, gameFontWarnings: true };
 
       setButton(thiefButton, !!watch.running, "보상탐색");
-      setButton(surveyButton, surveyRunning && survey.includeRewards !== true, "지도조사");
+      setButton(surveyButton, surveyRunning, "지도+보상");
       setButton(surveyRewardsButton, surveyRunning && survey.includeRewards === true, "지도+보상");
       setLogButton(programLogsButton, !!logStatus.programLogs, "프로그램 로그");
       setLogButton(gameFontLogsButton, !!logStatus.gameFontWarnings, "게임 폰트경고");
@@ -19106,7 +19362,7 @@ TOPWAR.clearThiefQueue()
       const runningLabel = watch.running
         ? `도둑 ${watch.current?.moveIndex ?? 0}/${watch.current?.totalMoves ?? "-"}`
         : surveyRunning
-          ? `지도조사 ${current.index ?? "-"}/${current.total ?? "-"}`
+          ? `지도+보상 ${current.index ?? "-"}/${current.total ?? "-"}`
           : realPowerRunning
             ? `Top100 ${realPowerProgress.currentIndex ?? 0}/${realPowerProgress.total ?? "-"}`
             : state.cityRewardFinder?.running
@@ -19138,7 +19394,8 @@ TOPWAR.clearThiefQueue()
           GitHub 요청: GET ${thiefDiag.githubGetSuccess ?? 0}/${thiefDiag.githubGetAttempts ?? 0} / PUT ${thiefDiag.githubPutSuccess ?? 0}/${thiefDiag.githubPutAttempts ?? 0}<br>
           도둑 GitHub: ${watch.lastGithubUpload?.ok === true ? "성공" : watch.lastGithubUpload?.ok === false ? `실패 (${watch.lastGithubUpload?.error || watch.lastGithubUpload?.reason || "unknown"})` : "-"}${thiefDiag.lastError ? ` / ${thiefDiag.lastError}` : ""}<br>
           업로드 테스트: ${thiefUploadTestRunning ? "진행 중" : lastThiefUploadTest?.ok === true ? `성공 (${lastThiefUploadTest.repo}/${lastThiefUploadTest.path})` : lastThiefUploadTest?.ok === false ? `실패 (${lastThiefUploadTest.error || lastThiefUploadTest.reason || lastThiefUploadTest.status || "unknown"})` : "-"}<br>
-          지도조사: ${surveyRunning ? "ON" : "OFF"}${surveyStopping ? " / 중지 요청" : ""} / 단계 ${current.phase ?? state.fullScan?.phase ?? "-"}<br>
+          지도+보상: ${surveyRunning ? "ON" : "OFF"}${surveyStopping ? " / 중지 요청" : ""} / 단계 ${current.phase ?? state.fullScan?.phase ?? "-"}<br>
+          보루 캐시: ${current.serverId ? (TOPWAR.getFortLocations?.(current.serverId)?.length ?? 0) + "개" : "서버 선택 후 확인"}<br>
           Top100조사: ${realPowerRunning ? "ON" : "OFF"} / 단계 ${realPowerProgress?.phase ?? "-"}<br>
           플레이어 ${state.playerMap?.size ?? 0} / 동맹 ${state.allianceMap?.size ?? 0}<br>
           활동 CORE ${activitySummary.coreCount ?? "-"} / ACTIVE ${activitySummary.activeCount ?? "-"} / WATCH ${activitySummary.watchCount ?? "-"} / LOW ${activitySummary.lowCount ?? "-"}<br>
@@ -19199,7 +19456,7 @@ TOPWAR.clearThiefQueue()
       } else {
         if (state.connectionGuard?.disconnected) { alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요."); return; }
         if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
-          alert("지도조사가 진행 중입니다. 먼저 지도조사를 OFF 하세요.");
+          alert("지도+보상 조사가 진행 중입니다. 먼저 OFF 하세요.");
           return;
         }
         if (window.REALPOWER?.getState?.()?.running === true) {
@@ -19235,10 +19492,10 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar Unified V2.14.9.43 UI] 도둑+도시보상 통합찾기 종료:", result);
+            console.log("[TopWar Unified V2.14.9.49 UI] 보상탐색 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar Unified V2.14.9.43 UI] 통합찾기 실패 원인:", result.reason);
-              alert(`도둑+도시보상 실행 실패\n\n${result.reason}`);
+              console.error("[TopWar Unified V2.14.9.49 UI] 통합찾기 실패 원인:", result.reason);
+              alert(`보상탐색 실행 실패\n\n${result.reason}`);
             }
             render();
           })
@@ -19246,8 +19503,8 @@ ${lastServerListError}`
             state.watch133.running = false;
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar Unified V2.14.9.43 UI] 도둑+도시보상 통합찾기 오류:", error);
-            alert(`도둑+도시보상 오류\n\n${error?.message || String(error)}`);
+            console.error("[TopWar Unified V2.14.9.49 UI] 보상탐색 오류:", error);
+            alert(`보상탐색 오류\n\n${error?.message || String(error)}`);
             render();
           });
       }
@@ -19265,7 +19522,7 @@ ${lastServerListError}`
       } else {
         if (state.connectionGuard?.disconnected) { alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요."); return; }
         if (state.watch133?.running) {
-          alert("도둑+도시보상 통합찾기가 진행 중입니다. 먼저 OFF 하세요.");
+          alert("보상탐색이 진행 중입니다. 먼저 OFF 하세요.");
           return;
         }
         if (window.REALPOWER?.getState?.()?.running === true) {
@@ -19273,16 +19530,16 @@ ${lastServerListError}`
           return;
         }
 
-        const includeRewards = surveyButton.dataset.includeRewards === "true";
+        const includeRewards = true;
         delete surveyButton.dataset.includeRewards;
-        const recoveryMode = includeRewards ? "mapReward" : "map";
+        const recoveryMode = "mapReward";
         window.TOPWAR_REWARD_TRACKER?.stop?.("map-ui-start");
         window.TOPWAR_RECOVERY?.begin?.(recoveryMode);
         try {
           await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
         } catch (error) {
           window.TOPWAR_RECOVERY?.clear?.("map-navigation-failed");
-          alert(`지도조사 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
+          alert(`지도+보상 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
           return;
         }
 
@@ -19334,14 +19591,14 @@ ${lastServerListError}`
             if (result?.ok === false && !result?.stopped) {
               const firstError = result?.errors?.[0]?.result;
               const message = firstError?.error?.message || firstError?.reason || result?.reason || "알 수 없는 오류";
-              alert(`지도조사 실패\n\n${message}`);
+              alert(`지도+보상 실패\n\n${message}`);
             }
             render();
           })
           .catch(error => {
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("map-error");
             console.error("[TopWar V2.7 UI] 반복 서버조사 실패:", error);
-            alert(`지도조사 오류\n\n${error?.message || String(error)}`);
+            alert(`지도+보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
       }
@@ -19361,11 +19618,11 @@ ${lastServerListError}`
       event.stopPropagation();
 
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
-        alert("지도조사를 먼저 OFF 한 뒤 진행 위치를 초기화하세요.");
+        alert("지도+보상 조사를 먼저 OFF 한 뒤 진행 위치를 초기화하세요.");
         return;
       }
 
-      if (confirm("보상탐색 큐와 저장된 지도조사 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
+      if (confirm("보상탐색 큐와 저장된 지도+보상 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
         TOPWAR.clearThiefQueue?.();
         TOPWAR.clearServerSurveyResume?.();
         render();
@@ -19506,7 +19763,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar Unified V2.14.9.43 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[TopWar Unified V2.14.9.49 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -19526,7 +19783,7 @@ ${lastServerListError}`
     bootUi();
   }
 
-  console.log("%c[TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix] UI installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.48 - Recovery UI Ready Wait Fix] UI installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -20499,7 +20756,7 @@ ${lastServerListError}`
 })();
 
 /* ---------------------------------------------------------------------------
- * TopWar Unified Automation V2.14.9.43 Runtime Integration
+ * TopWar Unified Automation V2.14.9.48 Runtime Integration
  * - 도둑 상세창의 현재 라운드 감지
  * - 서버별 1회 조사 → GitHub 업로드 → Soft Reset
  * - 반복 조사와 Soft Reset을 하나의 runMultiServerSurvey 래퍼로 통합
@@ -21673,7 +21930,7 @@ ${lastServerListError}`
     closeVisiblePopupsForSoftReset: closeVisiblePopups
   });
 
-  console.log("%c[TopWar Unified Automation V2.14.9.43 Runtime] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Unified Automation V2.14.9.48 Runtime] installed", "color:#00e676;font-weight:bold");
 })();
 /* ---------------------------------------------------------------------------
  * TopWar V2.9 Storage Policy Override
@@ -24395,8 +24652,8 @@ ${lastServerListError}`
       return { ok: false, completed: false, serverId, reason: "moveMapToStableUnified not found" };
     }
 
-    if (typeof TOPWAR.buildScanCoords !== "function" || typeof TOPWAR.buildScanPlan !== "function") {
-      return { ok: false, completed: false, serverId, reason: "scan helper not found" };
+    if (typeof TOPWAR.getFortCacheEntry !== "function") {
+      return { ok: false, completed: false, serverId, reason: "fort cache helper not found" };
     }
 
     const controller = typeof TOPWAR.mapCtrl === "function" ? TOPWAR.mapCtrl() : null;
@@ -24410,20 +24667,35 @@ ${lastServerListError}`
 
     const range = controller.getWorldMapDataInstance?.()?.status?.viewport?.range;
     const subMap = options.subMap ?? range?.sub ?? 0;
-    const xs = TOPWAR.buildScanCoords(options.startX ?? 50, options.endX ?? 750, options.stepX ?? 80, "x");
-    const ys = TOPWAR.buildScanCoords(options.startY ?? 50, options.endY ?? 875, options.stepY ?? 75, "y");
-    const plan = TOPWAR.buildScanPlan(xs, ys, {
-      startCorner: options.startCorner ?? "top-left",
-      snake: options.snake !== false
-    });
+    const fortCache = TOPWAR.getFortCacheEntry(serverId);
+    const forts = Array.isArray(fortCache?.forts) ? fortCache.forts : [];
+    const fastFortMode = forts.length > 0 && fortCache?.complete !== false;
 
-    const totalMoves = plan.reduce((sum, row) => sum + row.xOrder.length, 0);
+    let plan = [];
+    if (fastFortMode) {
+      plan = forts.map(row => ({ y: Number(row.y), xOrder: [Number(row.x)] }));
+      console.log(`[TopWar Reward Finder] server=${serverId} 보루 캐시 ${forts.length}개 사용 → 고속 모드`);
+    } else {
+      if (typeof TOPWAR.buildScanCoords !== "function" || typeof TOPWAR.buildScanPlan !== "function") {
+        return { ok: false, completed: false, serverId: Number(serverId), reason: "scan helper not found" };
+      }
+      const xs = TOPWAR.buildScanCoords(options.startX ?? 50, options.endX ?? 750, options.stepX ?? 80, "x");
+      const ys = TOPWAR.buildScanCoords(options.startY ?? 50, options.endY ?? 875, options.stepY ?? 75, "y");
+      plan = TOPWAR.buildScanPlan(xs, ys, {
+        startCorner: options.startCorner ?? "top-left",
+        snake: options.snake !== false
+      });
+      console.warn(`[TopWar Reward Finder] server=${serverId} 보루 캐시 없음/불완전 → 최초 전체 스캔으로 자동 학습`);
+    }
+
+    reward.fortMap = new Map();
+    const totalMoves = plan.reduce((sum, row) => sum + (Array.isArray(row.xOrder) ? row.xOrder.length : 0), 0);
     const startedAt = nowIso();
     const startedMs = Date.now();
     let moveIndex = 0;
     let failCount = 0;
 
-    console.log(`[TopWar Reward Finder] 서버 ${serverId} 지도 스캔 시작: ${totalMoves} moves`);
+    console.log(`[TopWar Reward Finder] 서버 ${serverId} ${fastFortMode ? `보루 고속 스캔 시작: ${forts.length} forts` : `보루 자동학습 전체 스캔 시작: ${totalMoves} moves`}`);
 
     for (const row of plan) {
       for (const x of row.xOrder) {
@@ -24545,13 +24817,30 @@ ${lastServerListError}`
       Number(a.x ?? 0) - Number(b.x ?? 0) || Number(a.y ?? 0) - Number(b.y ?? 0)
     );
 
+    const finishedAt = nowIso();
+    let learnedFortCache = null;
+    if (!fastFortMode && !allMovesFailed && typeof TOPWAR.saveFortLocations === "function") {
+      const learnedForts = [...(reward.fortMap instanceof Map ? reward.fortMap.values() : [])];
+      learnedFortCache = TOPWAR.saveFortLocations(serverId, learnedForts, {
+        scannedAt: finishedAt,
+        complete: failCount === 0,
+        totalMoves,
+        failCount
+      });
+      console.log(`[TopWar Reward Finder] server=${serverId} 보루 자동학습 완료: ${learnedForts.length}개, complete=${learnedFortCache?.complete === true}`);
+    }
+
     return {
       ok: !allMovesFailed,
       completed: true,
       serverId: Number(serverId),
       startedAt,
-      finishedAt: nowIso(),
+      finishedAt,
       elapsedSec: Math.round((Date.now() - startedMs) / 1000),
+      scanMode: fastFortMode ? "fort-fast" : "full-auto-learn",
+      fortCount: fastFortMode ? forts.length : (reward.fortMap?.size ?? 0),
+      fortCacheComplete: fastFortMode ? (fortCache?.complete !== false) : (learnedFortCache?.complete === true),
+      fortCache: learnedFortCache,
       totalMoves,
       failCount,
       count: locations.length,
@@ -25004,7 +25293,7 @@ ${lastServerListError}`
       status = document.createElement("div");
       status.id = STATUS_ID;
       status.style.cssText = "font-size:10px;line-height:1.4;color:#aaa;word-break:break-word;";
-      status.textContent = "cityReward 객체 보유 기지만 GitHub 저장 · 서버 미입력 시 popular 전체";
+      status.textContent = "보루 캐시 사용 시 초고속 순회 · 캐시 없는 서버는 최초 1회 자동 전체스캔 후 학습";
       box.appendChild(status);
       actionGroup.insertAdjacentElement("afterend", box);
     }
@@ -25125,7 +25414,7 @@ ${lastServerListError}`
         const upload = reward.lastUpload;
         status.innerHTML = reward.lastResult
           ? `${reward.cycle ?? 0}회차에서 종료 / 완료회차 ${reward.cyclesCompleted ?? 0} / 누적 서버스캔 ${reward.totalServerScans ?? 0}회<br>발견 ${reward.totalFound} / GitHub: ${upload?.ok ? "업로드 완료" : upload?.error ? `실패 - ${upload.error}` : "-"}`
-          : "cityReward 객체 보유 기지만 GitHub 저장 · 서버 미입력 시 popular 전체";
+          : "보루 캐시 사용 시 초고속 순회 · 캐시 없는 서버는 최초 1회 자동 전체스캔 후 학습";
       }
     }, 500);
 
@@ -25219,8 +25508,8 @@ function migrateLegacyRealPowerToken() {
 
 
 const loopRuntime = {stopRequested: false,runningPromise: null,abortController: null,mode: "idle",progress: {currentIndex: 0,total: 0,currentServerId: null,phase: "idle"}};
-// V2.14.9.43: 전체 서버 진행 큐는 페이지 런타임에서만 유지한다.
-// V2.14.9.43: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
+// V2.14.9.48: 전체 서버 진행 큐는 페이지 런타임에서만 유지한다.
+// V2.14.9.48: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
 // 새로고침 복구는 TOPWAR_ACTIVE_RECOVERY_V1의 mode/serverId/startedAt만 사용한다.
 let runtimeServerQueue = null;
 try { localStorage.removeItem(QUEUE_KEY); } catch {}
