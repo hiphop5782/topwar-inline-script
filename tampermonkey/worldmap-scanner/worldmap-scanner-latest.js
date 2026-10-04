@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.43 - Recovery UI Ready Wait Fix
+// @name         TopWar Unified Automation V2.14.9.47 - Reward Tracker Reliable Batch + Diagnostics
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.43
+// @version      2.14.9.47
 // @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -9438,6 +9438,9 @@ function inspectCurrentProfileItems() {
         state.ui?.serverSurveyBatch?.current?.serverId ??
         range()?.k ?? null;
       const collectedServerId = Number(detail?.k) > 0 ? detail.k : activeSurveyServerId;
+      // 수동 보상 추적은 기존 지도/보상 자동조사와 완전히 별도의 경량 옵저버다.
+      // OFF이면 함수 호출만 발생하고 순회, 화면 탐색, 업로드, 타이머는 작동하지 않는다.
+      window.TOPWAR_REWARD_TRACKER?.capture?.(record, detail, collectedServerId, normalizeMapPoint);
       record.collected = collectPointList(detail.pointList, {
         time: record.time,
         c: packet.c,
@@ -11715,6 +11718,7 @@ function inspectCurrentProfileItems() {
       return null;
     }
 
+    window.TOPWAR_REWARD_TRACKER?.stop?.("watch133-start");
     state.watch133.running = true;
     state.watch133.paused = false;
     state.watch133.pauseReason = null;
@@ -16763,6 +16767,7 @@ TOPWAR.clearThiefQueue()
   }
 
   async function runServerSurvey(serverIdOrOptions = {}) {
+  window.TOPWAR_REWARD_TRACKER?.stop?.("map-server-survey-start");
     if (state.connectionGuard?.disconnected) return { ok: false, stopped: true, reason: "connection guard disconnected" };
     const options = typeof serverIdOrOptions === "object"
       ? serverIdOrOptions
@@ -17079,6 +17084,7 @@ TOPWAR.clearThiefQueue()
   }
 
   async function runMultiServerSurvey(serverIdsOrOptions = {}) {
+  window.TOPWAR_REWARD_TRACKER?.stop?.("map-batch-survey-start");
     if (state.connectionGuard?.disconnected) return { ok: false, stopped: true, reason: "connection guard disconnected" };
     const options = typeof serverIdsOrOptions === "object" && !Array.isArray(serverIdsOrOptions)
       ? serverIdsOrOptions
@@ -18135,7 +18141,8 @@ TOPWAR.clearThiefQueue()
       const ids = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
       if (!ids.length) return { ok: false, reason: "serverIds is required" };
 
-      state.watch133.running = true;
+      window.TOPWAR_REWARD_TRACKER?.stop?.("watch133-start");
+    state.watch133.running = true;
       state.watch133.multiServer = {
         running: true,
         cycle: 0,
@@ -18865,6 +18872,7 @@ TOPWAR.clearThiefQueue()
     }
 
     async function runUnifiedFinderForServers(serverIds, overrides = {}) {
+    window.TOPWAR_REWARD_TRACKER?.stop?.("unified-reward-finder-start");
       const requestedIds = parseServerIdsStrict(serverIds);
       const allIds = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
       let ids = window.TOPWAR_RECOVERY?.consumeResumeServerList?.("reward", allIds) ?? allIds;
@@ -18899,7 +18907,8 @@ TOPWAR.clearThiefQueue()
       }
 
       state.watch133.lastUnifiedError = null;
-      state.watch133.running = true;
+      window.TOPWAR_REWARD_TRACKER?.stop?.("watch133-start");
+    state.watch133.running = true;
       state.watch133.paused = false;
       state.watch133.pauseReason = null;
       state.watch133.pauseInfo = null;
@@ -19198,6 +19207,7 @@ TOPWAR.clearThiefQueue()
           return;
         }
 
+        window.TOPWAR_REWARD_TRACKER?.stop?.("reward-ui-start");
         window.TOPWAR_RECOVERY?.begin?.("reward");
         try {
           await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
@@ -19266,6 +19276,7 @@ ${lastServerListError}`
         const includeRewards = surveyButton.dataset.includeRewards === "true";
         delete surveyButton.dataset.includeRewards;
         const recoveryMode = includeRewards ? "mapReward" : "map";
+        window.TOPWAR_REWARD_TRACKER?.stop?.("map-ui-start");
         window.TOPWAR_RECOVERY?.begin?.(recoveryMode);
         try {
           await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
@@ -24696,6 +24707,7 @@ ${lastServerListError}`
   }
 
   async function runRewardFinder(options = {}) {
+  window.TOPWAR_REWARD_TRACKER?.stop?.("standalone-reward-finder-start");
     const reward = ensureRewardState();
     if (reward.running) return { ok: false, reason: "already running" };
 
@@ -32703,7 +32715,7 @@ try {
 
 }
 
-async function startInfiniteLoop(options = {}) {await repairInvalidCompletedQueue();await migrateLegacyPracticeData();
+async function startInfiniteLoop(options = {}) {window.TOPWAR_REWARD_TRACKER?.stop?.("top100-start"); await repairInvalidCompletedQueue();await migrateLegacyPracticeData();
 
 if (loopRuntime.runningPromise) {
   pushLog("이미 무한반복 실행 중");
@@ -33611,6 +33623,569 @@ setTimeout(async () => {
 console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weight:bold", api);})();
 
 /* ============================================================================
+ * V2.14.9.47 Passive Reward Tracker - 5s periodic check + expiry-aware history
+ * - Only ordinary WORLD 901 data; no map movement or extra game polling when OFF.
+ * - Observations are received-area points; exact visible-viewport clipping still
+ *   needs confirmed game camera information.
+ * - While tracking is ON, examine accumulated NEW rewards once every 5 seconds
+ *   even while dragging. Never wait for pointer release or for 901 quiet time.
+ * - Make at most one new upload attempt per 5s tick, only when new rewards exist.
+ * - Persist acknowledged reward identities until expiration in IndexedDB;
+ *   previously uploaded rewards are never selected for another batch.
+ * - Keep network-failed batches in an isolated persistent retry queue; back off
+ *   retry attempts while continuing to check new data every 5 seconds.
+ * - Existing DataHub URL, authentication headers and merging server endpoint.
+ * - Any automatic survey forces permanent OFF; its own collection is unchanged.
+ * ========================================================================== */
+(function installPassiveRewardTracker() {
+  "use strict";
+  const UI_ID = "tw26-reward-tracker";
+  const STATUS_ID = "tw26-reward-tracker-status";
+  const ENDPOINT = "/api/v1/city-rewards/server";
+  const DB_NAME = "topwar-reward-tracker-history-v1";
+  const DB_STORE = "rewards";
+  const CHECK_INTERVAL_MS = 5000;
+  const RETRY_BASE_MS = 30000;
+  const MAX_BATCH = 100;
+  const MAX_PENDING = 1200;
+  // Only used when the game does not supply an explicit expiration.
+  const UNKNOWN_EXPIRY_MS = 30 * 60 * 1000;
+  const state = {
+    enabled: false, starting: false, generation: 0,
+    pending: new Map(), sent: new Map(), queuedKeys: new Set(),
+    timer: null, inflight: null, uploading: false,
+    lastNav: null, lastNavAt: 0, nextNonWorldNavAt: 0,
+    lastAttemptAt: 0, retryAfter: 0,
+    captured: 0, uploaded: 0, skipped: 0, dropped: 0, restored: 0,
+    received901: 0, world901: 0, rewardCandidates: 0,
+    excludedSent: 0, excludedPending: 0, rejectedServer: 0,
+    lastBatchSize: 0, lastBatchServer: null, lastBatchAt: null,
+    lastResponseSummary: null, lastBatchKeys: [],
+    lastUploadAt: null, lastError: null, lastResult: "대기",
+    disabledReason: "initial-off", db: null
+  };
+  const pointerOpts = { capture: true, passive: true };
+  let lastBusyAt = 0;
+  let lastBusy = false;
+
+  function busy(force = false) {
+    const now = Date.now();
+    if (!force && now - lastBusyAt < 350) return lastBusy;
+    const t = window.TOPWAR?.state || {};
+    let top100 = false;
+    let recovery = false;
+    try { top100 = window.REALPOWER?.getState?.()?.running === true; } catch {}
+    try {
+      const r = window.TOPWAR_RECOVERY?.status?.();
+      recovery = r?.running === true &&
+        ["reward", "map", "mapreward", "top100"].includes(String(r.mode || "").toLowerCase());
+    } catch {}
+    lastBusyAt = now;
+    return (lastBusy = !!(t.watch133?.running || t.ui?.serverSurvey?.running ||
+      t.ui?.serverSurveyBatch?.running || t.cityRewardFinder?.running ||
+      t.fullScan?.running || top100 || recovery));
+  }
+
+  function nav(force = false) {
+    const now = Date.now();
+    if (force || now - state.lastNavAt >= 1100) {
+      try { state.lastNav = window.TOPWAR_NAV?.detect?.()?.state || "UNKNOWN"; }
+      catch { state.lastNav = "UNKNOWN"; }
+      state.lastNavAt = now;
+    }
+    return state.lastNav;
+  }
+
+  function clearTimer() {
+    if (state.timer != null) clearInterval(state.timer);
+    state.timer = null;
+  }
+  function formatTime(iso) {
+    if (!iso) return "-";
+    const d = new Date(iso);
+    return Number.isFinite(d.getTime()) ? d.toLocaleTimeString() : "-";
+  }
+  function status() {
+    return {
+      enabled: state.enabled, starting: state.starting, autoSurvey: busy(),
+      view: state.enabled ? (state.lastNav || "UNKNOWN") : "OFF",
+      captured: state.captured, uploaded: state.uploaded, skipped: state.skipped,
+      dropped: state.dropped, restored: state.restored,
+      received901: state.received901, world901: state.world901,
+      rewardCandidates: state.rewardCandidates,
+      excludedSent: state.excludedSent, excludedPending: state.excludedPending,
+      rejectedServer: state.rejectedServer,
+      lastBatchSize: state.lastBatchSize, lastBatchServer: state.lastBatchServer,
+      lastBatchAt: state.lastBatchAt, lastResponseSummary: state.lastResponseSummary,
+      pending: state.pending.size, queued: state.queuedKeys.size,
+      lastUploadAt: state.lastUploadAt, lastAttemptAt: state.lastAttemptAt,
+      lastResult: state.lastResult, lastError: state.lastError,
+      disabledReason: state.disabledReason, endpoint: ENDPOINT,
+      uploading: state.uploading, dragging: false,
+      checkIntervalMs: CHECK_INTERVAL_MS,
+      retryRemainingMs: Math.max(0, state.retryAfter - Date.now())
+    };
+  }
+  function render() {
+    const btn = document.getElementById(UI_ID);
+    const box = document.getElementById(STATUS_ID);
+    if (!btn) return;
+    const blocked = busy();
+    if (state.enabled && blocked) { stop("automation-running"); return; }
+    // A transient non-WORLD signal must NOT erase rewards captured in WORLD.
+    // Render can run every 500ms; when panning or opening UI panels the nav
+    // detector may briefly report UNKNOWN. Keep the already captured batch and
+    // transmit only after the next confirmed WORLD tick (see flush()).
+    if (state.enabled && Date.now() - state.lastNavAt > 3000) nav();
+    btn.textContent = state.starting ? "보상추적 준비 중" : `보상추적 ${state.enabled ? "ON" : "OFF"}`;
+    btn.style.background = state.enabled ? "#277a56" : "#353535";
+    btn.style.color = state.enabled ? "#fff" : "#ddd";
+    btn.disabled = state.starting || (!state.enabled && blocked);
+    btn.style.opacity = btn.disabled ? ".55" : "1";
+    btn.title = blocked ? "자동조사 중에는 활성화할 수 없습니다" :
+      "일반 WORLD에서 5초마다 새 보상 확인 및 업로드 (드래그 중에도 진행)";
+    btn.dataset.tracker = state.enabled ? "on" : "off";
+    if (!box) return;
+    const viewText = blocked ? "자동조사 진행 중 · 추적 OFF" :
+      !state.enabled ? "추적 OFF" :
+      state.uploading ? "서버 전송 중" :
+      state.lastNav === "WORLD" ? "월드 감지 중 · 5초마다 처리" : "월드 외 화면 · 감지 대기";
+    const resultText = state.lastError ? `실패: ${state.lastError}` : state.lastResult;
+    const text = [
+      `상태: ${viewText}`,
+      `발견(신규): ${state.captured}건  |  HTTP 성공 전송: ${state.uploaded}건  |  대기: ${state.pending.size}건`,
+      `WORLD 901: ${state.world901}건 / 보상 후보: ${state.rewardCandidates}건`,
+      `이력으로 제외: ${state.excludedSent}건 | 대기 중복: ${state.excludedPending}건${state.dropped ? ` | 한도 초과: ${state.dropped}건` : ""}`,
+      `직전 전송: ${state.lastBatchSize}건 (서버 ${state.lastBatchServer ?? "-"})`,
+      `최근 업로드: ${formatTime(state.lastUploadAt)}  |  업로드 상태: ${resultText}`,
+      state.queuedKeys.size ? `오프라인 재전송 예약: ${state.queuedKeys.size}건 (추적 ON 중에만)` : "",
+      state.enabled && state.retryAfter > Date.now() && state.pending.size
+        ? `전송 오류 재시도 대기: ${Math.ceil((state.retryAfter - Date.now()) / 1000)}초` : "",
+      `대상: ${ENDPOINT}`
+    ].filter(Boolean).join("\n");
+    if (box.textContent !== text) box.textContent = text;
+    box.style.borderColor = state.lastError ? "#a74a4a" : "#3a4d42";
+  }
+
+  function openHistory() {
+    if (state.db) return Promise.resolve(state.db);
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains(DB_STORE)) {
+          request.result.createObjectStore(DB_STORE, { keyPath: "key" });
+        }
+      };
+      request.onsuccess = () => { state.db = request.result; resolve(state.db); };
+      request.onerror = () => reject(request.error || new Error("보상 이력 IndexedDB 열기 실패"));
+    });
+  }
+  function validExpiry(value) {
+    if (value == null || value === "") return null;
+    let ms = null;
+    if (typeof value === "number" || /^\d+$/.test(String(value))) {
+      const n = Number(value);
+      if (Number.isFinite(n) && n > 0) ms = n < 1e11 ? n * 1000 : n;
+    } else {
+      ms = Date.parse(String(value));
+    }
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
+  function rewardEndValue(reward) {
+    // Match the existing full-survey parser's accepted expiration fields.
+    return reward?.endTimeMilli ?? reward?.endTime ??
+      reward?.expireTimeMilli ?? reward?.expireTime ?? reward?.expireAt;
+  }
+  function expiryFor(reward, at = Date.now()) {
+    return validExpiry(rewardEndValue(reward)) || at + UNKNOWN_EXPIRY_MS;
+  }
+  function keyFor(row) {
+    const reward = row.cityReward || {};
+    const city = String(row.uid || row.pointId || `${row.x}:${row.y}`);
+    const instance = reward.instanceId == null ? "" : String(reward.instanceId).trim();
+    if (instance) return `${row.serverId}:city:${city}:instance:${instance}`;
+    const end = validExpiry(rewardEndValue(reward));
+    // Unknown-expiry rewards are conservatively deduplicated only for this
+    // short fallback lifetime; do not suppress future rewards indefinitely.
+    return `${row.serverId}:city:${city}:end:${end || "unknown"}`;
+  }
+  function dbWrite(entries) {
+    if (!entries.length) return Promise.resolve();
+    return openHistory().then(db => new Promise((resolve, reject) => {
+      const tx = db.transaction(DB_STORE, "readwrite");
+      const store = tx.objectStore(DB_STORE);
+      for (const record of entries) store.put(record);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error("보상 이력 쓰기 실패"));
+      tx.onabort = () => reject(tx.error || new Error("보상 이력 트랜잭션 중단"));
+    }));
+  }
+  function loadHistory() {
+    return openHistory().then(db => new Promise((resolve, reject) => {
+      const now = Date.now();
+      const sent = new Map();
+      const queued = new Map();
+      const tx = db.transaction(DB_STORE, "readwrite");
+      const store = tx.objectStore(DB_STORE);
+      const cursor = store.openCursor();
+      cursor.onsuccess = () => {
+        const cur = cursor.result;
+        if (!cur) return;
+        const item = cur.value;
+        if (!item?.key || !Number.isFinite(Number(item.expiresAt)) || Number(item.expiresAt) <= now) {
+          cur.delete();
+        } else if (item.status === "sent") {
+          sent.set(item.key, Number(item.expiresAt));
+        } else if (item.status === "queued" && item.row) {
+          queued.set(item.key, item.row);
+        } else {
+          cur.delete();
+        }
+        cur.continue();
+      };
+      tx.oncomplete = () => resolve({ sent, queued });
+      tx.onerror = () => reject(tx.error || new Error("보상 업로드 이력 읽기 실패"));
+      tx.onabort = () => reject(tx.error || new Error("보상 이력 읽기 중단"));
+    }));
+  }
+  function stop(reason = "manual-off") {
+    state.generation++;
+    const active = state.enabled || state.starting;
+    state.enabled = false;
+    state.starting = false;
+    state.uploading = false;
+    state.disabledReason = reason;
+    clearTimer();
+    state.pending.clear();
+    state.queuedKeys.clear();
+    state.lastNav = null;
+    state.lastNavAt = 0;
+    state.nextNonWorldNavAt = 0;
+    if (state.inflight) { try { state.inflight.abort(); } catch {} }
+    state.inflight = null;
+    // The persisted sent history and failed requests are intentionally kept.
+    if (active) console.log("[TopWar Reward Tracker] OFF:", reason);
+    render();
+    return status();
+  }
+  async function start() {
+    if (state.enabled) return { ok: true, state: status() };
+    if (state.starting) return { ok: false, reason: "이미 활성화 준비 중" };
+    if (busy(true)) return { ok: false, reason: "자동조사 중에는 추적 ON 불가" };
+    if (!window.TOPWAR_NAV?.detect) return { ok: false, reason: "월드 상태 판별기를 찾지 못했습니다" };
+    const settings = window.TOPWAR_DATAHUB?.readSettings?.() || {};
+    if (!settings.baseUrl || !settings.scannerId || !settings.key) {
+      return { ok: false, reason: "DataHub 조사기 ID 및 Token을 먼저 설정하세요" };
+    }
+    const generation = ++state.generation;
+    state.starting = true;
+    state.lastError = null;
+    render();
+    try {
+      const history = await loadHistory();
+      if (generation !== state.generation) return { ok: false, reason: "활성화 중 취소됨" };
+      if (busy(true)) { stop("automation-running"); return { ok: false, reason: "자동조사 진행 중" }; }
+      state.sent = history.sent;
+      state.pending = history.queued;
+      state.queuedKeys = new Set(history.queued.keys());
+      state.restored = history.queued.size;
+      state.enabled = true;
+      state.starting = false;
+      state.disabledReason = null;
+      state.lastNav = null;
+      state.lastNavAt = 0;
+      state.nextNonWorldNavAt = 0;
+      // The only tracker-owned periodic timer exists while tracking is ON.
+      clearTimer();
+      state.timer = setInterval(() => { void flush(); }, CHECK_INTERVAL_MS);
+      render();
+      console.log("[TopWar Reward Tracker] ON / existing DataHub merge API:", ENDPOINT);
+      return { ok: true, state: status() };
+    } catch (error) {
+      if (generation !== state.generation) return { ok: false, reason: "활성화 중 취소됨" };
+      state.starting = false;
+      state.lastError = `중복 업로드 방지 이력 불러오기 실패: ${error?.message || String(error)}`;
+      render();
+      return { ok: false, reason: state.lastError };
+    }
+  }
+  function capture(record, detail, fallbackServerId, normalizeMapPoint) {
+    if (!state.enabled) return; // OFF hot path: one optional call and immediate return.
+    state.received901++;
+    if (busy()) { stop("automation-running"); return; }
+    // When the user enters WORLD, its first 901 packets can arrive before a
+    // cached BASE/MINIMAP state expires. Re-check a negative signal immediately,
+    // throttled to one extra check per 350ms. Otherwise the initial viewport's
+    // rewards can be silently missed and only a later packet gets uploaded.
+    if (nav() !== "WORLD") {
+      const now = Date.now();
+      if (now < state.nextNonWorldNavAt) return;
+      state.nextNonWorldNavAt = now + 350;
+      if (nav(true) !== "WORLD") return;
+    }
+    state.world901++;
+    const points = detail?.pointList;
+    if (!Array.isArray(points) || points.length === 0) return;
+    const now = Date.now();
+    // Capture only: the 5s interval controls uploads independently of dragging
+    // or continuous incoming 901 packets. No timer is reset by capture.
+    const seenAt = record?.time || new Date(now).toISOString();
+    let added = 0;
+    for (const point of points) {
+      if (Number(point?.pointType) !== 1) continue;
+      let n;
+      try {
+        n = normalizeMapPoint(point, { time: seenAt, c: 901,
+          seq: record?.packet?.seq, serverId: fallbackServerId });
+      } catch { continue; }
+      const reward = n?.cityReward;
+      if (!reward || typeof reward !== "object" || Array.isArray(reward)) continue;
+      state.rewardCandidates++;
+      const serverId = Number(n?.serverId) > 0 ? Number(n.serverId) : Number(fallbackServerId);
+      if (!Number.isFinite(serverId) || serverId <= 0) { state.rejectedServer++; continue; }
+      const expiresAt = expiryFor(reward, now);
+      if (expiresAt <= now) continue;
+      const row = {
+        serverId, x: n.x ?? point.x ?? null, y: n.y ?? point.y ?? null,
+        uid: n.uid == null ? null : String(n.uid),
+        username: n.username ?? n.nickname ?? null, level: n.level ?? null,
+        allianceId: n.allianceId == null ? null : String(n.allianceId),
+        allianceTag: n.allianceTag ?? null, pointId: n.id ?? point.id ?? null,
+        cityReward: reward,
+        cityRewardCreatedAt: validExpiry(reward.endTimeMilli) != null
+          ? new Date(validExpiry(reward.endTimeMilli) - 30 * 60 * 1000).toISOString() : null,
+        cityRewardSeenAt: seenAt, foundAt: seenAt
+      };
+      const key = keyFor(row);
+      const sentUntil = Number(state.sent.get(key) || 0);
+      if (sentUntil > now) { state.excludedSent++; state.skipped++; continue; }
+      if (state.pending.has(key)) { state.excludedPending++; state.skipped++; continue; }
+      if (state.pending.size >= MAX_PENDING) { state.dropped++; continue; }
+      state.pending.set(key, row);
+      state.captured++;
+      added++;
+    }
+    if (added) {
+      // Snapshot counts matter: older versions silently discarded pending
+      // rewards when UI navigation briefly changed during a drag.
+      console.debug("[TopWar Reward Tracker] capture", {
+        added, pending: state.pending.size, world901: state.world901,
+        candidates: state.rewardCandidates, skippedAsSent: state.excludedSent
+      });
+      render();
+    }
+  }
+
+  async function persistQueued(batch, requestId) {
+    const now = Date.now();
+    const records = batch.map(([key, row]) => ({
+      key, status: "queued", expiresAt: expiryFor(row.cityReward, now),
+      savedAt: now, requestId, row
+    })).filter(record => record.expiresAt > now);
+    await dbWrite(records);
+    for (const record of records) state.queuedKeys.add(record.key);
+  }
+  async function persistSent(batch) {
+    const now = Date.now();
+    const records = batch.map(([key, row]) => ({
+      key, status: "sent", expiresAt: expiryFor(row.cityReward, now),
+      savedAt: now
+    })).filter(record => record.expiresAt > now);
+    await dbWrite(records);
+    for (const record of records) {
+      state.sent.set(record.key, record.expiresAt);
+      state.queuedKeys.delete(record.key);
+    }
+  }
+
+  async function flush() {
+    if (!state.enabled || state.uploading || !state.pending.size) return;
+    if (busy(true)) { stop("automation-running"); return; }
+    const now = Date.now();
+    // One periodic 5s tick performs at most one request. Never block on drag
+    // or postpone uploads just because 901 packets keep arriving.
+    if (now < state.retryAfter) return;
+    if (document.visibilityState === "hidden" || nav(true) !== "WORLD") {
+      render();
+      return;
+    }
+    const settings = window.TOPWAR_DATAHUB?.readSettings?.() || {};
+    if (!settings.baseUrl || !settings.scannerId || !settings.key) {
+      state.lastError = "DataHub 인증 설정이 없습니다";
+      stop("datahub-not-configured");
+      return;
+    }
+    // Check the successful-upload history again immediately before batching.
+    // This protects against re-sending previously acknowledged items restored
+    // from the retry queue or observed again while another request was active.
+    for (const [key, row] of state.pending) {
+      const knownExpiry = validExpiry(rewardEndValue(row.cityReward));
+      if ((knownExpiry != null && knownExpiry <= now) || Number(state.sent.get(key) || 0) > now) {
+        state.pending.delete(key);
+        state.queuedKeys.delete(key);
+      }
+    }
+    const entries = [...state.pending.entries()];
+    if (!entries.length) { render(); return; }
+    const firstServer = Number(entries[0][1]?.serverId);
+    const batch = entries.filter(([, row]) => Number(row.serverId) === firstServer).slice(0, MAX_BATCH);
+    if (!batch.length) return;
+    const locations = batch.map(([, row]) => row);
+    const keys = batch.map(([key]) => key);
+    state.lastBatchSize = locations.length;
+    state.lastBatchServer = firstServer;
+    state.lastBatchAt = new Date().toISOString();
+    // Keep identifiers only, never log token or full player information.
+    state.lastBatchKeys = keys.slice(0, 100);
+    // Send a conventional request ID; server-side reward UPSERT makes replay
+    // harmless when a network timeout occurs after the server has committed.
+    const requestId = crypto.randomUUID?.() ||
+      `reward-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const generation = state.generation;
+    const controller = new AbortController();
+    state.inflight = controller;
+    state.uploading = true;
+    state.lastAttemptAt = Date.now();
+    state.lastResult = "전송 중";
+    state.lastError = null;
+    // The 5s interval stays active while a request is in flight.
+    // Overlapping ticks exit immediately because state.uploading is true.
+    render();
+    try {
+      const response = await fetch(`${String(settings.baseUrl).replace(/\/+$/, "")}${ENDPOINT}`, {
+        method: "POST", mode: "cors", cache: "no-store", credentials: "omit",
+        headers: {
+          "Accept": "application/json", "Content-Type": "application/json",
+          "Authorization": `Bearer ${settings.key}`,
+          "X-Scanner-Id": String(settings.scannerId), "X-Request-Id": requestId
+        },
+        body: JSON.stringify({
+          version: 3, serverId: firstServer, scannedAt: new Date().toISOString(),
+          count: locations.length, locations
+        }),
+        signal: controller.signal
+      });
+      const text = await response.text();
+      let body = null;
+      try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+      state.lastResponseSummary = typeof body === "string"
+        ? body.slice(0, 300)
+        : body && typeof body === "object"
+          ? JSON.stringify(body).slice(0, 500)
+          : `HTTP ${response.status} (empty body)`;
+      if (!response.ok || body?.ok === false || body?.success === false) {
+        const error = new Error(`DataHub HTTP ${response.status}: ${typeof body === "string" ? body.slice(0, 220) : JSON.stringify(body).slice(0, 220)}`);
+        error.status = response.status;
+        throw error;
+      }
+      if (controller.signal.aborted) return;
+      // Mark in memory immediately after server acknowledgement, then make the
+      // no-repeat history durable. Even if local persistence fails, this tab
+      // will not send these rewards again during this lifetime.
+      const acknowledgedAt = new Date().toISOString();
+      for (const [key, row] of batch) state.sent.set(key, expiryFor(row.cityReward));
+      try {
+        await persistSent(batch);
+      } catch (historyError) {
+        state.lastError = `서버 전송 성공 / 로컬 중복방지 저장 실패: ${historyError?.message || String(historyError)}`;
+      }
+      for (const key of keys) state.pending.delete(key);
+      state.uploaded += locations.length;
+      state.lastUploadAt = acknowledgedAt;
+      state.retryAfter = 0;
+      state.lastResult = state.lastError ? "서버 성공 · 로컬 이력 오류" : "성공";
+      console.log("[TopWar Reward Tracker] DataHub merge upload success", {
+        serverId: firstServer, submittedLocations: locations.length,
+        // A successful HTTP response is not proof that every row was merged.
+        // Compare this with the server response and persisted DB count.
+        requestId, response: body
+      });
+    } catch (error) {
+      if (controller.signal.aborted || !state.enabled || generation !== state.generation) return;
+      state.lastError = error?.message || String(error);
+      const permanent = [400, 401, 403, 404, 413, 422].includes(Number(error?.status));
+      state.lastResult = permanent ? "요청 거절" : "실패 · 재전송 예약";
+      if (permanent) {
+        // Keep rows in RAM for inspection, but do not hammer a bad request.
+        state.retryAfter = Date.now() + 5 * 60 * 1000;
+      } else {
+        state.retryAfter = Date.now() + RETRY_BASE_MS;
+        try { await persistQueued(batch, requestId); }
+        catch (queueError) {
+          state.lastError += ` / 재전송 이력 저장 실패: ${queueError?.message || String(queueError)}`;
+        }
+      }
+      console.warn("[TopWar Reward Tracker] upload failed", state.lastError);
+    } finally {
+      if (state.inflight === controller) state.inflight = null;
+      if (generation === state.generation) {
+        state.uploading = false;
+        render();
+      }
+    }
+  }
+
+  function installButton() {
+    const group = document.getElementById("tw26-scan-actions");
+    if (!group) return false;
+    let button = document.getElementById(UI_ID);
+    if (!button) {
+      button = document.createElement("button");
+      button.id = UI_ID;
+      button.type = "button";
+      button.style.cssText = "height:38px;border:0;border-radius:7px;background:#353535;color:#ddd;font-size:12px;font-weight:700;cursor:pointer;min-width:0;";
+      button.addEventListener("click", async event => {
+        event.stopPropagation();
+        event.preventDefault();
+        if (state.enabled || state.starting) stop("manual-off");
+        else {
+          const result = await start();
+          if (!result.ok && result.reason !== "활성화 중 취소됨") alert(result.reason);
+        }
+        render();
+      });
+      group.appendChild(button);
+    }
+    let box = document.getElementById(STATUS_ID);
+    if (!box) {
+      box = document.createElement("div");
+      box.id = STATUS_ID;
+      box.style.cssText = "margin-top:6px;padding:7px 8px;border:1px solid #3a4d42;border-radius:6px;background:rgba(255,255,255,.04);font-size:10px;line-height:1.55;color:#aaa;white-space:pre-line;word-break:break-word;";
+      group.insertAdjacentElement("afterend", box);
+    }
+    render();
+    return true;
+  }
+  function debug() {
+    const s = status();
+    const result = {
+      ...s,
+      // No stored token or raw reward payload is included.
+      sentHistoryCount: state.sent.size,
+      lastBatchKeys: state.lastBatchKeys,
+      pendingRows: [...state.pending.entries()].slice(0, 100).map(([key, row]) => ({
+        key, serverId: row.serverId, x: row.x, y: row.y,
+        expireAt: rewardEndValue(row.cityReward),
+        queued: state.queuedKeys.has(key)
+      }))
+    };
+    console.table(result.pendingRows);
+    console.info("[TopWar Reward Tracker] debug", result);
+    return result;
+  }
+  window.TOPWAR_REWARD_TRACKER = Object.freeze({
+    start, stop, capture, flush, status, debug, installButton, render,
+    constants: Object.freeze({ ENDPOINT, CHECK_INTERVAL_MS, RETRY_BASE_MS, MAX_BATCH, MAX_PENDING })
+  });
+  // This timer only waits for the host panel to appear, then destroys itself.
+  if (!installButton()) {
+    const bootTimer = setInterval(() => { if (installButton()) clearInterval(bootTimer); }, 1200);
+    window.addEventListener("beforeunload", () => clearInterval(bootTimer), { once: true });
+  }
+  window.addEventListener("beforeunload", () => stop("unload"), { once: true });
+})();
+
+/* ============================================================================
  * V2.12.1 RealPower unified-panel bridge
  * - Separate backend, shared TOPWAR GitHub token
  * - Main button: Top100조사 ON/OFF
@@ -33691,6 +34266,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     if (!await ensureSharedToken()) return;
 
+    window.TOPWAR_REWARD_TRACKER?.stop?.("top100-ui-start");
     window.TOPWAR_RECOVERY?.begin?.("top100");
     try {
       await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP");
@@ -33726,6 +34302,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     if (!await ensureSharedToken()) return;
     if (!confirm("전투력 조사 진행상태와 임시 저장 데이터를 지우고 처음부터 시작할까요?\nGitHub 토큰은 유지됩니다.")) return;
 
+    window.TOPWAR_REWARD_TRACKER?.stop?.("top100-ui-start");
     window.TOPWAR_RECOVERY?.begin?.("top100");
     try {
       await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP");
@@ -33776,6 +34353,8 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     const progress = state.progress || {};
     const running = state.running === true;
     const blocked = otherAutomationRunning();
+    window.TOPWAR_REWARD_TRACKER?.installButton?.();
+    window.TOPWAR_REWARD_TRACKER?.render?.();
 
     button.textContent = "Top100조사";
     button.title = running ? "실행 중 · 클릭하면 중지" : "중지됨 · 클릭하면 실행";
