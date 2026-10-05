@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.52 - Fast Reward / Map Scan / Full Scan
+// @name         TopWar Unified Automation V2.14.9.53 - Top100 Stable Transitions
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.52
+// @version      2.14.9.53
 // @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -25646,18 +25646,34 @@ coordinateBaseWidth: 480,
 coordinateBaseHeight: 720,
 
 // 자동 클릭/대기 설정
-clickDelayMs: 1200,
-moveDelayMs: 1800,
+clickDelayMs: 1500,
+moveDelayMs: 2400,
+serverSelectionWaitMs: 2400,
 moveTimeoutMs: 15000,
 movePollIntervalMs: 200,
 moveRetryCount: 2,
-moveRetryDelayMs: 1000,
-minimumMoveSettleMs: 1200,
+moveRetryDelayMs: 1200,
+minimumMoveSettleMs: 1500,
+
+// Top100 화면 전환 안정화.
+// 고정 시간만 기다리고 다음 클릭을 넣지 않고, 실제 패널/버튼 준비 상태를 함께 확인한다.
+serverCardOpenRetryCount: 2,
+serverCardRetryDelayMs: 1400,
+theaterOpenTimeoutMs: 10000,
+afterBattleAreaEntryDelayMs: 700,
+afterRankCloseDelayMs: 900,
+battleAreaControlsTimeoutMs: 5000,
+commandCloseVerifyMs: 1200,
+serverListReturnTimeoutMs: 7000,
+afterTheaterCloseDelayMs: 1400,
+
 rankOpenTimeoutMs: 12000,
 rankDataTimeoutMs: 20000,
 // 시간 기준이 아니라 개인 100명 / 동맹 2개 수신 여부만 확인한다.
 rankPollIntervalMs: 100,
-betweenServerDelayMs: 1500,
+rankRetryDelayMs: 400,
+wrongRankRetryDelayMs: 500,
+betweenServerDelayMs: 2500,
 loopDelayMs: 3000,
 requiredPlayerCount: 100,
 requiredAllianceCount: 2,
@@ -27654,22 +27670,70 @@ return point;
 
 async function openSelectedServerByCanvasCenter(serverId, options = {}) {const settings = getSettings(options);
 
-throwIfStopped();
+const target = Number(serverId);
+const maxAttempts = Math.max(
+  1,
+  Number(settings.serverCardOpenRetryCount ?? 2)
+);
 
-const click = clickCanvasCenter();
+let lastAttempt = null;
 
-// UI 로딩만 기다리고 TheaterPanel 탐지 실패로 조사를 중단하지 않는다.
-// 실제 진입 여부는 다음 개인 랭킹 단계에서 자연스럽게 검증된다.
-await sleep(Number(settings.serverCardOpenDelayMs ?? 1600));
+for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  throwIfStopped();
 
-throwIfStopped();
+  const click = clickCanvasCenter();
 
-return {
-  ok: true,
-  method: "canvas-center-dom-click",
-  serverId: Number(serverId),
-  click
-};
+  // V2.14.9.53:
+  // 예전에는 중앙 클릭 후 고정 1.6초만 기다리고 바로 랭킹 버튼을 눌렀다.
+  // 서버 전환 렌더링이 늦으면 이전/중간 화면에 다음 입력이 들어가 Cocos 화면이
+  // 비어 보이는 현상이 생길 수 있으므로 실제 전투지역 UI가 준비될 때까지 확인한다.
+  const entered = await waitForBattleAreaEntry(
+    target,
+    {
+      ...settings,
+      moveTimeoutMs:
+        Number(settings.theaterOpenTimeoutMs ?? 10000),
+      minimumMoveSettleMs:
+        Number(settings.minimumMoveSettleMs ?? 1500)
+    }
+  );
+
+  lastAttempt = {
+    attempt,
+    click,
+    entered
+  };
+
+  pushLog(`${target} 전투 지역 진입 확인 (${attempt}/${maxAttempts})`, lastAttempt);
+
+  if (entered.ok) {
+    await sleep(
+      Number(settings.afterBattleAreaEntryDelayMs ?? 700)
+    );
+
+    throwIfStopped();
+
+    return {
+      ok: true,
+      method: "canvas-center-dom-click-verified",
+      serverId: target,
+      attempt,
+      click,
+      entered
+    };
+  }
+
+  if (attempt < maxAttempts) {
+    await sleep(
+      Number(settings.serverCardRetryDelayMs ?? 1400)
+    );
+  }
+}
+
+throw new Error(
+  `${target} 서버 전투 지역 화면이 안정화되지 않았습니다. ` +
+  `다음 입력을 중단해 화면 전환 중첩을 방지합니다.`
+);
 
 }
 
@@ -30467,18 +30531,63 @@ return {
 
 }
 
+async function waitForBattleAreaControlsReady(timeoutMs = 5000) {
+const startedAt = Date.now();
+
+while (Date.now() - startedAt < timeoutMs) {
+  throwIfStopped();
+
+  const rankClosed =
+    !componentIsActive("WorldServerPowerRank") &&
+    !componentIsActive("WorldServerAlliancePowerRank");
+
+  if (rankClosed && hasBattleAreaRankButtons()) {
+    return {
+      ok: true,
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  await sleep(100);
+}
+
+return {
+  ok: false,
+  elapsedMs: Date.now() - startedAt,
+  personalRankActive:
+    componentIsActive("WorldServerPowerRank"),
+  allianceRankActive:
+    componentIsActive("WorldServerAlliancePowerRank"),
+  rankButtonsVisible:
+    hasBattleAreaRankButtons()
+};
+
+}
+
 async function closeByJavaBackPoint(componentName, options = {}) {
 // 기존 함수명은 호환을 위해 유지하지만 좌표 클릭은 사용하지 않는다.
-const result = await closePanelByCommand(componentName,options);
+const settings = getSettings(options);
+const result = await closePanelByCommand(componentName,settings);
 
 await sleep(
-  Number(
-    getSettings(options).afterRankCloseDelayMs ?? 500
-  )
+  Number(settings.afterRankCloseDelayMs ?? 900)
 );
+
+// 랭킹 패널 inactive만 확인하면 Cocos의 복귀 애니메이션이 끝나지 않은 상태일 수 있다.
+// 전투지역의 랭킹 버튼이 실제로 다시 보일 때까지 기다려 다음 입력의 중첩을 막는다.
+const controlsReady = await waitForBattleAreaControlsReady(
+  Number(settings.battleAreaControlsTimeoutMs ?? 5000)
+);
+
+if (!controlsReady.ok) {
+  throw new Error(
+    `${componentName} 닫은 뒤 전투 지역 화면이 안정화되지 않았습니다.`
+  );
+}
 
 return {
   ...result,
+  controlsReady,
   compatibilityName: "closeByJavaBackPoint",
   coordinateUsed: false
 };
@@ -30487,14 +30596,54 @@ return {
 
 async function exitTheaterByJavaBackPoint(options = {}) {
 // WorldServerTheaterPanel 역시 close/back 명령만 사용한다.
-const result = await closePanelByCommand("WorldServerTheaterPanel",options);
+const settings = getSettings(options);
+const result = await closePanelByCommand(
+  "WorldServerTheaterPanel",
+  settings
+);
+
+// 서버 목록이 실제로 다시 활성화될 때까지 기다린다.
+let serverListReady = await waitForComponentActive(
+  "WorldServerListPanel",
+  Number(settings.serverListReturnTimeoutMs ?? 7000)
+);
+
+if (!serverListReady) {
+  // 화면 전환이 꼬인 경우 다음 서버를 억지로 누르지 않고
+  // 기존 Recovery를 이용해 WORLD_MAP/서버목록 화면으로 복구한다.
+  try {
+    await window.TOPWAR_RECOVERY?.ensureNavigation?.(
+      "WORLD_MAP",
+      {
+        timeout:
+          Number(settings.moveTimeoutMs ?? 15000)
+      }
+    );
+  } catch (error) {
+    pushLog("Top100 서버목록 화면 복구 실패", {
+      error: error?.message || String(error)
+    });
+  }
+
+  serverListReady = await waitForComponentActive(
+    "WorldServerListPanel",
+    Number(settings.serverListReturnTimeoutMs ?? 7000)
+  );
+}
+
+if (!serverListReady) {
+  throw new Error(
+    "전투 지역을 닫은 뒤 서버 목록 화면으로 복귀하지 못했습니다."
+  );
+}
 
 await sleep(
-  Number(getSettings(options).clickDelayMs ?? 1200)
+  Number(settings.afterTheaterCloseDelayMs ?? 1400)
 );
 
 return {
   ...result,
+  serverListReady,
   theaterExit: true,
   coordinateUsed: false
 };
