@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.49 - Fort Auto-Learn + Fast Reward Scan
+// @name         TopWar Unified Automation V2.14.9.50 - Cache-First Fort Auto-Learn + Fast Reward Scan
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.49
+// @version      2.14.9.50
 // @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -19492,9 +19492,9 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar Unified V2.14.9.49 UI] 보상탐색 종료:", result);
+            console.log("[TopWar Unified V2.14.9.50 UI] 보상탐색 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar Unified V2.14.9.49 UI] 통합찾기 실패 원인:", result.reason);
+              console.error("[TopWar Unified V2.14.9.50 UI] 통합찾기 실패 원인:", result.reason);
               alert(`보상탐색 실행 실패\n\n${result.reason}`);
             }
             render();
@@ -19503,7 +19503,7 @@ ${lastServerListError}`
             state.watch133.running = false;
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar Unified V2.14.9.49 UI] 보상탐색 오류:", error);
+            console.error("[TopWar Unified V2.14.9.50 UI] 보상탐색 오류:", error);
             alert(`보상탐색 오류\n\n${error?.message || String(error)}`);
             render();
           });
@@ -19763,7 +19763,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar Unified V2.14.9.49 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[TopWar Unified V2.14.9.50 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -25049,6 +25049,44 @@ ${lastServerListError}`
       return !shouldStopRewardFinder();
     }
 
+    // V2.14.9.50: 보상탐색은 사용 가능한 보루 캐시가 있는 서버를 항상 먼저 처리한다.
+    // 같은 그룹 내부의 상대 순서는 그대로 유지하므로 기존 popular/sequential 정렬 의도는 보존한다.
+    function hasUsableFortCache(serverId) {
+      try {
+        const cache = TOPWAR.getFortCacheEntry?.(serverId) ?? null;
+        const forts = Array.isArray(cache?.forts) ? cache.forts : [];
+        return forts.length > 0 && cache?.complete !== false;
+      } catch {
+        return false;
+      }
+    }
+
+    function prioritizeFortCachedServers(ids) {
+      const normalized = parseRewardServerIds(ids);
+      const cached = [];
+      const uncached = [];
+
+      for (const serverId of normalized) {
+        (hasUsableFortCache(serverId) ? cached : uncached).push(serverId);
+      }
+
+      return {
+        serverIds: [...cached, ...uncached],
+        cached,
+        uncached
+      };
+    }
+
+    // 첫 회차부터 캐시 서버가 반드시 앞에 오도록 시작 전에 1차 정렬한다.
+    {
+      const ordered = prioritizeFortCachedServers(serverIds);
+      serverIds = ordered.serverIds;
+      console.log(
+        `[TopWar Reward Finder] 보루 캐시 우선 정렬: cached=${ordered.cached.length}, uncached=${ordered.uncached.length}`,
+        { cached: ordered.cached, uncached: ordered.uncached }
+      );
+    }
+
     reward.running = true;
     reward.stopRequested = false;
     reward.startedAt = nowIso();
@@ -25097,7 +25135,17 @@ ${lastServerListError}`
         session.completedServers = [];
         let completedThisCycle = 0;
 
-        console.log(`[TopWar Reward Finder] ===== ${cycle}회차 시작: ${serverIds.join(",")} =====`);
+        // 이전 회차에서 새로 학습된 보루 캐시까지 반영해서 매 회차 다시 우선순위를 계산한다.
+        // 따라서 캐시가 있는 서버는 언제나 캐시가 없는 서버보다 먼저 조회된다.
+        const orderedForCycle = prioritizeFortCachedServers(serverIds);
+        serverIds = orderedForCycle.serverIds;
+        reward.serverIds = serverIds.slice();
+        session.serverIds = serverIds.slice();
+
+        console.log(
+          `[TopWar Reward Finder] ===== ${cycle}회차 시작: ${serverIds.join(",")} ===== ` +
+          `(보루캐시 ${orderedForCycle.cached.length} / 학습필요 ${orderedForCycle.uncached.length})`
+        );
 
         for (let index = 0; index < serverIds.length; index++) {
           const serverId = serverIds[index];
