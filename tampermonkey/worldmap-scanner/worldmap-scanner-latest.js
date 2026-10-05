@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.50 - Cache-First Fort Auto-Learn + Fast Reward Scan
+// @name         TopWar Unified Automation V2.14.9.52 - Fast Reward / Map Scan / Full Scan
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.50
+// @version      2.14.9.52
 // @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -9611,12 +9611,25 @@ function inspectCurrentProfileItems() {
       // 수동 보상 추적은 기존 지도/보상 자동조사와 완전히 별도의 경량 옵저버다.
       // OFF이면 함수 호출만 발생하고 순회, 화면 탐색, 업로드, 타이머는 작동하지 않는다.
       window.TOPWAR_REWARD_TRACKER?.capture?.(record, detail, collectedServerId, normalizeMapPoint);
-      record.collected = collectPointList(detail.pointList, {
-        time: record.time,
-        c: packet.c,
-        seq: packet.seq,
-        serverId: collectedServerId
-      });
+      // 지도스캔(mode=map)은 기지/플레이어/동맹 정보를 수집하지 않는다.
+      // 보상, 보루, 133 도둑은 아래 전용 경로에서 별도로 수집된다.
+      const activeSurveyForBaseInfo = state.ui?.serverSurvey;
+      if (activeSurveyForBaseInfo?.running === true && activeSurveyForBaseInfo.collectBaseInfo === false) {
+        record.collected = {
+          skippedBaseInfo: true,
+          reason: "map-scan-no-base-info",
+          totalObjects: state.objectMap.size,
+          totalPlayers: state.playerMap.size,
+          totalAlliances: state.allianceMap.size
+        };
+      } else {
+        record.collected = collectPointList(detail.pointList, {
+          time: record.time,
+          c: packet.c,
+          seq: packet.seq,
+          serverId: collectedServerId
+        });
+      }
 
       // 지도+보상 조사에서는 901을 받은 바로 이 시점에 cityReward 원본을 별도 맵에 보존한다.
       // 서버 완료 시 playerMap/최근 2개 패킷을 다시 검색하는 경로에만 의존하면 중간에 본
@@ -10309,7 +10322,7 @@ function inspectCurrentProfileItems() {
           interval: options.interval ?? 30,
           maxRetries: options.maxRetries ?? 1,
           retryDelay: options.retryDelay ?? 250,
-          collectCache: options.collectCache ?? true
+          collectCache: options.collectBaseInfo === false ? false : (options.collectCache ?? true)
         });
 
         count++;
@@ -16815,7 +16828,8 @@ TOPWAR.clearThiefQueue()
           interval: options.interval ?? 30,
           maxRetries: options.maxRetries ?? 1,
           retryDelay: options.retryDelay ?? 250,
-          collectCache: options.collectCache ?? true
+          // 지도스캔은 월드 캐시 fallback을 통해 기지/playerMap 정보가 유입되지 않게 한다.
+          collectCache: options.collectBaseInfo === false ? false : (options.collectCache ?? true)
         });
 
         count++;
@@ -17024,6 +17038,9 @@ TOPWAR.clearThiefQueue()
     state.ui.serverSurvey = {
       running: true,
       stopping: false,
+      mode: String(surveyOptions.surveyMode || "full").toLowerCase(),
+      collectBaseInfo: surveyOptions.collectBaseInfo !== false,
+      collectAllianceMembers: surveyOptions.collectAllianceMembers !== false,
       integratedFinders: surveyOptions.integratedFinders !== false,
       includeRewards: surveyOptions.includeRewards === true,
       liveThiefKeys: new Set(),
@@ -17099,7 +17116,7 @@ TOPWAR.clearThiefQueue()
           }
         }
 
-        // 보루 캐시는 전체 지도 스캔이 끝난 즉시 저장한다.
+        // 보루 캐시는 지도스캔/풀스캔의 전체 지도 순회가 끝난 즉시 저장한다.
         // 이후 동맹 상세 수집/업로드 단계가 실패해도 다음 보상탐색에서 사용할 수 있다.
         if (surveyOptions.includeRewards === true && typeof TOPWAR.saveFortLocations === "function") {
           const fortMap = state.ui.serverSurvey.fortMap instanceof Map ? state.ui.serverSurvey.fortMap : new Map();
@@ -17119,14 +17136,26 @@ TOPWAR.clearThiefQueue()
         };
       }
 
-      const targets = uniqueTargetsByAllianceId(getAllianceCollectionTargets({ serverId }));
-      const selectedTargets = targets.slice(0, surveyOptions.limit != null ? Number(surveyOptions.limit) : targets.length);
+      const collectAllianceMembers = surveyOptions.collectAllianceMembers !== false;
+      const targets = collectAllianceMembers
+        ? uniqueTargetsByAllianceId(getAllianceCollectionTargets({ serverId }))
+        : [];
+      const selectedTargets = collectAllianceMembers
+        ? targets.slice(0, surveyOptions.limit != null ? Number(surveyOptions.limit) : targets.length)
+        : [];
 
-      result.stages.targets = {
+      result.stages.targets = collectAllianceMembers ? {
         rawCount: targets.length,
         uniqueCount: targets.length,
         selectedCount: selectedTargets.length,
         targets: selectedTargets
+      } : {
+        skipped: true,
+        reason: "map-scan-does-not-read-base-or-alliance-members",
+        rawCount: 0,
+        uniqueCount: 0,
+        selectedCount: 0,
+        targets: []
       };
 
       console.log("[TopWar V2.6] alliance representative targets:", result.stages.targets);
@@ -17203,40 +17232,43 @@ TOPWAR.clearThiefQueue()
           serverId
         };
 
-        result.data = await exportFinalLiteServerResult({
-          serverId,
-          downloadJson: surveyOptions.downloadJson,
-          copyJsonToClipboard: surveyOptions.copyJsonToClipboard,
-          pretty: surveyOptions.pretty,
-          rewriteStatePlayerMap: surveyOptions.rewriteStatePlayerMap ?? true
-        });
+        // 풀스캔만 기지/플레이어/동맹 결과를 export 및 업로드한다.
+        // 지도스캔은 맵 오브젝트(보상/보루/도둑)만 처리하고 기지 정보 파일을 만들지 않는다.
+        if (surveyOptions.collectBaseInfo !== false) {
+          result.data = await exportFinalLiteServerResult({
+            serverId,
+            downloadJson: surveyOptions.downloadJson,
+            copyJsonToClipboard: surveyOptions.copyJsonToClipboard,
+            pretty: surveyOptions.pretty,
+            rewriteStatePlayerMap: surveyOptions.rewriteStatePlayerMap ?? true
+          });
 
-        // GitHub 자동 업로드는 서버조사 내부에서 직접 처리한다.
-        // UI가 지역 함수 runServerSurvey/exportFinalLiteServerResult를 타더라도 이 지점은 반드시 실행된다.
-        if (
-          result.data &&
-          typeof TOPWAR.uploadSurveyResultToGithub === "function" &&
-          surveyOptions.githubUpload !== false
-        ) {
-          try {
-            result.data.githubUpload = await TOPWAR.uploadSurveyResultToGithub(result.data, {
-              trackActualInOut: surveyOptions.trackActualInOut ?? true,
-              uploadUserMovementHistory: surveyOptions.uploadUserMovementHistory ?? true,
-              uploadUserLatestIndex: surveyOptions.uploadUserLatestIndex ?? true,
-              ...(surveyOptions.github || {})
-            });
-            result.githubUpload = result.data.githubUpload;
-            console.log("[TopWar DataHub] 지도 서버 업로드 완료:", { serverId, upload: result.githubUpload });
-          } catch (error) {
-            result.githubUpload = {
-              ok: false,
-              error: error?.message || String(error)
-            };
-
-            result.data.githubUpload = result.githubUpload;
-
-            console.error("[TopWar V2.6] DataHub 지도 업로드 실패:", error);
+          if (
+            result.data &&
+            typeof TOPWAR.uploadSurveyResultToGithub === "function" &&
+            surveyOptions.githubUpload !== false
+          ) {
+            try {
+              result.data.githubUpload = await TOPWAR.uploadSurveyResultToGithub(result.data, {
+                trackActualInOut: surveyOptions.trackActualInOut ?? true,
+                uploadUserMovementHistory: surveyOptions.uploadUserMovementHistory ?? true,
+                uploadUserLatestIndex: surveyOptions.uploadUserLatestIndex ?? true,
+                ...(surveyOptions.github || {})
+              });
+              result.githubUpload = result.data.githubUpload;
+              console.log("[TopWar DataHub] 풀스캔 서버 업로드 완료:", { serverId, upload: result.githubUpload });
+            } catch (error) {
+              result.githubUpload = {
+                ok: false,
+                error: error?.message || String(error)
+              };
+              result.data.githubUpload = result.githubUpload;
+              console.error("[TopWar Full Scan] DataHub 서버 업로드 실패:", error);
+            }
           }
+        } else {
+          result.data = null;
+          result.baseInfoSkipped = true;
         }
 
         if (surveyOptions.includeRewards === true && typeof TOPWAR.uploadRewardServerResults === "function") {
@@ -17254,7 +17286,7 @@ TOPWAR.clearThiefQueue()
           }
         }
 
-        result.summary = result.data?.summary ?? null;
+        result.summary = result.data?.summary ?? result.stages?.mapScan?.summary ?? null;
         result.ok = true;
 
         if (surveyOptions.keepResultData === false && result.data) {
@@ -17338,7 +17370,7 @@ TOPWAR.clearThiefQueue()
 
     ensureState();
 
-    const recoveryMode = options.includeRewards === true ? "mapReward" : "map";
+    const recoveryMode = String(options.recoveryMode || (options.includeRewards === true ? "mapReward" : "map"));
     const allServerIds = serverIds.slice();
     serverIds = window.TOPWAR_RECOVERY?.consumeResumeServerList?.(recoveryMode, serverIds) ?? serverIds;
 
@@ -17371,6 +17403,7 @@ TOPWAR.clearThiefQueue()
     state.ui.serverSurveyBatch = {
       running: true,
       stopping: false,
+      mode: String(options.surveyMode || "full").toLowerCase(),
       startedAt: batch.startedAt,
       finishedAt: null,
       current: {
@@ -17747,7 +17780,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR Unified V2.14.9.48</span>
+        <span>TOPWAR Unified V2.14.9.52</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -17784,11 +17817,14 @@ TOPWAR.clearThiefQueue()
           <span style="grid-column:1 / -1;color:#888;">역할 · 비인기 기준(명) · 인기 조사기 수</span>
         </div>
 
-        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px;">
-          <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">보상탐색</button>
-          <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:11px;font-weight:700;cursor:pointer;">지도+보상</button>
-          <button id="tw26-survey-rewards" style="display:none;">지도+보상</button>
+        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px;">
+          <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">빠른보상</button>
+          <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">지도스캔</button>
+          <button id="tw26-full-scan" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">풀스캔</button>
         </div>
+
+        <div id="tw26-top100-actions" style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:6px;"></div>
+        <div id="tw26-reward-tracker-actions" style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.08);"></div>
 
         <div id="tw26-status" style="
           margin-top:8px;padding:7px 9px;border-radius:7px;background:rgba(255,255,255,0.055);
@@ -17821,10 +17857,6 @@ TOPWAR.clearThiefQueue()
               <button id="tw26-thief-upload-test" title="DataHub 설정을 저장하고 대기 중 요청을 다시 전송합니다" style="grid-column:1 / -1;height:31px;border:1px solid rgba(255,255,255,0.12);border-radius:6px;background:#4a3f2b;color:#f2ddad;font-size:11px;font-weight:700;cursor:pointer;">DataHub 설정 저장 / 재전송</button>
             </div>
 
-            <div id="tw26-detail-status" style="
-              margin-top:7px;padding:7px;border-radius:6px;background:rgba(0,0,0,0.22);
-              font-size:10px;line-height:1.45;color:#aaa;word-break:break-word;
-            "></div>
           </div>
         </details>
       </div>
@@ -17950,9 +17982,8 @@ TOPWAR.clearThiefQueue()
     const githubTokenInput = panel.querySelector("#tw26-github-token");
     const thiefButton = panel.querySelector("#tw26-thief");
     const surveyButton = panel.querySelector("#tw26-survey");
-    const surveyRewardsButton = panel.querySelector("#tw26-survey-rewards");
+    const fullScanButton = panel.querySelector("#tw26-full-scan");
     const status = panel.querySelector("#tw26-status");
-    const detailStatus = panel.querySelector("#tw26-detail-status");
     const resetButton = panel.querySelector("#tw26-reset");
     const saveButton = panel.querySelector("#tw26-save");
     const reconnectButton = panel.querySelector("#tw26-reconnect");
@@ -19125,12 +19156,44 @@ TOPWAR.clearThiefQueue()
       return result;
     }
 
+    // V2.14.9.51: 실제 UI "보상탐색" 통합 루프에서 사용하는 캐시 우선 정렬.
+    // fastFortMode와 동일한 조건을 써서, 실제로 보루 고속탐색 가능한 서버만 캐시 서버로 본다.
+    function hasUsableUnifiedFortCache(serverId) {
+      try {
+        const cache = TOPWAR.getFortCacheEntry?.(serverId) ?? null;
+        const forts = Array.isArray(cache?.forts) ? cache.forts : [];
+        return forts.length > 0 && cache?.complete !== false;
+      } catch {
+        return false;
+      }
+    }
+
+    function prioritizeUnifiedFortCachedServers(serverIds) {
+      const source = parseServerIdsStrict(serverIds);
+      const cached = [];
+      const uncached = [];
+      for (const serverId of source) {
+        (hasUsableUnifiedFortCache(serverId) ? cached : uncached).push(serverId);
+      }
+      return { serverIds: [...cached, ...uncached], cached, uncached };
+    }
+
+    // 콘솔에서 실제 캐시 우선 순서를 즉시 검증할 수 있는 진단 API.
+    TOPWAR.rewardCacheFirstOrder = serverIds => prioritizeUnifiedFortCachedServers(serverIds);
+
     async function runUnifiedFinderForServers(serverIds, overrides = {}) {
     window.TOPWAR_REWARD_TRACKER?.stop?.("unified-reward-finder-start");
       const requestedIds = parseServerIdsStrict(serverIds);
       const allIds = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
-      let ids = window.TOPWAR_RECOVERY?.consumeResumeServerList?.("reward", allIds) ?? allIds;
+      const resumedIds = window.TOPWAR_RECOVERY?.consumeResumeServerList?.("reward", allIds) ?? allIds;
+      let ordered = prioritizeUnifiedFortCachedServers(resumedIds);
+      let ids = ordered.serverIds;
       if (!ids.length) return { ok: false, reason: "serverIds is required" };
+
+      console.log(
+        `[TopWar Unified Finder] 실제 보상탐색 시작 순서 - 캐시 우선: ${ids.join(",")}`,
+        { cached: ordered.cached, uncached: ordered.uncached }
+      );
 
 
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
@@ -19184,7 +19247,24 @@ TOPWAR.clearThiefQueue()
       try {
         while (state.watch133.running) {
           cycle++;
-          state.watch133.multiServer.cycle = cycle;
+
+          // 첫 회차는 복구용 남은 서버 집합, 이후 회차는 전체 서버 집합을 사용한다.
+          // 매 회차마다 현재 캐시를 다시 판정해 캐시 서버를 무조건 앞에 배치한다.
+          const cycleSourceIds = cycle === 1 ? ids : allIds;
+          ordered = prioritizeUnifiedFortCachedServers(cycleSourceIds);
+          ids = ordered.serverIds;
+
+          state.watch133.multiServer = {
+            ...state.watch133.multiServer,
+            cycle,
+            totalServers: ids.length,
+            serverIds: ids.slice()
+          };
+
+          console.log(
+            `[TopWar Unified Finder] cycle=${cycle} 캐시 우선 실행순서: ${ids.join(",")}`,
+            { cached: ordered.cached, uncached: ordered.uncached }
+          );
 
           for (let index = 0; index < ids.length; index++) {
             if (!state.watch133.running || state.connectionGuard?.disconnected) break;
@@ -19241,7 +19321,6 @@ TOPWAR.clearThiefQueue()
           }
 
           if (!state.watch133.running || state.connectionGuard?.disconnected) break;
-          if (cycle === 1 && ids !== allIds) ids = allIds.slice();
           await sleep(Number(overrides.betweenCycleDelay ?? 1000));
         }
       } catch (error) {
@@ -19325,19 +19404,20 @@ TOPWAR.clearThiefQueue()
       const tokenStatus = TOPWAR.githubTokenStatus?.() ?? { configured: false };
       const logStatus = window.TOPWAR_LOG_CONTROL?.status?.() ?? { programLogs: true, gameFontWarnings: true };
 
-      setButton(thiefButton, !!watch.running, "보상탐색");
-      setButton(surveyButton, surveyRunning, "지도+보상");
-      setButton(surveyRewardsButton, surveyRunning && survey.includeRewards === true, "지도+보상");
+      const activeSurveyMode = String(survey.mode || batch.mode || "").toLowerCase();
+      setButton(thiefButton, !!watch.running, "빠른보상");
+      setButton(surveyButton, surveyRunning && activeSurveyMode === "map", "지도스캔");
+      setButton(fullScanButton, surveyRunning && activeSurveyMode === "full", "풀스캔");
       setLogButton(programLogsButton, !!logStatus.programLogs, "프로그램 로그");
       setLogButton(gameFontLogsButton, !!logStatus.gameFontWarnings, "게임 폰트경고");
 
       thiefButton.disabled = surveyRunning || realPowerRunning || disconnected;
       surveyButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
-      surveyRewardsButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
+      fullScanButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
 
       thiefButton.style.opacity = thiefButton.disabled ? "0.55" : "1";
       surveyButton.style.opacity = surveyButton.disabled ? "0.55" : "1";
-      surveyRewardsButton.style.opacity = surveyRewardsButton.disabled ? "0.55" : "1";
+      fullScanButton.style.opacity = fullScanButton.disabled ? "0.55" : "1";
       const anyAutomationRunning = !!(watch.running || surveyRunning || realPowerRunning || state.cityRewardFinder?.running);
       githubTokenInput.disabled = anyAutomationRunning || thiefUploadTestRunning;
       githubTokenInput.style.opacity = githubTokenInput.disabled ? "0.6" : "1";
@@ -19360,9 +19440,9 @@ TOPWAR.clearThiefQueue()
       const thiefMulti = watch.multiServer || {};
 
       const runningLabel = watch.running
-        ? `도둑 ${watch.current?.moveIndex ?? 0}/${watch.current?.totalMoves ?? "-"}`
+        ? `빠른보상 ${watch.current?.moveIndex ?? 0}/${watch.current?.totalMoves ?? "-"}`
         : surveyRunning
-          ? `지도+보상 ${current.index ?? "-"}/${current.total ?? "-"}`
+          ? `${activeSurveyMode === "map" ? "지도스캔" : "풀스캔"} ${current.index ?? "-"}/${current.total ?? "-"}`
           : realPowerRunning
             ? `Top100 ${realPowerProgress.currentIndex ?? 0}/${realPowerProgress.total ?? "-"}`
             : state.cityRewardFinder?.running
@@ -19379,29 +19459,6 @@ TOPWAR.clearThiefQueue()
         </div>
       `;
 
-      if (detailStatus) {
-        detailStatus.innerHTML = `
-          대상 서버: <b>${formatServerIdsForStatus(shownServerIds)}</b><br>
-          조사기 역할: <b>${scannerRoleSelect.options[scannerRoleSelect.selectedIndex]?.text || scannerRoleSelect.value}</b> / 비인기 &lt; ${getUnpopularThreshold()}명 / 인기 조사기 ${getPopularScannerCount()}대<br>
-          선택 기준: <b>${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤으로" : "인기순으로"}</b><br>
-          서버목록: ${serverListLoading ? "시즌별 추출 중" : remoteServerList?.serverIds?.length ? `시즌 통합 ${remoteServerList.serverIds.length}개` : usingRemoteServerList ? "시즌별 자동추출" : "직접입력"}${lastServerListError ? ` / 오류: ${lastServerListError}` : ""}<br>
-          연결: ${disconnected ? "실패" : "정상"}${connection.reason ? ` / ${connection.reason}` : ""}<br>
-          GitHub Token: ${tokenStatus.configured ? "설정됨" : "필요"}<br>
-          보상탐색: ${watch.running ? "ON" : "OFF"} / 큐 ${queue} / 처리 ${watch.handledKeys?.size ?? 0}<br>
-          진행: ${watch.current?.totalMoves ? `${watch.current?.moveIndex ?? 0}/${watch.current.totalMoves}` : "-"} / 도둑 ${watch.current?.thiefCount ?? watch.lastUnifiedResult?.thiefCount ?? 0} / 도시보상 ${watch.current?.rewardCount ?? watch.lastUnifiedResult?.rewardCount ?? 0}<br>
-          도둑 버퍼: ${thiefBuffer.events?.length ?? 0}개 / 133수신 ${thiefDiag.thievesCaptured ?? 0} / 회수 ${thiefDiag.thievesCollected ?? 0}<br>
-          도둑 업로드: 요청 ${thiefDiag.uploadRequests ?? 0} / 성공 ${thiefDiag.uploadSuccess ?? 0} / 실패 ${thiefDiag.uploadFailure ?? 0}<br>
-          GitHub 요청: GET ${thiefDiag.githubGetSuccess ?? 0}/${thiefDiag.githubGetAttempts ?? 0} / PUT ${thiefDiag.githubPutSuccess ?? 0}/${thiefDiag.githubPutAttempts ?? 0}<br>
-          도둑 GitHub: ${watch.lastGithubUpload?.ok === true ? "성공" : watch.lastGithubUpload?.ok === false ? `실패 (${watch.lastGithubUpload?.error || watch.lastGithubUpload?.reason || "unknown"})` : "-"}${thiefDiag.lastError ? ` / ${thiefDiag.lastError}` : ""}<br>
-          업로드 테스트: ${thiefUploadTestRunning ? "진행 중" : lastThiefUploadTest?.ok === true ? `성공 (${lastThiefUploadTest.repo}/${lastThiefUploadTest.path})` : lastThiefUploadTest?.ok === false ? `실패 (${lastThiefUploadTest.error || lastThiefUploadTest.reason || lastThiefUploadTest.status || "unknown"})` : "-"}<br>
-          지도+보상: ${surveyRunning ? "ON" : "OFF"}${surveyStopping ? " / 중지 요청" : ""} / 단계 ${current.phase ?? state.fullScan?.phase ?? "-"}<br>
-          보루 캐시: ${current.serverId ? (TOPWAR.getFortLocations?.(current.serverId)?.length ?? 0) + "개" : "서버 선택 후 확인"}<br>
-          Top100조사: ${realPowerRunning ? "ON" : "OFF"} / 단계 ${realPowerProgress?.phase ?? "-"}<br>
-          플레이어 ${state.playerMap?.size ?? 0} / 동맹 ${state.allianceMap?.size ?? 0}<br>
-          활동 CORE ${activitySummary.coreCount ?? "-"} / ACTIVE ${activitySummary.activeCount ?? "-"} / WATCH ${activitySummary.watchCount ?? "-"} / LOW ${activitySummary.lowCount ?? "-"}<br>
-          서버활동 ${lastSummary.serverActivity?.grade ?? "-"} / 점수 ${lastSummary.serverActivity?.score ?? "-"}
-        `;
-      }
     }
 
     header.addEventListener("click", () => {
@@ -19470,7 +19527,7 @@ TOPWAR.clearThiefQueue()
           await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
         } catch (error) {
           window.TOPWAR_RECOVERY?.clear?.("reward-navigation-failed");
-          alert(`보상탐색 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
+          alert(`빠른보상 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
           return;
         }
 
@@ -19492,10 +19549,10 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar Unified V2.14.9.50 UI] 보상탐색 종료:", result);
+            console.log("[TopWar Unified V2.14.9.52 UI] 빠른보상 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar Unified V2.14.9.50 UI] 통합찾기 실패 원인:", result.reason);
-              alert(`보상탐색 실행 실패\n\n${result.reason}`);
+              console.error("[TopWar Unified V2.14.9.52 UI] 통합찾기 실패 원인:", result.reason);
+              alert(`빠른보상 실행 실패\n\n${result.reason}`);
             }
             render();
           })
@@ -19503,8 +19560,8 @@ ${lastServerListError}`
             state.watch133.running = false;
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar Unified V2.14.9.50 UI] 보상탐색 오류:", error);
-            alert(`보상탐색 오류\n\n${error?.message || String(error)}`);
+            console.error("[TopWar Unified V2.14.9.52 UI] 빠른보상 오류:", error);
+            alert(`빠른보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
       }
@@ -19512,117 +19569,120 @@ ${lastServerListError}`
       render();
     });
 
-    surveyButton.addEventListener("click", async event => {
-      event.stopPropagation();
+    async function toggleSurveyMode(mode, event) {
+      event?.stopPropagation?.();
       saveGithubTokenFromUi();
 
+      const normalizedMode = mode === "map" ? "map" : "full";
+      const label = normalizedMode === "map" ? "지도스캔" : "풀스캔";
+
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
+        const activeMode = String(state.ui.serverSurvey?.mode || state.ui.serverSurveyBatch?.mode || "").toLowerCase();
+        if (activeMode && activeMode !== normalizedMode) {
+          alert(`${activeMode === "map" ? "지도스캔" : "풀스캔"}이 진행 중입니다. 먼저 중지하세요.`);
+          return;
+        }
         requestStopServerSurvey();
-        window.TOPWAR_RECOVERY?.clear?.("manual-stop-map");
-      } else {
-        if (state.connectionGuard?.disconnected) { alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요."); return; }
-        if (state.watch133?.running) {
-          alert("보상탐색이 진행 중입니다. 먼저 OFF 하세요.");
-          return;
-        }
-        if (window.REALPOWER?.getState?.()?.running === true) {
-          alert("Top100조사가 진행 중입니다. 먼저 Top100조사를 OFF 하세요.");
-          return;
-        }
-
-        const includeRewards = true;
-        delete surveyButton.dataset.includeRewards;
-        const recoveryMode = "mapReward";
-        window.TOPWAR_REWARD_TRACKER?.stop?.("map-ui-start");
-        window.TOPWAR_RECOVERY?.begin?.(recoveryMode);
-        try {
-          await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
-        } catch (error) {
-          window.TOPWAR_RECOVERY?.clear?.("map-navigation-failed");
-          alert(`지도+보상 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
-          return;
-        }
-
-        const serverIds = await resolveMapSurveyServerIds();
-
-        if (!serverIds.length) {
-          window.TOPWAR_RECOVERY?.clear?.("map-no-server");
-          alert(explicitInputServerIds().length
-            ? "입력한 서버 중 현재 지도 대상 및 담당 필터에 해당하는 서버가 없습니다. 역할을 전체 (필터 없음)로 선택하거나 서버 목록을 확인하세요."
-            : lastServerListError
-            ? `GitHub 서버목록을 읽지 못했습니다. 직접 서버번호를 입력하세요.
-
-${lastServerListError}`
-            : "서버번호를 입력하거나 GitHub 서버목록을 확인하세요.");
-          return;
-        }
-
-        const topwarApi = window.TOPWAR || TOPWAR;
-
-        const surveyRunner =
-          topwarApi?.runMultiServerSurvey ||
-          runMultiServerSurvey;
-
-        if (typeof surveyRunner !== "function") {
-          console.error("[TopWar V2.7 UI] runMultiServerSurvey 함수를 찾지 못했습니다.", {
-            windowTopwar: window.TOPWAR,
-            localTopwar: TOPWAR
-          });
-          alert("서버조사 실행 함수를 찾지 못했습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
-          return;
-        }
-
-        surveyRunner.call(topwarApi || null, {
-          serverIds,
-          includeRewards,
-          integratedFinders: true,
-          serverOrderMode: getServerOrderMode(),
-          resumeFromSavedServer: false,
-          repeatUntilStopped: true,
-          popularFirst: false,
-          resortByPopularityEachCycle: false,
-          softResetAfterServer: false,
-          // UI 자동실행은 실제 UID 서버이동 결과를 매 사이클마다 GitHub로 flush한다.
-          trackActualInOut: true,
-          flushCompactHistoryAfterEachCycle: true
-        })
-          .then(result => {
-            console.log("[TopWar V2.7 UI] 반복 서버조사 종료:", result);
-            if (result?.ok === false && !result?.stopped) {
-              const firstError = result?.errors?.[0]?.result;
-              const message = firstError?.error?.message || firstError?.reason || result?.reason || "알 수 없는 오류";
-              alert(`지도+보상 실패\n\n${message}`);
-            }
-            render();
-          })
-          .catch(error => {
-            if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("map-error");
-            console.error("[TopWar V2.7 UI] 반복 서버조사 실패:", error);
-            alert(`지도+보상 오류\n\n${error?.message || String(error)}`);
-            render();
-          });
+        window.TOPWAR_RECOVERY?.clear?.(`manual-stop-${normalizedMode}`);
+        render();
+        return;
       }
+
+      if (state.connectionGuard?.disconnected) {
+        alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요.");
+        return;
+      }
+      if (state.watch133?.running) {
+        alert("빠른보상이 진행 중입니다. 먼저 OFF 하세요.");
+        return;
+      }
+      if (window.REALPOWER?.getState?.()?.running === true) {
+        alert("Top100조사가 진행 중입니다. 먼저 Top100조사를 OFF 하세요.");
+        return;
+      }
+
+      const recoveryMode = normalizedMode === "map" ? "map" : "mapReward";
+      window.TOPWAR_REWARD_TRACKER?.stop?.(`${normalizedMode}-ui-start`);
+      window.TOPWAR_RECOVERY?.begin?.(recoveryMode);
+      try {
+        await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
+      } catch (error) {
+        window.TOPWAR_RECOVERY?.clear?.(`${normalizedMode}-navigation-failed`);
+        alert(`${label} 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
+        return;
+      }
+
+      const serverIds = await resolveMapSurveyServerIds();
+      if (!serverIds.length) {
+        window.TOPWAR_RECOVERY?.clear?.(`${normalizedMode}-no-server`);
+        alert(explicitInputServerIds().length
+          ? "입력한 서버 중 현재 지도 대상 및 담당 필터에 해당하는 서버가 없습니다. 역할을 전체 (필터 없음)로 선택하거나 서버 목록을 확인하세요."
+          : lastServerListError
+          ? `GitHub 서버목록을 읽지 못했습니다. 직접 서버번호를 입력하세요.\n\n${lastServerListError}`
+          : "서버번호를 입력하거나 GitHub 서버목록을 확인하세요.");
+        return;
+      }
+
+      const topwarApi = window.TOPWAR || TOPWAR;
+      const surveyRunner = topwarApi?.runMultiServerSurvey || runMultiServerSurvey;
+      if (typeof surveyRunner !== "function") {
+        alert("서버조사 실행 함수를 찾지 못했습니다. 페이지를 새로고침한 뒤 다시 시도하세요.");
+        return;
+      }
+
+      const isFull = normalizedMode === "full";
+      surveyRunner.call(topwarApi || null, {
+        serverIds,
+        surveyMode: normalizedMode,
+        recoveryMode,
+        // 둘 다 지도 전체를 훑으며 보상/보루/133은 수집한다.
+        includeRewards: true,
+        integratedFinders: true,
+        // 지도스캔은 기지/플레이어/동맹 데이터를 적재하지 않는다.
+        collectBaseInfo: isFull,
+        // 풀스캔만 동맹창에 들어가 내부 인원까지 수집한다.
+        collectAllianceMembers: isFull,
+        githubUpload: isFull,
+        serverOrderMode: getServerOrderMode(),
+        resumeFromSavedServer: false,
+        repeatUntilStopped: true,
+        popularFirst: false,
+        resortByPopularityEachCycle: false,
+        softResetAfterServer: false,
+        trackActualInOut: isFull,
+        flushCompactHistoryAfterEachCycle: isFull
+      })
+        .then(result => {
+          console.log(`[TopWar V2.14.9.52 UI] ${label} 종료:`, result);
+          if (result?.ok === false && !result?.stopped) {
+            const firstError = result?.errors?.[0]?.result;
+            const message = firstError?.error?.message || firstError?.reason || result?.reason || "알 수 없는 오류";
+            alert(`${label} 실패\n\n${message}`);
+          }
+          render();
+        })
+        .catch(error => {
+          if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.(`${normalizedMode}-error`);
+          console.error(`[TopWar V2.14.9.52 UI] ${label} 오류:`, error);
+          alert(`${label} 오류\n\n${error?.message || String(error)}`);
+          render();
+        });
 
       render();
-    });
+    }
 
-    surveyRewardsButton.addEventListener("click", event => {
-      event.stopPropagation();
-      if (!(state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running)) {
-        surveyButton.dataset.includeRewards = "true";
-      }
-      surveyButton.click();
-    });
+    surveyButton.addEventListener("click", event => void toggleSurveyMode("map", event));
+    fullScanButton.addEventListener("click", event => void toggleSurveyMode("full", event));
 
     resetButton.addEventListener("click", event => {
       event.stopPropagation();
 
       if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
-        alert("지도+보상 조사를 먼저 OFF 한 뒤 진행 위치를 초기화하세요.");
+        alert("지도스캔/풀스캔을 먼저 OFF 한 뒤 진행 위치를 초기화하세요.");
         return;
       }
 
-      if (confirm("보상탐색 큐와 저장된 지도+보상 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
+      if (confirm("빠른보상 큐와 저장된 지도스캔/풀스캔 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
         TOPWAR.clearThiefQueue?.();
         TOPWAR.clearServerSurveyResume?.();
         render();
@@ -19763,7 +19823,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar Unified V2.14.9.50 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[TopWar Unified V2.14.9.52 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -25049,7 +25109,7 @@ ${lastServerListError}`
       return !shouldStopRewardFinder();
     }
 
-    // V2.14.9.50: 보상탐색은 사용 가능한 보루 캐시가 있는 서버를 항상 먼저 처리한다.
+    // V2.14.9.51: 보상탐색은 사용 가능한 보루 캐시가 있는 서버를 항상 먼저 처리한다.
     // 같은 그룹 내부의 상대 순서는 그대로 유지하므로 기존 popular/sequential 정렬 의도는 보존한다.
     function hasUsableFortCache(serverId) {
       try {
@@ -34463,7 +34523,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
   }
 
   function installButton() {
-    const group = document.getElementById("tw26-scan-actions");
+    const group = document.getElementById("tw26-reward-tracker-actions");
     if (!group) return false;
     let button = document.getElementById(UI_ID);
     if (!button) {
@@ -34483,13 +34543,8 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
       });
       group.appendChild(button);
     }
-    let box = document.getElementById(STATUS_ID);
-    if (!box) {
-      box = document.createElement("div");
-      box.id = STATUS_ID;
-      box.style.cssText = "margin-top:6px;padding:7px 8px;border:1px solid #3a4d42;border-radius:6px;background:rgba(255,255,255,.04);font-size:10px;line-height:1.55;color:#aaa;white-space:pre-line;word-break:break-word;";
-      group.insertAdjacentElement("afterend", box);
-    }
+    // 보상추적은 자동조사 버튼과 별도 행에만 표시하고 별도 텍스트 이력창은 만들지 않는다.
+    document.getElementById(STATUS_ID)?.remove?.();
     render();
     return true;
   }
@@ -34597,7 +34652,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     }
 
     if (otherAutomationRunning()) {
-      alert("다른 조사가 진행 중입니다. 보상탐색 또는 지도조사를 먼저 OFF 하세요.");
+      alert("다른 조사가 진행 중입니다. 빠른보상/지도스캔/풀스캔을 먼저 OFF 하세요.");
       return;
     }
 
@@ -34693,7 +34748,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     window.TOPWAR_REWARD_TRACKER?.installButton?.();
     window.TOPWAR_REWARD_TRACKER?.render?.();
 
-    button.textContent = "Top100조사";
+    button.textContent = "Top100";
     button.title = running ? "실행 중 · 클릭하면 중지" : "중지됨 · 클릭하면 실행";
     button.style.background = running ? "#247a4b" : "#3b3b3b";
     button.disabled = !running && blocked;
@@ -34727,7 +34782,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
   function install() {
     const api = rp();
-    const group = document.getElementById("tw26-scan-actions");
+    const group = document.getElementById("tw26-top100-actions");
     if (!api || !group) return false;
 
     let button = document.getElementById(MAIN_BUTTON_ID);
@@ -34736,7 +34791,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
       button.id = MAIN_BUTTON_ID;
       button.type = "button";
       button.style.cssText = "height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;min-width:0;";
-      button.textContent = "Top100조사";
+      button.textContent = "Top100";
       button.addEventListener("click", event => {
         event.preventDefault();
         event.stopPropagation();
@@ -34745,13 +34800,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
       group.appendChild(button);
     }
 
-    let status = document.getElementById(STATUS_ID);
-    if (!status) {
-      status = document.createElement("div");
-      status.id = STATUS_ID;
-      status.style.cssText = "display:none;margin-top:6px;padding:6px 8px;border-radius:6px;background:rgba(255,255,255,0.05);font-size:10px;line-height:1.4;color:#aaa;word-break:break-word;";
-      group.insertAdjacentElement("afterend", status);
-    }
+    document.getElementById(STATUS_ID)?.remove?.();
 
     const advancedGrid = document.querySelector("#tw26-advanced div > div[style*='display:grid']");
     if (advancedGrid) {
