@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TopWar Unified Automation V2.14.9.53 - Top100 Stable Transitions
+// @name         Topwar Helper V2.14.9.58
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.53
-// @description  Unified TopWar automation with navigation, auto recovery, Top100 cycle flow, and empty/same season-group fallback
+// @version      2.14.9.58
+// @description  Topwar Helper - map scan, full scan, quick rewards, Top100, and reward tracking
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -8712,7 +8712,13 @@ function inspectCurrentProfileItems() {
     const x = Number(value?.x);
     const y = Number(value?.y);
     if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-    return { x, y };
+    return {
+      x,
+      y,
+      allianceId: value?.allianceId != null && value?.allianceId !== "" ? String(value.allianceId) : null,
+      allianceTag: value?.allianceTag != null && value?.allianceTag !== "" ? String(value.allianceTag) : null,
+      allianceName: value?.allianceName != null && value?.allianceName !== "" ? String(value.allianceName) : null
+    };
   }
 
   function captureFortPoints(points, targetServerId, outputMap, fallbackServerId = null) {
@@ -8732,9 +8738,16 @@ function inspectCurrentProfileItems() {
       if (!Number.isFinite(fortServerId) || fortServerId <= 0) continue;
       if (Number.isFinite(target) && target > 0 && fortServerId !== target) continue;
 
+      const normalized = normalizeMapPoint(point, { serverId: fortServerId });
       const key = `${fortServerId}:${x}:${y}`;
       if (!outputMap.has(key)) added++;
-      outputMap.set(key, { x, y });
+      outputMap.set(key, {
+        x,
+        y,
+        allianceId: normalized?.allianceId != null ? String(normalized.allianceId) : null,
+        allianceTag: normalized?.allianceTag ?? null,
+        allianceName: normalized?.allianceName ?? null
+      });
     }
 
     return { added, total: outputMap.size };
@@ -8755,13 +8768,17 @@ function inspectCurrentProfileItems() {
     }
 
     return {
-      version: 1,
+      version: Number(raw.version ?? 1),
       serverId: Math.trunc(id),
       updatedAt: raw.updatedAt ?? null,
       scannedAt: raw.scannedAt ?? raw.updatedAt ?? null,
       complete: raw.complete !== false,
       totalMoves: Number(raw.totalMoves ?? 0),
       failCount: Number(raw.failCount ?? 0),
+      activeAllianceFiltered: raw.activeAllianceFiltered === true,
+      activeAllianceThreshold: Number(raw.activeAllianceThreshold ?? 0),
+      activeAllianceCount: Number(raw.activeAllianceCount ?? 0),
+      source: raw.source ?? null,
       count: unique.size,
       forts: [...unique.values()].sort((a, b) => a.y - b.y || a.x - b.x)
     };
@@ -8790,12 +8807,17 @@ function inspectCurrentProfileItems() {
     const scannedAt = meta.scannedAt || now();
 
     store.servers[key] = {
+      version: 2,
       serverId: Math.trunc(id),
       updatedAt: now(),
       scannedAt,
       complete: meta.complete !== false,
       totalMoves: Number(meta.totalMoves ?? 0),
       failCount: Number(meta.failCount ?? 0),
+      activeAllianceFiltered: meta.activeAllianceFiltered === true,
+      activeAllianceThreshold: Number(meta.activeAllianceThreshold ?? 0),
+      activeAllianceCount: Number(meta.activeAllianceCount ?? 0),
+      source: meta.source ?? null,
       count: normalized.length,
       forts: normalized
     };
@@ -8830,6 +8852,7 @@ function inspectCurrentProfileItems() {
       serverId: row.serverId,
       forts: row.count,
       complete: row.complete,
+      active50: row.activeAllianceFiltered ? `${row.activeAllianceCount} guilds` : "legacy",
       failCount: row.failCount,
       scannedAt: row.scannedAt
     })));
@@ -9567,10 +9590,11 @@ function inspectCurrentProfileItems() {
     const packet = record.packet;
     const detail = packet?.decoded?.parsedDetail ?? packet?.decoded?.detail ?? null;
     if (packet?.c === 901 && Array.isArray(detail?.pointList)) {
-      // collectPointList가 playerMap/cityReward용 일반 데이터를 누적하기 전에/후와 관계없이
-      // 도둑은 이 수신 시점에 별도의 경량 네트워크 이벤트로 반드시 보존한다.
-      // recentPackets가 16개를 초과해 오래된 901이 밀려나도 133 탐지는 사라지지 않는다.
-      const capturedThiefEvent = capture901ThiefEvent(record, detail);
+      // 빠른보상은 cityReward만 필요한 경량 모드다.
+      // player/object/alliance 및 133 도둑 버퍼를 만들지 않아 대형 901 반복 수신 시 메모리 증가를 막는다.
+      const quickRewardOnly = state.watch133?.running === true && state.watch133?.quickRewardOnly === true;
+      // 일반 지도/풀스캔에서만 133 도둑 이벤트를 보존한다.
+      const capturedThiefEvent = quickRewardOnly ? null : capture901ThiefEvent(record, detail);
       const integratedSurvey = state.ui?.serverSurvey;
       if (
         integratedSurvey?.running === true &&
@@ -9608,16 +9632,91 @@ function inspectCurrentProfileItems() {
         state.cityRewardFinder?.current?.serverId ??
         range()?.k ?? null;
       const collectedServerId = Number(detail?.k) > 0 ? detail.k : activeSurveyServerId;
+
+      // V2.14.9.58 빠른보상은 playerMap/recentPackets 재검색에 의존하지 않는다.
+      // 901이 디코딩되는 바로 이 순간 cityReward만 작은 전용 Map에 복사한다.
+      // raw point/playerInfo 참조는 보존하지 않으므로 저메모리 특성은 유지된다.
+      if (quickRewardOnly && state.watch133?.quickRewardMap instanceof Map) {
+        const expectedServerId = Number(
+          state.watch133.quickRewardServerId ??
+          state.watch133.current?.serverId ??
+          collectedServerId
+        );
+        let quickAdded = 0;
+        let quickSeen = 0;
+
+        for (const point of detail.pointList) {
+          if (Number(point?.pointType) !== 1) continue;
+          quickSeen++;
+
+          const normalized = normalizeMapPoint(point, {
+            time: record.time,
+            c: packet.c,
+            seq: packet.seq,
+            serverId: collectedServerId
+          });
+          const cityReward = normalized?.cityReward;
+          if (cityReward === null || typeof cityReward !== "object" || Array.isArray(cityReward)) continue;
+
+          const serverId = Number(normalized?.serverId) > 0
+            ? Number(normalized.serverId)
+            : Number(collectedServerId);
+          if (!Number.isFinite(serverId) || serverId <= 0) continue;
+          if (Number.isFinite(expectedServerId) && expectedServerId > 0 && serverId !== expectedServerId) continue;
+
+          const row = {
+            serverId,
+            x: normalized.x ?? point?.x ?? null,
+            y: normalized.y ?? point?.y ?? null,
+            uid: normalized.uid != null ? String(normalized.uid) : null,
+            username: normalized.username ?? normalized.nickname ?? null,
+            level: normalized.level ?? null,
+            allianceId: normalized.allianceId != null ? String(normalized.allianceId) : null,
+            allianceTag: normalized.allianceTag ?? null,
+            pointId: normalized.id ?? point?.id ?? null,
+            cityReward,
+            cityRewardCreatedAt: Number.isFinite(Number(cityReward?.endTimeMilli))
+              ? new Date(Number(cityReward.endTimeMilli) - 30 * 60 * 1000).toISOString()
+              : null,
+            cityRewardSeenAt: record.time,
+            foundAt: record.time
+          };
+
+          const instanceId = cityReward?.instanceId != null ? String(cityReward.instanceId) : null;
+          const key = instanceId
+            ? `${serverId}:instance:${instanceId}`
+            : row.uid
+              ? `${serverId}:uid:${row.uid}`
+              : `${serverId}:coord:${row.x}:${row.y}`;
+
+          if (!state.watch133.quickRewardMap.has(key)) quickAdded++;
+          state.watch133.quickRewardMap.set(key, row);
+        }
+
+        state.watch133.quickReward901Count = Number(state.watch133.quickReward901Count || 0) + 1;
+        state.watch133.quickRewardBaseSeen = Number(state.watch133.quickRewardBaseSeen || 0) + quickSeen;
+        state.watch133.quickRewardLast901At = record.time;
+
+        if (quickAdded > 0) {
+          console.log("[Topwar Helper QuickReward] 901 도시보상 즉시 누적:", {
+            serverId: expectedServerId,
+            added: quickAdded,
+            total: state.watch133.quickRewardMap.size,
+            packetSeq: packet.seq
+          });
+        }
+      }
+
       // 수동 보상 추적은 기존 지도/보상 자동조사와 완전히 별도의 경량 옵저버다.
       // OFF이면 함수 호출만 발생하고 순회, 화면 탐색, 업로드, 타이머는 작동하지 않는다.
       window.TOPWAR_REWARD_TRACKER?.capture?.(record, detail, collectedServerId, normalizeMapPoint);
       // 지도스캔(mode=map)은 기지/플레이어/동맹 정보를 수집하지 않는다.
       // 보상, 보루, 133 도둑은 아래 전용 경로에서 별도로 수집된다.
       const activeSurveyForBaseInfo = state.ui?.serverSurvey;
-      if (activeSurveyForBaseInfo?.running === true && activeSurveyForBaseInfo.collectBaseInfo === false) {
+      if (quickRewardOnly || (activeSurveyForBaseInfo?.running === true && activeSurveyForBaseInfo.collectBaseInfo === false)) {
         record.collected = {
           skippedBaseInfo: true,
-          reason: "map-scan-no-base-info",
+          reason: quickRewardOnly ? "quick-reward-low-memory" : "map-scan-no-base-info",
           totalObjects: state.objectMap.size,
           totalPlayers: state.playerMap.size,
           totalAlliances: state.allianceMap.size
@@ -10870,6 +10969,7 @@ function inspectCurrentProfileItems() {
   }
 
   function stopWatch133() {
+    state.watch133.quickRewardOnly = false;
     state.watch133.running = false;
     state.watch133.paused = false;
     console.log("[TopWar] watch stopped");
@@ -17116,20 +17216,9 @@ TOPWAR.clearThiefQueue()
           }
         }
 
-        // 보루 캐시는 지도스캔/풀스캔의 전체 지도 순회가 끝난 즉시 저장한다.
-        // 이후 동맹 상세 수집/업로드 단계가 실패해도 다음 보상탐색에서 사용할 수 있다.
-        if (surveyOptions.includeRewards === true && typeof TOPWAR.saveFortLocations === "function") {
-          const fortMap = state.ui.serverSurvey.fortMap instanceof Map ? state.ui.serverSurvey.fortMap : new Map();
-          const mapSummary = result.stages?.mapScan?.summary ?? result.stages?.mapScan ?? {};
-          const totalMoves = Number(mapSummary?.totalMoves ?? result.stages?.mapScan?.totalMoves ?? 0);
-          const failCount = Number(mapSummary?.failCount ?? result.stages?.mapScan?.failCount ?? 0);
-          result.fortCache = TOPWAR.saveFortLocations(serverId, [...fortMap.values()], {
-            scannedAt: nowIso(),
-            complete: totalMoves > 0 && failCount === 0,
-            totalMoves,
-            failCount
-          });
-        }
+        // 보루 영구 캐시는 여기서 저장하지 않는다.
+        // 지도스캔은 동맹 내부 인원 수를 읽지 않으므로 활성 길드 여부를 판단할 수 없다.
+        // 풀스캔이 동맹 인원 수집까지 끝낸 뒤 활성 인원 50명 이상 길드의 보루만 선별 저장한다.
       } else {
         result.stages.mapScan = {
           skipped: true
@@ -17224,6 +17313,66 @@ TOPWAR.clearThiefQueue()
         }
 
         await interruptibleSleep(Number(surveyOptions.betweenAllianceDelay ?? 1000));
+      }
+
+      // V2.14.9.58: 빠른보상용 보루 캐시는 풀스캔 결과만 authoritative source로 사용한다.
+      // 동맹창에서 실제 읽은 인원이 50명 이상인 길드만 활성 길드로 보고 그 길드의 보루만 저장한다.
+      if (
+        !result.stopped &&
+        !state.connectionGuard?.disconnected &&
+        surveyOptions.collectBaseInfo !== false &&
+        collectAllianceMembers &&
+        surveyOptions.includeRewards === true &&
+        typeof TOPWAR.saveFortLocations === "function"
+      ) {
+        const ACTIVE_ALLIANCE_MEMBER_THRESHOLD = 50;
+        const activeAllianceIds = new Set();
+        const activeAllianceTags = new Set();
+
+        for (const allianceResult of result.allianceResults || []) {
+          if (!allianceResult?.ok) continue;
+          const memberCount = Number(allianceResult?.count ?? 0);
+          if (!Number.isFinite(memberCount) || memberCount < ACTIVE_ALLIANCE_MEMBER_THRESHOLD) continue;
+          const aid = allianceResult?.target?.allianceId;
+          const tag = allianceResult?.target?.allianceTag;
+          if (aid != null && aid !== "") activeAllianceIds.add(String(aid));
+          if (tag != null && tag !== "") activeAllianceTags.add(String(tag));
+        }
+
+        const fortMap = state.ui.serverSurvey?.fortMap instanceof Map ? state.ui.serverSurvey.fortMap : new Map();
+        const allForts = [...fortMap.values()];
+        const activeForts = allForts.filter(fort => {
+          const aid = fort?.allianceId != null ? String(fort.allianceId) : null;
+          const tag = fort?.allianceTag != null ? String(fort.allianceTag) : null;
+          return (aid && activeAllianceIds.has(aid)) || (tag && activeAllianceTags.has(tag));
+        });
+
+        const mapSummary = result.stages?.mapScan?.summary ?? result.stages?.mapScan ?? {};
+        const totalMoves = Number(mapSummary?.totalMoves ?? result.stages?.mapScan?.totalMoves ?? 0);
+        const failCount = Number(mapSummary?.failCount ?? result.stages?.mapScan?.failCount ?? 0);
+        result.fortCache = TOPWAR.saveFortLocations(serverId, activeForts, {
+          scannedAt: nowIso(),
+          complete: totalMoves > 0 && failCount === 0,
+          totalMoves,
+          failCount,
+          activeAllianceFiltered: true,
+          activeAllianceThreshold: ACTIVE_ALLIANCE_MEMBER_THRESHOLD,
+          activeAllianceCount: activeAllianceIds.size || activeAllianceTags.size,
+          source: "full-active-alliance-v1"
+        });
+        result.activeAllianceFortSummary = {
+          threshold: ACTIVE_ALLIANCE_MEMBER_THRESHOLD,
+          activeAllianceCount: activeAllianceIds.size || activeAllianceTags.size,
+          allFortCount: allForts.length,
+          savedFortCount: activeForts.length
+        };
+        console.log("[Topwar Helper] 활성 길드 보루 캐시 갱신", {
+          serverId,
+          threshold: ACTIVE_ALLIANCE_MEMBER_THRESHOLD,
+          activeAlliances: result.activeAllianceFortSummary.activeAllianceCount,
+          allForts: allForts.length,
+          savedForts: activeForts.length
+        });
       }
 
       if (!result.stopped && !state.connectionGuard?.disconnected) {
@@ -17780,7 +17929,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>TOPWAR Unified V2.14.9.52</span>
+        <span>Topwar Helper V2.14.9.58</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -17791,6 +17940,11 @@ TOPWAR.clearThiefQueue()
       </div>
 
       <div id="tw26-body" style="padding:10px;max-height:calc(100vh - 70px);overflow-y:auto;overflow-x:hidden;box-sizing:border-box;">
+        <div id="tw26-status" style="
+          margin:0 0 8px 0;padding:8px 9px;border-radius:7px;background:rgba(255,255,255,0.075);
+          border:1px solid rgba(255,255,255,0.08);font-size:11px;line-height:1.5;color:#ddd;word-break:break-word;
+        ">상태 확인 중...</div>
+
         <input id="tw26-server" type="text" placeholder="서버번호 · 비우면 전체" style="
           width:100%;height:34px;box-sizing:border-box;border:1px solid rgba(255,255,255,0.16);
           border-radius:7px;padding:0 9px;background:rgba(0,0,0,0.32);color:#fff;font-size:13px;outline:none;
@@ -17825,11 +17979,6 @@ TOPWAR.clearThiefQueue()
 
         <div id="tw26-top100-actions" style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:6px;"></div>
         <div id="tw26-reward-tracker-actions" style="display:grid;grid-template-columns:1fr;gap:6px;margin-top:6px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.08);"></div>
-
-        <div id="tw26-status" style="
-          margin-top:8px;padding:7px 9px;border-radius:7px;background:rgba(255,255,255,0.055);
-          font-size:11px;line-height:1.5;color:#ccc;word-break:break-word;
-        ">상태 확인 중...</div>
 
         <details id="tw26-advanced" style="margin-top:7px;">
           <summary style="cursor:pointer;color:#999;font-size:11px;padding:4px 2px;outline:none;">고급 설정</summary>
@@ -18640,7 +18789,17 @@ TOPWAR.clearThiefQueue()
 
       const fortCache = TOPWAR.getFortCacheEntry?.(targetServerId) ?? null;
       const forts = Array.isArray(fortCache?.forts) ? fortCache.forts : [];
-      const fastFortMode = forts.length > 0 && fortCache?.complete !== false;
+      const hasActiveAllianceFortCache = fortCache?.complete !== false && fortCache?.activeAllianceFiltered === true;
+      const fastFortMode = hasActiveAllianceFortCache && forts.length > 0;
+      const noActiveAllianceForts = hasActiveAllianceFortCache && forts.length === 0;
+      if (noActiveAllianceForts) {
+        console.log(`[Topwar Helper QuickReward] server=${targetServerId} 활성 길드(50명+) 보루 0개 → 빠른보상 스킵`);
+        return {
+          ok: true, completed: true, skipped: true, serverId: targetServerId,
+          scanMode: "fort-fast-empty", fortCount: 0, rewardCount: 0,
+          reason: "no active alliance forts (memberCount >= 50)"
+        };
+      }
 
       let xs = [];
       let ys = [];
@@ -18651,7 +18810,7 @@ TOPWAR.clearThiefQueue()
         xs = [...new Set(forts.map(row => Number(row.x)).filter(Number.isFinite))];
         ys = [...new Set(forts.map(row => Number(row.y)).filter(Number.isFinite))];
         plan = forts.map(row => ({ y: Number(row.y), xOrder: [Number(row.x)] }));
-        console.log(`[TopWar Unified Finder] server=${targetServerId} 보루 캐시 ${forts.length}개 사용 → 고속 모드`);
+        console.log(`[Topwar Helper QuickReward] server=${targetServerId} 보루 캐시 ${forts.length}개 사용 → 고속 모드`);
       } else {
         // AUTO-LEARN MODE: 캐시가 없거나 불완전하면 이 서버만 기존 전체 지도 스캔을 수행한다.
         // 스캔 중 901에서 pointType=13을 수집하고 정상 완료 시 캐시로 저장한다.
@@ -18661,7 +18820,7 @@ TOPWAR.clearThiefQueue()
           startCorner: options.startCorner ?? "top-left",
           snake: options.snake !== false
         });
-        console.warn(`[TopWar Unified Finder] server=${targetServerId} 보루 캐시 없음/불완전 → 최초 전체 스캔으로 자동 학습`);
+        console.warn(`[Topwar Helper QuickReward] server=${targetServerId} 보루 캐시 없음/불완전 → 최초 전체 스캔으로 자동 학습`);
       }
 
       state.watch133.fortMap = new Map();
@@ -18669,6 +18828,12 @@ TOPWAR.clearThiefQueue()
       const startedAt = nowIso();
       const startedMs = Date.now();
       const rewardMap = new Map();
+      // 901 수신 핸들러가 이 Map에 cityReward를 직접 적재한다.
+      state.watch133.quickRewardMap = rewardMap;
+      state.watch133.quickRewardServerId = targetServerId;
+      state.watch133.quickReward901Count = 0;
+      state.watch133.quickRewardBaseSeen = 0;
+      state.watch133.quickRewardLast901At = null;
       // 도둑은 objectMap/getObjectsByTypeRaw를 사용하지 않는다.
       // 오직 이번 스캔 중 새로 도착한 네트워크 901에서 확인된 133만 보관한다.
       const thiefMap = new Map();
@@ -18711,7 +18876,7 @@ TOPWAR.clearThiefQueue()
         failCount: 0
       };
 
-      console.log(`[TopWar Unified Finder] 서버 ${targetServerId} ${fastFortMode ? `보루 고속 스캔 시작: ${forts.length} forts` : `보루 자동학습 전체 스캔 시작: ${totalMoves} moves`}`);
+      console.log(`[Topwar Helper QuickReward] 서버 ${targetServerId} ${fastFortMode ? `보루 고속 스캔 시작: ${forts.length} forts` : `보루 자동학습 전체 스캔 시작: ${totalMoves} moves`}`);
 
       for (const row of plan) {
         for (const x of row.xOrder) {
@@ -18757,6 +18922,7 @@ TOPWAR.clearThiefQueue()
           // 아래 도둑 수집에서는 marker 이후 수신된 네트워크 901만 검사한다.
           // raw recentPackets(16개 제한)에 의존하지 않으므로 패킷 폭주 시에도 133이 유실되지 않는다.
           const thiefNetworkEventMarker = Number(state.thiefBuffer?.nextEventId ?? 1);
+          const rewardCountBeforeMove = rewardMap.size;
           let moveResult = null;
           try {
             moveResult = await TOPWAR.moveMapToStableUnified(x, y, {
@@ -18769,12 +18935,12 @@ TOPWAR.clearThiefQueue()
               interval: options.interval ?? 30,
               maxRetries: options.maxRetries ?? 1,
               retryDelay: options.retryDelay ?? 250,
-              // cache fallback은 이동 성공 판정/cityReward 보조용으로만 허용한다.
-              // 도둑은 위의 collectNetworkThievesFromNew901에서 네트워크 901만 사용한다.
-              collectCache: options.collectCache ?? true
+              // 보루 고속모드에서는 worldMap cache 전체를 정규화하지 않는다.
+              // network 901만 기다리고 cityReward만 추출해 메모리/CPU 부하를 줄인다.
+              collectCache: state.watch133?.quickRewardOnly === true ? false : (options.collectCache ?? true)
             });
           } catch (error) {
-            console.error(`[TopWar Unified Finder] 이동 오류 server=${targetServerId} (${x},${y})`, error);
+            console.error(`[Topwar Helper QuickReward] 이동 오류 server=${targetServerId} (${x},${y})`, error);
           }
 
           moveIndex++;
@@ -18786,7 +18952,13 @@ TOPWAR.clearThiefQueue()
           // marker가 그 이벤트 뒤로 이동해 영구 누락될 수 있다.
           // 마지막 901 이후 짧은 정착 시간을 주어 이번 이동에서 시작된 비동기
           // 디코딩이 버퍼에 반영된 다음 수집한다.
-          await sleep(Math.max(0, Number(options.thiefCaptureSettleMs ?? 450)));
+          if (fastFortMode) {
+            // 빠른보상도 WebSocket Blob 디코딩이 지도 이동 Promise보다 늦게 끝날 수 있다.
+            // 너무 긴 지연은 피하고 cityReward 직접 적재가 끝날 정도의 짧은 정착시간만 둔다.
+            await sleep(Math.max(0, Number(options.quickRewardSettleMs ?? 220)));
+          } else {
+            await sleep(Math.max(0, Number(options.thiefCaptureSettleMs ?? 450)));
+          }
 
           const currentPlayers = Number(TOPWAR.summary?.()?.players ?? 0);
           const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
@@ -18916,7 +19088,7 @@ TOPWAR.clearThiefQueue()
               }
               thiefStats.lastUpload = { ...thiefStats.lastUpload, phase: "finished", result: liveUpload };
 
-              console.log("[TopWar Unified Finder] 도둑 즉시 GitHub 업로드:", {
+              console.log("[Topwar Helper QuickReward] 도둑 즉시 GitHub 업로드:", {
                 serverId: targetServerId,
                 detected: newThieves.length,
                 confirmedCells: confirmedThiefScanCells.size,
@@ -18943,16 +19115,30 @@ TOPWAR.clearThiefQueue()
                 detected: newThieves.length,
                 result: liveUpload
               };
-              console.error("[TopWar Unified Finder] 도둑 즉시 DataHub 업로드 실패:", error);
+              console.error("[Topwar Helper QuickReward] 도둑 즉시 DataHub 업로드 실패:", error);
             }
           }
 
-          // 같은 901/playerMap에서 cityReward도 동시에 누적한다.
-          let rewardCollect = { added: 0 };
-          try {
-            rewardCollect = TOPWAR.collectRewardsFromRecent901(targetServerId, rewardMap) || rewardCollect;
-          } catch (error) {
-            console.warn(`[TopWar Unified Finder] cityReward 수집 오류 server=${targetServerId}`, error);
+          // V2.14.9.58 빠른보상은 handleDecodedPacket에서 901 도착 즉시 rewardMap에 적재한다.
+          // 따라서 playerMap/recentPackets 전체 재검색을 하지 않는다.
+          let rewardCollect = {
+            added: Math.max(0, rewardMap.size - rewardCountBeforeMove),
+            total: rewardMap.size,
+            mode: "direct-901"
+          };
+          if (state.watch133?.quickRewardOnly !== true) {
+            try {
+              rewardCollect = TOPWAR.collectRewardsFromRecent901(targetServerId, rewardMap) || rewardCollect;
+            } catch (error) {
+              console.warn(`[Topwar Helper QuickReward] cityReward 수집 오류 server=${targetServerId}`, error);
+            }
+          }
+
+          // 빠른보상은 현재 좌표의 보상을 rewardMap(local)에 옮긴 직후
+          // raw 901/player/object/alliance/world-cache 참조를 즉시 폐기한다.
+          // 다음 보루 이동에서 다시 필요한 901만 새로 받는다.
+          if (state.watch133?.quickRewardOnly === true) {
+            try { TOPWAR.clearCollected?.({ keepWatch: true }); } catch {}
           }
 
           state.watch133.current = {
@@ -18977,7 +19163,7 @@ TOPWAR.clearThiefQueue()
             !moveResult?.ok
           ) {
             console.log(
-              `[TopWar Unified Finder] server=${targetServerId} scan=${moveIndex}/${totalMoves} ` +
+              `[Topwar Helper QuickReward] server=${targetServerId} scan=${moveIndex}/${totalMoves} ` +
               `coord=(${x},${y}) ok=${!!moveResult?.ok} thief=${thieves.length} thiefNew=${Number(thiefCollect?.added ?? 0)} ` +
               `reward=${rewardMap.size} rewardNew=${Number(rewardCollect?.added ?? 0)} fail=${failCount}`
             );
@@ -19044,19 +19230,9 @@ TOPWAR.clearThiefQueue()
         return result;
       }
 
-      // 전체 스캔 fallback이 정상 완료된 경우에만 이번 서버의 보루 캐시를 유효 상태로 저장한다.
-      if (!fastFortMode && typeof TOPWAR.saveFortLocations === "function") {
-        const learnedForts = [...(state.watch133.fortMap instanceof Map ? state.watch133.fortMap.values() : [])];
-        result.fortCache = TOPWAR.saveFortLocations(targetServerId, learnedForts, {
-          scannedAt: finishedAt,
-          complete: failCount === 0,
-          totalMoves,
-          failCount
-        });
-        result.fortCount = learnedForts.length;
-        result.fortCacheComplete = result.fortCache?.complete === true;
-        console.log(`[TopWar Unified Finder] server=${targetServerId} 보루 자동학습 완료: ${learnedForts.length}개, complete=${result.fortCacheComplete}`);
-      }
+      // 캐시가 없어 전체 스캔 fallback을 했더라도 보루 영구 캐시는 저장하지 않는다.
+      // 빠른보상은 동맹 내부 인원 수를 모르므로 활성 길드(50명+) 여부를 판정할 수 없다.
+      // 보루 캐시는 반드시 풀스캔에서만 생성/갱신한다.
 
       if (options.githubUpload !== false) {
         const thiefServerResult = typeof TOPWAR.buildCompletedThiefServerResult === "function"
@@ -19104,7 +19280,7 @@ TOPWAR.clearThiefQueue()
           } catch (error) {
             result.thiefUpload = { ok: false, serverId: targetServerId, error: error?.message || String(error) };
             state.watch133.lastGithubUpload = result.thiefUpload;
-            console.error("[TopWar Unified Finder] 도둑 DataHub 업로드 실패:", error);
+            console.error("[Topwar Helper QuickReward] 도둑 DataHub 업로드 실패:", error);
           }
         }
 
@@ -19112,12 +19288,38 @@ TOPWAR.clearThiefQueue()
           if (typeof TOPWAR.uploadRewardServerResults !== "function") {
             throw new Error("uploadRewardServerResults not installed");
           }
-          result.rewardUpload = await TOPWAR.uploadRewardServerResults(rewardServerResult);
-          state.watch133.lastRewardGithubUpload = result.rewardUpload;
+
+          const quick901Count = Number(state.watch133.quickReward901Count || 0);
+          if (state.watch133?.quickRewardOnly === true && quick901Count <= 0) {
+            // 네트워크 901을 하나도 받지 못했다면 '보상 0개'가 아니라 '수집 실패'다.
+            // 빈 locations로 기존 DataHub 데이터를 덮지 않는다.
+            result.rewardUpload = {
+              ok: false,
+              skipped: true,
+              serverId: targetServerId,
+              reason: "no network 901 received; empty snapshot upload blocked"
+            };
+            state.watch133.lastRewardGithubUpload = result.rewardUpload;
+            console.warn("[Topwar Helper QuickReward] 도시보상 업로드 생략:", result.rewardUpload);
+          } else {
+            console.log("[Topwar Helper QuickReward] 도시보상 DataHub 업로드 시작:", {
+              serverId: targetServerId,
+              rewards: rewards.length,
+              network901: quick901Count,
+              baseSeen: Number(state.watch133.quickRewardBaseSeen || 0)
+            });
+            result.rewardUpload = await TOPWAR.uploadRewardServerResults(rewardServerResult);
+            state.watch133.lastRewardGithubUpload = result.rewardUpload;
+            console.log("[Topwar Helper QuickReward] 도시보상 DataHub 업로드 완료:", {
+              serverId: targetServerId,
+              rewards: rewards.length,
+              result: result.rewardUpload
+            });
+          }
         } catch (error) {
           result.rewardUpload = { ok: false, serverId: targetServerId, error: error?.message || String(error) };
           state.watch133.lastRewardGithubUpload = result.rewardUpload;
-          console.error("[TopWar Unified Finder] 도시보상 DataHub 업로드 실패:", error);
+          console.error("[Topwar Helper QuickReward] 도시보상 DataHub 업로드 실패:", error);
         }
       }
 
@@ -19131,7 +19333,7 @@ TOPWAR.clearThiefQueue()
       };
       state.watch133.lastUnifiedResult = result;
 
-      console.log("[TopWar Unified Finder] 서버 완료:", {
+      console.log("[Topwar Helper QuickReward] 서버 완료:", {
         serverId: targetServerId,
         thief: thieves.length,
         reward: rewards.length,
@@ -19142,6 +19344,11 @@ TOPWAR.clearThiefQueue()
       // 다음 서버로 넘어가기 전에 이번 서버의 큰 임시 컬렉션과 패킷 참조를 해제한다.
       thiefMap.clear();
       rewardMap.clear();
+      state.watch133.quickRewardMap = null;
+      state.watch133.quickRewardServerId = null;
+      state.watch133.quickReward901Count = 0;
+      state.watch133.quickRewardBaseSeen = 0;
+      state.watch133.quickRewardLast901At = null;
       liveUploadedThiefKeys.clear();
       confirmedThiefScanCells.clear();
       dedicatedThiefBuffer.events = [];
@@ -19161,8 +19368,7 @@ TOPWAR.clearThiefQueue()
     function hasUsableUnifiedFortCache(serverId) {
       try {
         const cache = TOPWAR.getFortCacheEntry?.(serverId) ?? null;
-        const forts = Array.isArray(cache?.forts) ? cache.forts : [];
-        return forts.length > 0 && cache?.complete !== false;
+        return cache?.complete !== false && cache?.activeAllianceFiltered === true;
       } catch {
         return false;
       }
@@ -19191,7 +19397,7 @@ TOPWAR.clearThiefQueue()
       if (!ids.length) return { ok: false, reason: "serverIds is required" };
 
       console.log(
-        `[TopWar Unified Finder] 실제 보상탐색 시작 순서 - 캐시 우선: ${ids.join(",")}`,
+        `[Topwar Helper QuickReward] 실제 보상탐색 시작 순서 - 캐시 우선: ${ids.join(",")}`,
         { cached: ordered.cached, uncached: ordered.uncached }
       );
 
@@ -19215,7 +19421,7 @@ TOPWAR.clearThiefQueue()
       if (missingApis.length) {
         const reason = `필수 API 누락: ${missingApis.join(", ")}`;
         state.watch133.lastUnifiedError = reason;
-        console.error("[TopWar Unified Finder] 실행 불가 -", reason);
+        console.error("[Topwar Helper QuickReward] 실행 불가 -", reason);
         return { ok: false, fatal: true, reason, missingApis };
       }
 
@@ -19227,7 +19433,9 @@ TOPWAR.clearThiefQueue()
 
       state.watch133.lastUnifiedError = null;
       window.TOPWAR_REWARD_TRACKER?.stop?.("watch133-start");
-    state.watch133.running = true;
+      // 빠른보상 전용 경량 모드: 901에서 cityReward 외 대형 맵/플레이어/도둑 캐시를 만들지 않는다.
+      state.watch133.quickRewardOnly = true;
+      state.watch133.running = true;
       state.watch133.paused = false;
       state.watch133.pauseReason = null;
       state.watch133.pauseInfo = null;
@@ -19262,7 +19470,7 @@ TOPWAR.clearThiefQueue()
           };
 
           console.log(
-            `[TopWar Unified Finder] cycle=${cycle} 캐시 우선 실행순서: ${ids.join(",")}`,
+            `[Topwar Helper QuickReward] cycle=${cycle} 캐시 우선 실행순서: ${ids.join(",")}`,
             { cached: ordered.cached, uncached: ordered.uncached }
           );
 
@@ -19293,6 +19501,7 @@ TOPWAR.clearThiefQueue()
               snake: overrides.snake !== false,
               wait901Timeout: overrides.wait901Timeout ?? 2200,
               quietMs: overrides.quietMs ?? 300,
+              quickRewardSettleMs: overrides.quickRewardSettleMs ?? 220,
               maxRetries: overrides.maxRetries ?? 1,
               betweenServerDelay: overrides.betweenServerDelay ?? 1000,
               githubUpload: overrides.githubUpload !== false,
@@ -19309,7 +19518,7 @@ TOPWAR.clearThiefQueue()
 
             if (result?.ok !== true && result?.completed === false && result?.stopped !== true) {
               state.watch133.lastUnifiedError = result?.reason || "통합 스캔 초기화 실패";
-              console.error("[TopWar Unified Finder] 서버 스캔 시작 실패:", result);
+              console.error("[Topwar Helper QuickReward] 서버 스캔 시작 실패:", result);
               state.watch133.running = false;
               break;
             }
@@ -19324,9 +19533,17 @@ TOPWAR.clearThiefQueue()
           await sleep(Number(overrides.betweenCycleDelay ?? 1000));
         }
       } catch (error) {
-        console.error("[TopWar Unified Finder] 반복 실행 오류:", error);
+        console.error("[Topwar Helper QuickReward] 반복 실행 오류:", error);
         state.watch133.lastUnifiedError = error?.message || String(error);
       } finally {
+        state.watch133.quickRewardOnly = false;
+        state.watch133.quickRewardMap = null;
+        state.watch133.quickRewardServerId = null;
+        state.watch133.quickReward901Count = 0;
+        state.watch133.quickRewardBaseSeen = 0;
+        state.watch133.quickRewardLast901At = null;
+        // 빠른보상 종료 시 마지막 901/raw map 참조까지 즉시 해제한다.
+        try { TOPWAR.clearCollected?.({ keepWatch: true }); } catch {}
         if (state.watch133.multiServer) state.watch133.multiServer.running = false;
         state.watch133.current = {
           ...(state.watch133.current || {}),
@@ -19549,9 +19766,9 @@ ${lastServerListError}`
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[TopWar Unified V2.14.9.52 UI] 빠른보상 종료:", result);
+            console.log("[Topwar Helper V2.14.9.58 UI] 빠른보상 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[TopWar Unified V2.14.9.52 UI] 통합찾기 실패 원인:", result.reason);
+              console.error("[Topwar Helper V2.14.9.58 UI] 통합찾기 실패 원인:", result.reason);
               alert(`빠른보상 실행 실패\n\n${result.reason}`);
             }
             render();
@@ -19560,7 +19777,7 @@ ${lastServerListError}`
             state.watch133.running = false;
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[TopWar Unified V2.14.9.52 UI] 빠른보상 오류:", error);
+            console.error("[Topwar Helper V2.14.9.58 UI] 빠른보상 오류:", error);
             alert(`빠른보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
@@ -19653,7 +19870,7 @@ ${lastServerListError}`
         flushCompactHistoryAfterEachCycle: isFull
       })
         .then(result => {
-          console.log(`[TopWar V2.14.9.52 UI] ${label} 종료:`, result);
+          console.log(`[Topwar Helper V2.14.9.58 UI] ${label} 종료:`, result);
           if (result?.ok === false && !result?.stopped) {
             const firstError = result?.errors?.[0]?.result;
             const message = firstError?.error?.message || firstError?.reason || result?.reason || "알 수 없는 오류";
@@ -19663,7 +19880,7 @@ ${lastServerListError}`
         })
         .catch(error => {
           if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.(`${normalizedMode}-error`);
-          console.error(`[TopWar V2.14.9.52 UI] ${label} 오류:`, error);
+          console.error(`[Topwar Helper V2.14.9.58 UI] ${label} 오류:`, error);
           alert(`${label} 오류\n\n${error?.message || String(error)}`);
           render();
         });
@@ -19823,7 +20040,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[TopWar Unified V2.14.9.52 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[Topwar Helper V2.14.9.58 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -24729,7 +24946,12 @@ ${lastServerListError}`
     const subMap = options.subMap ?? range?.sub ?? 0;
     const fortCache = TOPWAR.getFortCacheEntry(serverId);
     const forts = Array.isArray(fortCache?.forts) ? fortCache.forts : [];
-    const fastFortMode = forts.length > 0 && fortCache?.complete !== false;
+    const hasActiveAllianceFortCache = fortCache?.complete !== false && fortCache?.activeAllianceFiltered === true;
+    const fastFortMode = hasActiveAllianceFortCache && forts.length > 0;
+    if (hasActiveAllianceFortCache && forts.length === 0) {
+      console.log(`[TopWar Reward Finder] server=${serverId} 활성 길드(50명+) 보루 0개 → 스킵`);
+      return { ok: true, completed: true, skipped: true, serverId: Number(serverId), count: 0, locations: [], reason: "no active alliance forts" };
+    }
 
     let plan = [];
     if (fastFortMode) {
@@ -24879,16 +25101,8 @@ ${lastServerListError}`
 
     const finishedAt = nowIso();
     let learnedFortCache = null;
-    if (!fastFortMode && !allMovesFailed && typeof TOPWAR.saveFortLocations === "function") {
-      const learnedForts = [...(reward.fortMap instanceof Map ? reward.fortMap.values() : [])];
-      learnedFortCache = TOPWAR.saveFortLocations(serverId, learnedForts, {
-        scannedAt: finishedAt,
-        complete: failCount === 0,
-        totalMoves,
-        failCount
-      });
-      console.log(`[TopWar Reward Finder] server=${serverId} 보루 자동학습 완료: ${learnedForts.length}개, complete=${learnedFortCache?.complete === true}`);
-    }
+    // 이 경로에서도 전체 스캔 fallback은 보상 탐색만 수행하고 보루 캐시는 저장하지 않는다.
+    // 활성 길드 판정이 가능한 풀스캔만 보루 캐시를 갱신한다.
 
     return {
       ok: !allMovesFailed,
@@ -25646,34 +25860,22 @@ coordinateBaseWidth: 480,
 coordinateBaseHeight: 720,
 
 // 자동 클릭/대기 설정
-clickDelayMs: 1500,
-moveDelayMs: 2400,
-serverSelectionWaitMs: 2400,
+clickDelayMs: 1700,
+moveDelayMs: 2300,
+serverCardOpenDelayMs: 2600,
+afterRankCloseDelayMs: 1000,
 moveTimeoutMs: 15000,
 movePollIntervalMs: 200,
 moveRetryCount: 2,
 moveRetryDelayMs: 1200,
-minimumMoveSettleMs: 1500,
-
-// Top100 화면 전환 안정화.
-// 고정 시간만 기다리고 다음 클릭을 넣지 않고, 실제 패널/버튼 준비 상태를 함께 확인한다.
-serverCardOpenRetryCount: 2,
-serverCardRetryDelayMs: 1400,
-theaterOpenTimeoutMs: 10000,
-afterBattleAreaEntryDelayMs: 700,
-afterRankCloseDelayMs: 900,
-battleAreaControlsTimeoutMs: 5000,
-commandCloseVerifyMs: 1200,
-serverListReturnTimeoutMs: 7000,
-afterTheaterCloseDelayMs: 1400,
-
+minimumMoveSettleMs: 1200,
 rankOpenTimeoutMs: 12000,
 rankDataTimeoutMs: 20000,
 // 시간 기준이 아니라 개인 100명 / 동맹 2개 수신 여부만 확인한다.
 rankPollIntervalMs: 100,
 rankRetryDelayMs: 400,
 wrongRankRetryDelayMs: 500,
-betweenServerDelayMs: 2500,
+betweenServerDelayMs: 2600,
 loopDelayMs: 3000,
 requiredPlayerCount: 100,
 requiredAllianceCount: 2,
@@ -27670,70 +27872,22 @@ return point;
 
 async function openSelectedServerByCanvasCenter(serverId, options = {}) {const settings = getSettings(options);
 
-const target = Number(serverId);
-const maxAttempts = Math.max(
-  1,
-  Number(settings.serverCardOpenRetryCount ?? 2)
-);
+throwIfStopped();
 
-let lastAttempt = null;
+const click = clickCanvasCenter();
 
-for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-  throwIfStopped();
+// UI 로딩만 기다리고 TheaterPanel 탐지 실패로 조사를 중단하지 않는다.
+// 실제 진입 여부는 다음 개인 랭킹 단계에서 자연스럽게 검증된다.
+await sleep(Number(settings.serverCardOpenDelayMs ?? 2600));
 
-  const click = clickCanvasCenter();
+throwIfStopped();
 
-  // V2.14.9.53:
-  // 예전에는 중앙 클릭 후 고정 1.6초만 기다리고 바로 랭킹 버튼을 눌렀다.
-  // 서버 전환 렌더링이 늦으면 이전/중간 화면에 다음 입력이 들어가 Cocos 화면이
-  // 비어 보이는 현상이 생길 수 있으므로 실제 전투지역 UI가 준비될 때까지 확인한다.
-  const entered = await waitForBattleAreaEntry(
-    target,
-    {
-      ...settings,
-      moveTimeoutMs:
-        Number(settings.theaterOpenTimeoutMs ?? 10000),
-      minimumMoveSettleMs:
-        Number(settings.minimumMoveSettleMs ?? 1500)
-    }
-  );
-
-  lastAttempt = {
-    attempt,
-    click,
-    entered
-  };
-
-  pushLog(`${target} 전투 지역 진입 확인 (${attempt}/${maxAttempts})`, lastAttempt);
-
-  if (entered.ok) {
-    await sleep(
-      Number(settings.afterBattleAreaEntryDelayMs ?? 700)
-    );
-
-    throwIfStopped();
-
-    return {
-      ok: true,
-      method: "canvas-center-dom-click-verified",
-      serverId: target,
-      attempt,
-      click,
-      entered
-    };
-  }
-
-  if (attempt < maxAttempts) {
-    await sleep(
-      Number(settings.serverCardRetryDelayMs ?? 1400)
-    );
-  }
-}
-
-throw new Error(
-  `${target} 서버 전투 지역 화면이 안정화되지 않았습니다. ` +
-  `다음 입력을 중단해 화면 전환 중첩을 방지합니다.`
-);
+return {
+  ok: true,
+  method: "canvas-center-dom-click",
+  serverId: Number(serverId),
+  click
+};
 
 }
 
@@ -30531,63 +30685,18 @@ return {
 
 }
 
-async function waitForBattleAreaControlsReady(timeoutMs = 5000) {
-const startedAt = Date.now();
-
-while (Date.now() - startedAt < timeoutMs) {
-  throwIfStopped();
-
-  const rankClosed =
-    !componentIsActive("WorldServerPowerRank") &&
-    !componentIsActive("WorldServerAlliancePowerRank");
-
-  if (rankClosed && hasBattleAreaRankButtons()) {
-    return {
-      ok: true,
-      elapsedMs: Date.now() - startedAt
-    };
-  }
-
-  await sleep(100);
-}
-
-return {
-  ok: false,
-  elapsedMs: Date.now() - startedAt,
-  personalRankActive:
-    componentIsActive("WorldServerPowerRank"),
-  allianceRankActive:
-    componentIsActive("WorldServerAlliancePowerRank"),
-  rankButtonsVisible:
-    hasBattleAreaRankButtons()
-};
-
-}
-
 async function closeByJavaBackPoint(componentName, options = {}) {
 // 기존 함수명은 호환을 위해 유지하지만 좌표 클릭은 사용하지 않는다.
-const settings = getSettings(options);
-const result = await closePanelByCommand(componentName,settings);
+const result = await closePanelByCommand(componentName,options);
 
 await sleep(
-  Number(settings.afterRankCloseDelayMs ?? 900)
+  Number(
+    getSettings(options).afterRankCloseDelayMs ?? 1000
+  )
 );
-
-// 랭킹 패널 inactive만 확인하면 Cocos의 복귀 애니메이션이 끝나지 않은 상태일 수 있다.
-// 전투지역의 랭킹 버튼이 실제로 다시 보일 때까지 기다려 다음 입력의 중첩을 막는다.
-const controlsReady = await waitForBattleAreaControlsReady(
-  Number(settings.battleAreaControlsTimeoutMs ?? 5000)
-);
-
-if (!controlsReady.ok) {
-  throw new Error(
-    `${componentName} 닫은 뒤 전투 지역 화면이 안정화되지 않았습니다.`
-  );
-}
 
 return {
   ...result,
-  controlsReady,
   compatibilityName: "closeByJavaBackPoint",
   coordinateUsed: false
 };
@@ -30596,54 +30705,14 @@ return {
 
 async function exitTheaterByJavaBackPoint(options = {}) {
 // WorldServerTheaterPanel 역시 close/back 명령만 사용한다.
-const settings = getSettings(options);
-const result = await closePanelByCommand(
-  "WorldServerTheaterPanel",
-  settings
-);
-
-// 서버 목록이 실제로 다시 활성화될 때까지 기다린다.
-let serverListReady = await waitForComponentActive(
-  "WorldServerListPanel",
-  Number(settings.serverListReturnTimeoutMs ?? 7000)
-);
-
-if (!serverListReady) {
-  // 화면 전환이 꼬인 경우 다음 서버를 억지로 누르지 않고
-  // 기존 Recovery를 이용해 WORLD_MAP/서버목록 화면으로 복구한다.
-  try {
-    await window.TOPWAR_RECOVERY?.ensureNavigation?.(
-      "WORLD_MAP",
-      {
-        timeout:
-          Number(settings.moveTimeoutMs ?? 15000)
-      }
-    );
-  } catch (error) {
-    pushLog("Top100 서버목록 화면 복구 실패", {
-      error: error?.message || String(error)
-    });
-  }
-
-  serverListReady = await waitForComponentActive(
-    "WorldServerListPanel",
-    Number(settings.serverListReturnTimeoutMs ?? 7000)
-  );
-}
-
-if (!serverListReady) {
-  throw new Error(
-    "전투 지역을 닫은 뒤 서버 목록 화면으로 복귀하지 못했습니다."
-  );
-}
+const result = await closePanelByCommand("WorldServerTheaterPanel",options);
 
 await sleep(
-  Number(settings.afterTheaterCloseDelayMs ?? 1400)
+  Number(getSettings(options).clickDelayMs ?? 1200)
 );
 
 return {
   ...result,
-  serverListReady,
   theaterExit: true,
   coordinateUsed: false
 };
