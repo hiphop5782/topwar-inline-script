@@ -1134,28 +1134,86 @@
 
     async function closeDaily() {
         const daily = getDaily();
-
+    
+        // 이미 닫혀 있으면 정상 처리
         if (!daily) return true;
-
-        const root = ancestor(
+    
+        // 일일임무 팝업 찾기
+        let popup = ancestor(
             daily.content,
             "openBuildingViewPrefab"
         );
-
-        if (!root) return false;
-
-        const close =
-            findButton("close", root) ||
-            findButton("closeClick", root);
-
-        if (!close) return false;
-
-        emitButton(close);
-
-        return !!(await waitFor(
+    
+        if (!popup) {
+            console.warn("[CROSS100] 일일임무 팝업 없음");
+            return false;
+        }
+    
+        // PopLayer 직전까지 탐색 범위 확장
+        let root = popup;
+    
+        while (
+            root.parent &&
+            root.parent.name !== "PopLayer"
+        ) {
+            root = root.parent;
+        }
+    
+        const candidates = [];
+        const stack = [root];
+    
+        while (stack.length) {
+            const node = stack.pop();
+    
+            if (!node || !cc.isValid(node)) continue;
+    
+            const button = node.getComponent(cc.Button);
+    
+            if (button && node.activeInHierarchy) {
+                for (const event of button.clickEvents || []) {
+                    if (
+                        /^(close|closeClick|onClose|onClickClose|btnCloseClick)$/i
+                            .test(event.handler || "") &&
+                        typeof event.emit === "function"
+                    ) {
+                        candidates.push({
+                            node,
+                            button,
+                            event
+                        });
+                    }
+                }
+            }
+    
+            stack.push(...(node.children || []));
+        }
+    
+        // 엉뚱한 버튼을 누르지 않도록 확인
+        if (candidates.length !== 1) {
+            console.warn(
+                "[CROSS100] 일일임무 닫기 버튼 식별 실패:",
+                candidates.length
+            );
+    
+            return false;
+        }
+    
+        // 실제 게임 닫기 이벤트 실행
+        const target = candidates[0];
+    
+        target.event.emit([target.button]);
+    
+        // 팝업이 실제로 닫혔는지 확인
+        const closed = await waitFor(
             () => !getDaily(),
-            4000
-        ));
+            5000
+        );
+    
+        if (closed) {
+            console.log("[CROSS100] 일일임무 창 닫기 완료");
+        }
+    
+        return !!closed;
     }
 
     async function closeWindows() {
