@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar Cross PVP TOP100 Standalone UI
 // @namespace    topwar-cross100-standalone
-// @version      1.2.0
+// @version      1.2.1
 // @description  독립 UI에서 크로스 PVP TOP100 조사 실행 및 진행상태 표시
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -172,7 +172,9 @@
         panel.querySelector(".c100-badge").style.background = running ? "#166534" : state.phase === "중단" ? "#7f1d1d" : "#334155";
         panel.querySelector(".c100-phase").textContent =
             !running && state.phase === "완료"
-                ? "조사 결과가 GitHub에 업로드되었습니다. 원하는 형식으로 결과를 내려받으세요."
+                ? state.githubUpload?.published
+                    ? "조사 결과가 GitHub에 업로드되었습니다. 원하는 형식으로 결과를 내려받으세요."
+                    : "조사 결과 전송과 GitHub 업로드 예약이 완료되었습니다. 원하는 형식으로 결과를 내려받으세요."
                 : state.phase || "게임이 준비되면 시작을 누르세요.";
         panel.querySelector(".c100-fill").style.width = `${percent}%`;
         panel.querySelector(".c100-percent").textContent = `${percent.toFixed(0)}%`;
@@ -193,7 +195,7 @@
         const completedSuccessfully = !running &&
             state.phase === "완료" &&
             completed === total &&
-            state.githubUpload?.published === true;
+            state.githubUpload?.accepted === true;
         panel.querySelector(".c100-actions").style.display = completedSuccessfully ? "none" : "grid";
         panel.querySelector(".c100-done-actions").style.display = completedSuccessfully ? "grid" : "none";
     }
@@ -1299,25 +1301,40 @@
             );
         }
 
-        // 단순 로컬 저장 성공이 아니라 실제 GitHub 커밋 완료 응답만 인정한다.
+        // 백엔드가 동기 발행하면 commit SHA를, 비동기 발행이면 202 Accepted와
+        // cross-pvp-top100 데이터셋 접수 결과를 반환한다. DirtyRegistry가 디스크에
+        // 영속화되므로 정상 접수된 비동기 응답도 GitHub 필수 배포 대기 상태로 인정한다.
         const published = body?.githubPublished === true ||
             body?.publishStatus === "PUBLISHED" ||
             typeof body?.githubCommitSha === "string" && body.githubCommitSha.length > 0;
+        const queued = !published && (
+            response.status === 202 ||
+            body?.publishStatus === "QUEUED" ||
+            (
+                body?.ok === true &&
+                body?.dataset === "cross-pvp-top100" &&
+                Number(body?.accepted) >= 100
+            )
+        );
 
-        if (!published) {
+        if (!published && !queued) {
             throw new Error(
-                "DataHub는 결과를 받았지만 GitHub 커밋 완료를 확인하지 못했습니다. " +
-                "백엔드가 githubPublished 또는 githubCommitSha를 반환해야 합니다."
+                "DataHub 응답에서 GitHub 커밋 완료 또는 영속 배포 대기열 등록을 확인하지 못했습니다."
             );
         }
 
         state.githubUpload = {
-            published: true,
+            accepted: true,
+            published,
+            queued,
+            publishStatus: published ? "PUBLISHED" : "QUEUED",
             commitSha: body.githubCommitSha || null,
             publishedAt: body.publishedAt || new Date().toISOString(),
             requestId
         };
-        state.phase = "GitHub 업로드 완료";
+        state.phase = published
+            ? "GitHub 업로드 완료"
+            : "GitHub 업로드 예약 완료";
         renderPanel();
         return body;
     }
