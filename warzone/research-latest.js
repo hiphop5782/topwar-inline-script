@@ -1132,6 +1132,164 @@
         ));
     }
 
+    function showResearchModal({
+        success = false,
+        title,
+        message,
+        completed = 0,
+        total = 100
+    } = {}) {
+        // 기존 모달이 있다면 제거
+        document.getElementById("cross100-modal-overlay")?.remove();
+    
+        const overlay = document.createElement("div");
+        overlay.id = "cross100-modal-overlay";
+    
+        overlay.style.cssText = `
+            position: fixed;
+            inset: 0;
+            z-index: 2147483647;
+            background: rgba(0, 0, 0, 0.65);
+            backdrop-filter: blur(5px);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-family: Arial, sans-serif;
+        `;
+    
+        const modal = document.createElement("div");
+        modal.style.cssText = `
+            width: min(420px, calc(100vw - 32px));
+            box-sizing: border-box;
+            padding: 28px;
+            background: #1d2433;
+            color: #f8fafc;
+            border: 1px solid #3c465a;
+            border-radius: 16px;
+            box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+            text-align: center;
+        `;
+    
+        const icon = document.createElement("div");
+        icon.textContent = success ? "✓" : "!";
+        icon.style.cssText = `
+            width: 58px;
+            height: 58px;
+            margin: 0 auto 16px;
+            border-radius: 50%;
+            display: grid;
+            place-items: center;
+            background: ${success ? "#176c51" : "#784723"};
+            color: white;
+            font-size: 32px;
+            font-weight: bold;
+        `;
+    
+        const heading = document.createElement("h2");
+        heading.textContent = title ||
+            (success ? "TOP100 조사 완료" : "TOP100 조사 중단");
+        heading.style.cssText = `
+            margin: 0 0 12px;
+            font-size: 22px;
+            font-weight: 700;
+        `;
+    
+        const description = document.createElement("p");
+        description.textContent = message ||
+            (success
+                ? "크로스 전투 훈련 조사가 완료되었습니다."
+                : "조사가 중단되었습니다.");
+        description.style.cssText = `
+            margin: 0 0 20px;
+            color: #b8c2d3;
+            font-size: 14px;
+            line-height: 1.7;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        `;
+    
+        const progressLabel = document.createElement("div");
+        progressLabel.style.cssText = `
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 13px;
+            color: #cbd5e1;
+        `;
+    
+        const labelText = document.createElement("span");
+        labelText.textContent = "조사 완료";
+    
+        const countText = document.createElement("span");
+        countText.textContent = `${completed} / ${total}`;
+    
+        progressLabel.append(labelText, countText);
+    
+        const progressTrack = document.createElement("div");
+        progressTrack.style.cssText = `
+            height: 9px;
+            background: #374151;
+            border-radius: 999px;
+            overflow: hidden;
+            margin-bottom: 24px;
+        `;
+    
+        const progressFill = document.createElement("div");
+        const percent = total > 0
+            ? Math.min(100, Math.max(0, completed / total * 100))
+            : 0;
+    
+        progressFill.style.cssText = `
+            width: ${percent}%;
+            height: 100%;
+            background: ${success ? "#34d399" : "#f59e0b"};
+            border-radius: 999px;
+        `;
+    
+        progressTrack.appendChild(progressFill);
+    
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "확인";
+        button.style.cssText = `
+            width: 100%;
+            padding: 13px 16px;
+            border: none;
+            border-radius: 10px;
+            background: #2563eb;
+            color: white;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+        `;
+    
+        function close() {
+            document.removeEventListener("keydown", onKeyDown);
+            overlay.remove();
+        }
+    
+        function onKeyDown(event) {
+            if (event.key === "Escape") close();
+        }
+    
+        button.addEventListener("click", close);
+        document.addEventListener("keydown", onKeyDown);
+    
+        modal.append(
+            icon,
+            heading,
+            description,
+            progressLabel,
+            progressTrack,
+            button
+        );
+    
+        overlay.appendChild(modal);
+        document.body.appendChild(overlay);
+    
+        button.focus();
+    }
+
     async function closeDaily() {
         const daily = getDaily();
     
@@ -1379,22 +1537,25 @@
 
         // 알림은 마지막에 한 번
         if (successful) {
-            alert(
-                "크로스 TOP100 조사 완료!\n\n" +
-                "100명 편성 수집 완료\n" +
-                "부대전투력(TP) 및 영웅·메카 매핑 완료\n" +
-                "JSON 다운로드 완료\n" +
-                "조사 창 정리 완료"
-            );
+            showResearchModal({
+                success: true,
+                title: "크로스 TOP100 조사 완료",
+                message:
+                    "영웅·메카·병력 분석이 완료되었습니다.\n" +
+                    "JSON 파일 저장 및 조사 창 정리를 마쳤습니다.",
+                completed: state.completed,
+                total: CFG.LIMIT
+            });
         } else {
-            alert(
-                "크로스 TOP100 조사 중단\n\n" +
-                state.reason +
-                "\n\n수집: " +
-                state.completed +
-                "/100명\n" +
-                "수집 데이터는 보존됩니다."
-            );
+            showResearchModal({
+                success: false,
+                title: "크로스 TOP100 조사 중단",
+                message:
+                    state.reason ||
+                    "게임 화면이 변경되거나 조사 도중 오류가 발생했습니다.",
+                completed: state.completed,
+                total: CFG.LIMIT
+            });
         }
     }
 })();
