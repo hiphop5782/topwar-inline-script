@@ -1,5 +1,141 @@
-(async () => {
+// ==UserScript==
+// @name         TopWar Cross PVP TOP100 Standalone UI
+// @namespace    topwar-cross100-standalone
+// @version      1.0.0
+// @description  독립 UI에서 크로스 PVP TOP100 조사 실행 및 진행상태 표시
+// @match        https://h5.topwargame.com/*
+// @match        https://h5v2.topwargame.com/*
+// @match        https://*.topwargame.com/*
+// @match        https://*.topwarapp.com/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(() => {
     "use strict";
+
+    const APP_ID = "cross100-standalone-app";
+    const PANEL_ID = "cross100-standalone-panel";
+    const STYLE_ID = "cross100-standalone-style";
+
+    // 같은 코드를 다시 붙여넣어도 패널과 갱신 타이머가 중복되지 않는다.
+    window[APP_ID]?.destroy?.();
+
+    let renderTimer = null;
+    let runPromise = null;
+
+    function elapsedText(startedAt, finishedAt) {
+        const start = Date.parse(startedAt || "");
+        if (!Number.isFinite(start)) return "00:00";
+        const end = Date.parse(finishedAt || "") || Date.now();
+        const seconds = Math.max(0, Math.floor((end - start) / 1000));
+        const minutes = Math.floor(seconds / 60);
+        return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+    }
+
+    function installStyle() {
+        document.getElementById(STYLE_ID)?.remove();
+        const style = document.createElement("style");
+        style.id = STYLE_ID;
+        style.textContent = `
+            #${PANEL_ID}{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:2147483600;width:300px;box-sizing:border-box;padding:16px;border:1px solid rgba(148,163,184,.34);border-radius:14px;background:rgba(15,23,42,.96);box-shadow:0 18px 55px rgba(0,0,0,.48);color:#e2e8f0;font-family:Arial,sans-serif;user-select:none}
+            #${PANEL_ID} .c100-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:13px}
+            #${PANEL_ID} .c100-title{font-size:15px;font-weight:800;color:#f8fafc}
+            #${PANEL_ID} .c100-badge{padding:4px 8px;border-radius:999px;background:#334155;color:#cbd5e1;font-size:11px;font-weight:700}
+            #${PANEL_ID} .c100-phase{min-height:34px;margin-bottom:10px;font-size:13px;line-height:1.45;color:#cbd5e1;overflow-wrap:anywhere}
+            #${PANEL_ID} .c100-track{height:9px;overflow:hidden;border-radius:999px;background:#334155}
+            #${PANEL_ID} .c100-fill{height:100%;width:0;background:linear-gradient(90deg,#2563eb,#38bdf8);transition:width .2s ease}
+            #${PANEL_ID} .c100-count{display:flex;justify-content:space-between;margin:8px 0 12px;font-size:12px;color:#94a3b8}
+            #${PANEL_ID} .c100-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:12px}
+            #${PANEL_ID} .c100-stat{padding:8px;border-radius:8px;background:rgba(51,65,85,.55)}
+            #${PANEL_ID} .c100-stat small{display:block;margin-bottom:3px;color:#94a3b8;font-size:10px}
+            #${PANEL_ID} .c100-stat strong{font-size:13px;color:#f1f5f9}
+            #${PANEL_ID} .c100-error{display:none;max-height:76px;overflow:auto;margin-bottom:10px;padding:8px;border-radius:8px;background:rgba(127,29,29,.34);color:#fecaca;font-size:11px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere}
+            #${PANEL_ID} .c100-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+            #${PANEL_ID} button{height:36px;border:0;border-radius:9px;color:#fff;font-size:12px;font-weight:800;cursor:pointer}
+            #${PANEL_ID} button:disabled{cursor:not-allowed;opacity:.5}
+            #${PANEL_ID} .c100-start{background:#2563eb}
+            #${PANEL_ID} .c100-stop{background:#b91c1c}
+        `;
+        document.head.appendChild(style);
+    }
+
+    function installPanel() {
+        installStyle();
+        document.getElementById(PANEL_ID)?.remove();
+
+        const panel = document.createElement("section");
+        panel.id = PANEL_ID;
+        panel.innerHTML = `
+            <div class="c100-head"><div class="c100-title">크로스 TOP100 조사</div><div class="c100-badge">대기</div></div>
+            <div class="c100-phase">게임이 준비되면 시작을 누르세요.</div>
+            <div class="c100-track"><div class="c100-fill"></div></div>
+            <div class="c100-count"><span class="c100-percent">0%</span><span class="c100-completed">0 / 100</span></div>
+            <div class="c100-grid">
+                <div class="c100-stat"><small>현재 순위</small><strong class="c100-rank">-</strong></div>
+                <div class="c100-stat"><small>경과 시간</small><strong class="c100-time">00:00</strong></div>
+                <div class="c100-stat"><small>시도</small><strong class="c100-attempted">0</strong></div>
+                <div class="c100-stat"><small>오류</small><strong class="c100-errors">0</strong></div>
+            </div>
+            <div class="c100-error"></div>
+            <div class="c100-actions"><button type="button" class="c100-start">조사 시작</button><button type="button" class="c100-stop" disabled>중지</button></div>
+        `;
+        document.body.appendChild(panel);
+
+        panel.querySelector(".c100-start").addEventListener("click", () => {
+            if (!runPromise && !window.__CROSS100_RUNNING) {
+                runPromise = runCross100()
+                    .catch(error => console.error("[CROSS100 UI] 실행 실패", error))
+                    .finally(() => {
+                        runPromise = null;
+                        renderPanel();
+                    });
+                renderPanel();
+            }
+        });
+
+        panel.querySelector(".c100-stop").addEventListener("click", () => {
+            window.CROSS100_STOP?.();
+            renderPanel();
+        });
+
+        renderTimer = setInterval(renderPanel, 200);
+        renderPanel();
+    }
+
+    function renderPanel() {
+        const panel = document.getElementById(PANEL_ID);
+        if (!panel) return;
+
+        const state = window.CROSS100_STATE || {};
+        const running = window.__CROSS100_RUNNING === true;
+        const completed = Number(state.completed || 0);
+        const total = 100;
+        const percent = Math.min(100, Math.max(0, completed / total * 100));
+        const error = state.reason || state.errors?.at?.(-1)?.error || "";
+
+        panel.querySelector(".c100-badge").textContent = running ? "실행 중" : state.phase === "완료" ? "완료" : state.phase === "중단" ? "중단" : "대기";
+        panel.querySelector(".c100-badge").style.background = running ? "#166534" : state.phase === "중단" ? "#7f1d1d" : "#334155";
+        panel.querySelector(".c100-phase").textContent = state.phase || "게임이 준비되면 시작을 누르세요.";
+        panel.querySelector(".c100-fill").style.width = `${percent}%`;
+        panel.querySelector(".c100-percent").textContent = `${percent.toFixed(0)}%`;
+        panel.querySelector(".c100-completed").textContent = `${completed} / ${total}`;
+        panel.querySelector(".c100-rank").textContent = state.currentRank ? `${state.currentRank}위` : "-";
+        panel.querySelector(".c100-time").textContent = elapsedText(state.startedAt, state.finishedAt);
+        panel.querySelector(".c100-attempted").textContent = String(state.attempted || 0);
+        panel.querySelector(".c100-errors").textContent = String(state.errors?.length || 0);
+
+        const errorBox = panel.querySelector(".c100-error");
+        errorBox.textContent = error;
+        errorBox.style.display = error ? "block" : "none";
+
+        panel.querySelector(".c100-start").disabled = running;
+        panel.querySelector(".c100-start").textContent = state.phase === "완료" || state.phase === "중단" ? "다시 조사" : "조사 시작";
+        panel.querySelector(".c100-stop").disabled = !running || state.stopped === true;
+    }
+
+    async function runCross100() {
+        "use strict";
 
     // =========================================================
     // TOPWAR CROSS PVP TOP100 - STANDALONE
@@ -1557,5 +1693,32 @@
                 total: CFG.LIMIT
             });
         }
+    }
+    }
+
+    window[APP_ID] = Object.freeze({
+        start() {
+            document.querySelector(`#${PANEL_ID} .c100-start`)?.click();
+        },
+        stop() {
+            window.CROSS100_STOP?.();
+        },
+        state() {
+            return window.CROSS100_STATE || null;
+        },
+        destroy() {
+            if (window.__CROSS100_RUNNING) {
+                window.CROSS100_STOP?.();
+            }
+            if (renderTimer) clearInterval(renderTimer);
+            document.getElementById(PANEL_ID)?.remove();
+            document.getElementById(STYLE_ID)?.remove();
+        }
+    });
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", installPanel, { once: true });
+    } else {
+        installPanel();
     }
 })();
