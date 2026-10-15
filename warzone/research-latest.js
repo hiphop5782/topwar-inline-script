@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar Cross PVP TOP100 Standalone UI
 // @namespace    topwar-cross100-standalone
-// @version      1.0.0
+// @version      1.2.0
 // @description  독립 UI에서 크로스 PVP TOP100 조사 실행 및 진행상태 표시
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -17,12 +17,45 @@
     const APP_ID = "cross100-standalone-app";
     const PANEL_ID = "cross100-standalone-panel";
     const STYLE_ID = "cross100-standalone-style";
+    const DATAHUB_SETTINGS_KEY = "CROSS100_DATAHUB_SETTINGS_V1";
+    const DATAHUB_BASE_URL = "https://datahub.progamer.info";
+    const DATAHUB_ENDPOINT = "/api/v1/cross-pvp/top100";
 
     // 같은 코드를 다시 붙여넣어도 패널과 갱신 타이머가 중복되지 않는다.
     window[APP_ID]?.destroy?.();
 
     let renderTimer = null;
     let runPromise = null;
+
+    function requireDataHubSettings() {
+        let saved = {};
+        try {
+            saved = JSON.parse(localStorage.getItem(DATAHUB_SETTINGS_KEY) || "{}");
+        } catch {}
+
+        const scannerId = prompt(
+            "Cross TOP100 조사기 ID",
+            String(saved.scannerId || "cross-pvp-01")
+        );
+        if (scannerId == null || !scannerId.trim()) {
+            throw new Error("GitHub 업로드용 조사기 ID가 필요합니다.");
+        }
+
+        const key = prompt(
+            "DataHub API 키",
+            String(saved.key || "")
+        );
+        if (key == null || !key.trim()) {
+            throw new Error("GitHub 업로드용 DataHub API 키가 필요합니다.");
+        }
+
+        const settings = {
+            scannerId: scannerId.trim(),
+            key: key.trim()
+        };
+        localStorage.setItem(DATAHUB_SETTINGS_KEY, JSON.stringify(settings));
+        return settings;
+    }
 
     function elapsedText(startedAt, finishedAt) {
         const start = Date.parse(startedAt || "");
@@ -52,10 +85,14 @@
             #${PANEL_ID} .c100-stat strong{font-size:13px;color:#f1f5f9}
             #${PANEL_ID} .c100-error{display:none;max-height:76px;overflow:auto;margin-bottom:10px;padding:8px;border-radius:8px;background:rgba(127,29,29,.34);color:#fecaca;font-size:11px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere}
             #${PANEL_ID} .c100-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+            #${PANEL_ID} .c100-done-actions{display:none;grid-template-columns:1fr;gap:8px}
             #${PANEL_ID} button{height:36px;border:0;border-radius:9px;color:#fff;font-size:12px;font-weight:800;cursor:pointer}
             #${PANEL_ID} button:disabled{cursor:not-allowed;opacity:.5}
             #${PANEL_ID} .c100-start{background:#2563eb}
             #${PANEL_ID} .c100-stop{background:#b91c1c}
+            #${PANEL_ID} .c100-sheet{background:#15803d}
+            #${PANEL_ID} .c100-json{background:#2563eb}
+            #${PANEL_ID} .c100-exit{background:#475569}
         `;
         document.head.appendChild(style);
     }
@@ -79,6 +116,11 @@
             </div>
             <div class="c100-error"></div>
             <div class="c100-actions"><button type="button" class="c100-start">조사 시작</button><button type="button" class="c100-stop" disabled>중지</button></div>
+            <div class="c100-done-actions">
+                <button type="button" class="c100-sheet">구글 스프레드시트용 다운받기</button>
+                <button type="button" class="c100-json">JSON 다운받기</button>
+                <button type="button" class="c100-exit">종료하기</button>
+            </div>
         `;
         document.body.appendChild(panel);
 
@@ -99,6 +141,18 @@
             renderPanel();
         });
 
+        panel.querySelector(".c100-sheet").addEventListener("click", () => {
+            window.CROSS100_DOWNLOAD_SHEET?.();
+        });
+
+        panel.querySelector(".c100-json").addEventListener("click", () => {
+            window.CROSS100_DOWNLOAD_JSON?.();
+        });
+
+        panel.querySelector(".c100-exit").addEventListener("click", () => {
+            window[APP_ID]?.destroy?.();
+        });
+
         renderTimer = setInterval(renderPanel, 200);
         renderPanel();
     }
@@ -116,7 +170,10 @@
 
         panel.querySelector(".c100-badge").textContent = running ? "실행 중" : state.phase === "완료" ? "완료" : state.phase === "중단" ? "중단" : "대기";
         panel.querySelector(".c100-badge").style.background = running ? "#166534" : state.phase === "중단" ? "#7f1d1d" : "#334155";
-        panel.querySelector(".c100-phase").textContent = state.phase || "게임이 준비되면 시작을 누르세요.";
+        panel.querySelector(".c100-phase").textContent =
+            !running && state.phase === "완료"
+                ? "조사 결과가 GitHub에 업로드되었습니다. 원하는 형식으로 결과를 내려받으세요."
+                : state.phase || "게임이 준비되면 시작을 누르세요.";
         panel.querySelector(".c100-fill").style.width = `${percent}%`;
         panel.querySelector(".c100-percent").textContent = `${percent.toFixed(0)}%`;
         panel.querySelector(".c100-completed").textContent = `${completed} / ${total}`;
@@ -132,6 +189,13 @@
         panel.querySelector(".c100-start").disabled = running;
         panel.querySelector(".c100-start").textContent = state.phase === "완료" || state.phase === "중단" ? "다시 조사" : "조사 시작";
         panel.querySelector(".c100-stop").disabled = !running || state.stopped === true;
+
+        const completedSuccessfully = !running &&
+            state.phase === "완료" &&
+            completed === total &&
+            state.githubUpload?.published === true;
+        panel.querySelector(".c100-actions").style.display = completedSuccessfully ? "none" : "grid";
+        panel.querySelector(".c100-done-actions").style.display = completedSuccessfully ? "grid" : "none";
     }
 
     async function runCross100() {
@@ -258,6 +322,7 @@
         currentRank: null,
         results: [],
         errors: [],
+        githubUpload: null,
         startedAt: new Date().toISOString()
     };
 
@@ -268,7 +333,6 @@
     // =========================================================
 
     let successful = false;
-    let saved = false;
     let rankingEstablished = false;
     let expectedDetail = false;
     let seenDetail = false;
@@ -276,6 +340,7 @@
     let detailNodeRef = null;
     let watchdog = null;
     let activeRequest = null;
+    let uploadSettings = null;
 
     window.CROSS100_STOP = () => {
         state.stopped = true;
@@ -1169,17 +1234,17 @@
     };
 
     // =========================================================
-    // JSON DOWNLOAD
+    // RESULT DOWNLOAD
     // =========================================================
 
-    function saveJSON() {
-        if (saved) return;
-
+    function buildDownloadPayload() {
         const mapped = buildMappedResults();
 
-        const payload = {
+        return {
+            version: 1,
+            source: "cross-pvp-top100-standalone",
             collectedAt:
-                new Date().toISOString(),
+                state.finishedAt || new Date().toISOString(),
 
             attempted: state.attempted,
             completed: state.completed,
@@ -1196,6 +1261,81 @@
 
             errors: state.errors
         };
+    }
+
+    async function uploadRequired(settings) {
+        state.phase = "GitHub 업로드 중";
+        renderPanel();
+
+        const requestId = crypto.randomUUID?.() ||
+            `cross100-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const response = await fetch(
+            `${DATAHUB_BASE_URL}${DATAHUB_ENDPOINT}`,
+            {
+                method: "POST",
+                mode: "cors",
+                cache: "no-store",
+                credentials: "omit",
+                headers: {
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${settings.key}`,
+                    "X-Scanner-Id": settings.scannerId,
+                    "X-Request-Id": requestId
+                },
+                body: JSON.stringify(buildDownloadPayload())
+            }
+        );
+
+        const text = await response.text();
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; }
+        catch { body = { raw: text }; }
+
+        if (!response.ok || body?.ok === false) {
+            throw new Error(
+                `DataHub 업로드 실패 (HTTP ${response.status}): ` +
+                String(body?.error || body?.message || text || "응답 없음").slice(0, 300)
+            );
+        }
+
+        // 단순 로컬 저장 성공이 아니라 실제 GitHub 커밋 완료 응답만 인정한다.
+        const published = body?.githubPublished === true ||
+            body?.publishStatus === "PUBLISHED" ||
+            typeof body?.githubCommitSha === "string" && body.githubCommitSha.length > 0;
+
+        if (!published) {
+            throw new Error(
+                "DataHub는 결과를 받았지만 GitHub 커밋 완료를 확인하지 못했습니다. " +
+                "백엔드가 githubPublished 또는 githubCommitSha를 반환해야 합니다."
+            );
+        }
+
+        state.githubUpload = {
+            published: true,
+            commitSha: body.githubCommitSha || null,
+            publishedAt: body.publishedAt || new Date().toISOString(),
+            requestId
+        };
+        state.phase = "GitHub 업로드 완료";
+        renderPanel();
+        return body;
+    }
+
+    function downloadBlob(content, type, filename) {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+
+    function downloadJSON() {
+        const payload = buildDownloadPayload();
 
         const json = JSON.stringify(
             payload,
@@ -1203,39 +1343,67 @@
             2
         );
 
-        const blob = new Blob(
-            [json],
-            {
-                type:
-                    "application/json;charset=utf-8"
-            }
+        downloadBlob(
+            json,
+            "application/json;charset=utf-8",
+            `ncross-pvp-top100-${Date.now()}.json`
         );
-
-        const url = URL.createObjectURL(blob);
-
-        const a = document.createElement("a");
-
-        a.href = url;
-        a.download =
-            "ncross-pvp-top100-" +
-            Date.now() +
-            ".json";
-
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-
-        setTimeout(
-            () => URL.revokeObjectURL(url),
-            5000
-        );
-
-        saved = true;
-
-        window.CROSS100_MAPPED = mapped;
 
         log("JSON 저장 완료");
     }
+
+    function csvCell(value) {
+        const text = value == null ? "" : String(value);
+        return `"${text.replaceAll('"', '""')}"`;
+    }
+
+    function downloadSheet() {
+        const rows = buildMappedResults();
+        if (!rows.length) {
+            throw new Error("다운로드할 조사 결과가 없습니다.");
+        }
+
+        const header = [
+            "순위", "UID", "닉네임", "서버", "부대전투력(TP)",
+            "총병력", "영웅", "메카", "병력구성"
+        ];
+
+        const body = rows.map(player => [
+            player.rank,
+            player.uid,
+            player.username,
+            player.serverId,
+            player.TP,
+            player.totalArmy,
+            player.formations
+                .map(formation => formation.heroes.map(hero => hero.name).join(" / "))
+                .join(" | "),
+            player.formations
+                .map(formation => formation.mecha)
+                .join(" | "),
+            player.formations
+                .map(formation => formation.army
+                    .map(army => `${army.name} ×${army.count}`)
+                    .join(", "))
+                .join(" | ")
+        ]);
+
+        // UTF-8 BOM을 붙여 Excel과 Google Sheets에서 한글이 깨지지 않게 한다.
+        const csv = "\uFEFF" + [header, ...body]
+            .map(row => row.map(csvCell).join(","))
+            .join("\r\n");
+
+        downloadBlob(
+            csv,
+            "text/csv;charset=utf-8",
+            `ncross-pvp-top100-${Date.now()}.csv`
+        );
+
+        log("구글 스프레드시트용 CSV 저장 완료");
+    }
+
+    window.CROSS100_DOWNLOAD_JSON = downloadJSON;
+    window.CROSS100_DOWNLOAD_SHEET = downloadSheet;
 
     // =========================================================
     // CLOSE WINDOWS
@@ -1540,6 +1708,8 @@
     // =========================================================
 
     try {
+        uploadSettings = requireDataHubSettings();
+
         if (
             typeof cc === "undefined" ||
             !scene()
@@ -1613,8 +1783,8 @@
             );
         }
 
-        // 100명 조사 결과 저장
-        saveJSON();
+        // GitHub 반영이 확인되어야만 전체 조사를 성공으로 처리한다.
+        await uploadRequired(uploadSettings);
 
         // 자동 조사 창 정리
         await closeWindows();
@@ -1632,21 +1802,6 @@
             "[CROSS100] 조사 중단:",
             e
         );
-
-        if (
-            state.results.length > 0 &&
-            !saved
-        ) {
-            try {
-                saveJSON();
-                log("부분 수집 결과 저장");
-            } catch (saveError) {
-                console.error(
-                    "부분 저장 실패:",
-                    saveError
-                );
-            }
-        }
 
     } finally {
         if (watchdog) {
@@ -1671,28 +1826,8 @@
             console.table(buildTable());
         }
 
-        // 알림은 마지막에 한 번
-        if (successful) {
-            showResearchModal({
-                success: true,
-                title: "크로스 TOP100 조사 완료",
-                message:
-                    "영웅·메카·병력 분석이 완료되었습니다.\n" +
-                    "JSON 파일 저장 및 조사 창 정리를 마쳤습니다.",
-                completed: state.completed,
-                total: CFG.LIMIT
-            });
-        } else {
-            showResearchModal({
-                success: false,
-                title: "크로스 TOP100 조사 중단",
-                message:
-                    state.reason ||
-                    "게임 화면이 변경되거나 조사 도중 오류가 발생했습니다.",
-                completed: state.completed,
-                total: CFG.LIMIT
-            });
-        }
+        // 완료/중단 상태는 별도 모달 없이 고정 UI 패널에 표시한다.
+        renderPanel();
     }
     }
 
