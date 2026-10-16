@@ -1,16 +1,14 @@
 // ==UserScript==
-// @name         Topwar Helper V2.14.9.58
+// @name         Topwar Helper V2.14.9.65 - Top100 UI Guard + Thief Sync
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.58
-// @description  Topwar Helper - map scan, full scan, quick rewards, Top100, and reward tracking
+// @version      2.14.9.65
+// @description  Topwar Helper - Top100 safe UI closing/verification and Thief DataHub Sync
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
 // @match        https://*.topwarapp.com/*
 // @run-at       document-start
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/tampermonkey/worldmap-scanner/worldmap-scanner-automation.js
-// @downloadURL  https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/tampermonkey/worldmap-scanner/worldmap-scanner-automation.js
 // ==/UserScript==
 
 (() => {
@@ -7225,7 +7223,7 @@ function inspectCurrentProfileItems() {
 
 
 /* ============================================================================
- * TopWar navigation/recovery bridge - V2.14.9.48
+ * TopWar navigation/recovery bridge - V2.14.9.62
  * Persistent recovery payload is intentionally minimal:
  *   { mode, serverId, startedAt }
  * Ephemeral reload guards live only in sessionStorage.
@@ -7233,16 +7231,16 @@ function inspectCurrentProfileItems() {
 (function installTopwarRecoveryBridge() {
   "use strict";
 
-  if (window.TOPWAR_RECOVERY?.version === "2.14.9.42") return;
+  if (window.TOPWAR_RECOVERY?.version === "2.14.9.62") return;
 
-  const VERSION = "2.14.9.48";
+  const VERSION = "2.14.9.62";
   const RECOVERY_KEY = "TOPWAR_ACTIVE_RECOVERY_V1";
   const PENDING_KEY = "TOPWAR_RECOVERY_RELOAD_PENDING_V1";
   const ATTEMPT_KEY = "TOPWAR_RECOVERY_ATTEMPT_V1";
   const ARMED_KEY = "TOPWAR_RECOVERY_RESUME_ARMED_V1";
   const MAX_AGE_MS = 60 * 60 * 1000;
   const MAX_RELOAD_ATTEMPTS = 3;
-  const MODES = new Set(["top100", "reward", "map", "mapReward"]);
+  const MODES = new Set(["top100", "reward", "thief", "map", "mapReward"]);
 
   let reloadScheduled = false;
   let bootstrapRunning = false;
@@ -7551,8 +7549,11 @@ function inspectCurrentProfileItems() {
     const selectors = {
       top100: "#tw26-realpower",
       reward: "#tw26-thief",
+      thief: "#tw26-thief-watch",
       map: "#tw26-survey",
-      mapReward: "#tw26-survey-rewards"
+      // mapReward는 현재 UI의 풀스캔 복구 모드다.
+      // 예전 #tw26-survey-rewards 버튼은 UI 통합 과정에서 제거되었다.
+      mapReward: "#tw26-full-scan"
     };
     return document.querySelector(selectors[mode] || "");
   }
@@ -7615,21 +7616,52 @@ function inspectCurrentProfileItems() {
       });
 
       // 화면이 완전히 안정화된 뒤 버튼 핸들러를 실행한다.
+      // 중요: PENDING_KEY는 버튼 클릭 전에 지우지 않는다. 클릭이 실제 자동화 재시작으로
+      // 이어지지 않았는데 마커를 먼저 지우면 새로고침만 되고 작업이 사라진다.
       await sleep(1500);
-      try { sessionStorage.removeItem(PENDING_KEY); } catch {}
-      bootstrapDone = true;
+
+      if (button.disabled) {
+        throw new Error(`복구 실행 버튼이 아직 비활성 상태입니다: ${marker.mode}`);
+      }
+
+      console.warn("[TopWar Recovery] 복구 버튼 실행", {
+        mode: marker.mode,
+        serverId: marker.serverId,
+        selector: marker.mode === "mapReward" ? "#tw26-full-scan" : null
+      });
       button.click();
 
-      // 30초 동안 재차 reload되지 않고 실제 자동화가 살아 있으면 연속 실패 카운터를 초기화한다.
+      // 비동기 click 핸들러가 서버목록/화면을 준비한 뒤 실제 runner를 켤 때까지 기다린다.
+      // running=true를 확인한 경우에만 복구 완료로 인정하고 PENDING을 제거한다.
+      const startDeadline = Date.now() + 90000;
+      while (Date.now() < startDeadline && !hasActiveAutomation()) {
+        await sleep(250);
+      }
+
+      if (!hasActiveAutomation()) {
+        throw new Error(`복구 버튼 실행 후 자동화 시작을 확인하지 못했습니다: ${marker.mode}`);
+      }
+
+      try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+      bootstrapDone = true;
+      console.warn("[TopWar Recovery] 자동 작업 재개 확인", {
+        mode: marker.mode,
+        serverId: marker.serverId,
+        active: true
+      });
+
+      // 재시작이 실제로 성공했으므로 연속 reload 실패 카운터를 초기화한다.
       setTimeout(() => {
         if (hasActiveAutomation()) {
           try { sessionStorage.removeItem(ATTEMPT_KEY); } catch {}
         }
       }, 30000);
     } catch (error) {
-      console.error("[TopWar Recovery] 자동 복구 시작 실패", error);
-      bootstrapDone = true;
-      try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+      console.error("[TopWar Recovery] 자동 복구 시작 실패 - 마커를 유지하고 재시도", error);
+      // PENDING/RECOVERY 마커를 유지한다. 500ms bootstrap timer가 다시 호출하되
+      // 과도한 재시도를 막기 위해 잠시 대기한다.
+      bootstrapDone = false;
+      await sleep(3000);
     } finally {
       bootstrapRunning = false;
     }
@@ -7667,7 +7699,7 @@ function inspectCurrentProfileItems() {
     if (bootstrapDone) clearInterval(timer);
   }, 500);
 
-  console.log("%c[TopWar Recovery V2.14.9.48] installed", "color:#00e676;font-weight:bold");
+  console.log("%c[TopWar Recovery V2.14.9.62] installed", "color:#00e676;font-weight:bold");
 })();
 
 
@@ -7691,6 +7723,8 @@ function inspectCurrentProfileItems() {
     cityRewards: "/api/v1/city-rewards/server",
     thieves: "/api/v1/thieves/detected",
     map: "/api/v1/map/server",
+    fortCache: "/api/v1/fort-cache/server",
+    fortCacheAll: "/api/v1/data/fort-cache",
     serverList: "/api/v1/server-lists/seasonal",
     top100: "/api/v1/top100/server",
     top100Complete: "/api/v1/top100/complete"
@@ -8009,6 +8043,7 @@ function inspectCurrentProfileItems() {
     if (type === "map" && Number.isFinite(serverId)) return `map:${serverId}`;
     if (type === "cityRewards" && Number.isFinite(serverId)) return `cityRewards:${serverId}`;
     if (type === "thieves" && Number.isFinite(serverId)) return `thieves:${serverId}`;
+    if (type === "fortCache" && Number.isFinite(serverId)) return `fortCache:${serverId}`;
     if (type === "serverList") return `serverList:${String(payload?.kind || "current")}`;
     if (type === "top100" && batchId && Number.isFinite(serverId)) return `top100:${batchId}:${serverId}`;
     if (type === "top100Complete" && batchId) return `top100Complete:${batchId}`;
@@ -8134,6 +8169,40 @@ function inspectCurrentProfileItems() {
     return next;
   }
 
+  async function fetchFortCacheAll(options = {}) {
+    const settings = readSettings();
+    const headers = { "Accept": "application/json" };
+
+    // 조회 API가 인증 대상인 배포 환경도 지원한다.
+    // 설정이 없으면 공개 GET으로 시도하고, 설정이 있으면 동일 인증 헤더를 보낸다.
+    if (settings.scannerId && settings.key) {
+      headers["Authorization"] = `Bearer ${settings.key}`;
+      headers["X-Scanner-Id"] = settings.scannerId;
+    }
+
+    const response = await fetch(`${settings.baseUrl}${ENDPOINTS.fortCacheAll}`, {
+      method: "GET",
+      mode: "cors",
+      cache: "no-store",
+      credentials: "omit",
+      headers,
+      signal: options.signal
+    });
+
+    const text = await response.text();
+    let body = null;
+    try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+
+    if (!response.ok) {
+      const error = new Error(`DataHub fort-cache GET HTTP ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+      error.status = response.status;
+      error.responseBody = body;
+      throw error;
+    }
+
+    return body;
+  }
+
   async function status() {
     const settings = readSettings();
     let queued = null;
@@ -8159,6 +8228,8 @@ function inspectCurrentProfileItems() {
     uploadCityRewards: payload => upload("cityRewards", payload),
     uploadThieves: payload => upload("thieves", payload),
     uploadMap: async payload => upload("map", await enrichMapPayloadWithUidMovements(payload)),
+    uploadFortCache: payload => upload("fortCache", payload),
+    fetchFortCacheAll,
     uploadServerList: payload => upload("serverList", payload),
     uploadTop100: payload => upload("top100", payload),
     completeTop100: payload => upload("top100Complete", payload)
@@ -8434,6 +8505,10 @@ function inspectCurrentProfileItems() {
 
     watch133: {
       running: false,
+      stopping: false,
+      runId: 0,
+      operation: null,
+      quickRewardOnly: false,
       paused: false,
       pauseReason: null,
       pauseInfo: null,
@@ -8708,6 +8783,68 @@ function inspectCurrentProfileItems() {
     return next;
   }
 
+  function mergeRemoteFortCacheStore(payload) {
+    const remoteServers = payload?.servers;
+    if (!remoteServers || typeof remoteServers !== "object" || Array.isArray(remoteServers)) {
+      return { ok: false, merged: 0, skippedOlder: 0, reason: "remote servers object missing" };
+    }
+
+    const store = readFortCacheStore();
+    let merged = 0;
+    let skippedOlder = 0;
+
+    for (const [serverKey, raw] of Object.entries(remoteServers)) {
+      const serverId = Number(raw?.serverId ?? serverKey);
+      if (!Number.isFinite(serverId) || serverId <= 0 || !raw || typeof raw !== "object") continue;
+
+      const normalizedForts = [];
+      for (const item of Array.isArray(raw.forts) ? raw.forts : []) {
+        const fort = normalizeFortLocation(item);
+        if (fort) normalizedForts.push(fort);
+      }
+
+      const remote = {
+        version: Number(raw.version ?? 3),
+        serverId: Math.trunc(serverId),
+        updatedAt: raw.updatedAt ?? payload?.updatedAt ?? now(),
+        scannedAt: raw.scannedAt ?? raw.updatedAt ?? payload?.updatedAt ?? now(),
+        complete: raw.complete !== false,
+        totalMoves: Number(raw.totalMoves ?? 0),
+        failCount: Number(raw.failCount ?? 0),
+        activeAllianceFiltered: raw.activeAllianceFiltered === true,
+        activeAllianceThreshold: Number(raw.activeAllianceThreshold ?? 0),
+        activeAllianceCount: Number(raw.activeAllianceCount ?? 0),
+        source: raw.source ?? null,
+        count: normalizedForts.length,
+        forts: normalizedForts
+      };
+
+      const key = String(Math.trunc(serverId));
+      const local = store.servers?.[key];
+      const remoteTime = Date.parse(remote.scannedAt || remote.updatedAt || "");
+      const localTime = Date.parse(local?.scannedAt || local?.updatedAt || "");
+
+      // 업로드 대기 중인 더 최신 로컬 풀스캔 결과가 있다면 원격의 오래된 값으로 덮지 않는다.
+      if (local && Number.isFinite(localTime) && Number.isFinite(remoteTime) && localTime > remoteTime) {
+        skippedOlder++;
+        continue;
+      }
+
+      store.servers[key] = remote;
+      merged++;
+    }
+
+    writeFortCacheStore(store);
+    return {
+      ok: true,
+      merged,
+      skippedOlder,
+      remoteServerCount: Object.keys(remoteServers).length,
+      localServerCount: Object.keys(store.servers || {}).length,
+      updatedAt: payload?.updatedAt ?? null
+    };
+  }
+
   function normalizeFortLocation(value) {
     const x = Number(value?.x);
     const y = Number(value?.y);
@@ -8717,8 +8854,100 @@ function inspectCurrentProfileItems() {
       y,
       allianceId: value?.allianceId != null && value?.allianceId !== "" ? String(value.allianceId) : null,
       allianceTag: value?.allianceTag != null && value?.allianceTag !== "" ? String(value.allianceTag) : null,
-      allianceName: value?.allianceName != null && value?.allianceName !== "" ? String(value.allianceName) : null
+      allianceName: value?.allianceName != null && value?.allianceName !== "" ? String(value.allianceName) : null,
+      memberCount: Number.isFinite(Number(value?.memberCount)) ? Number(value.memberCount) : null,
+      anchorType: value?.anchorType ?? null,
+      centerX: Number.isFinite(Number(value?.centerX)) ? Number(value.centerX) : null,
+      centerY: Number.isFinite(Number(value?.centerY)) ? Number(value.centerY) : null,
+      sampleMemberCount: Number.isFinite(Number(value?.sampleMemberCount)) ? Number(value.sampleMemberCount) : null
     };
+  }
+
+  function medianCoordinate(values) {
+    const rows = (values || []).map(Number).filter(Number.isFinite).sort((a, b) => a - b);
+    if (!rows.length) return null;
+    const mid = Math.floor(rows.length / 2);
+    return rows.length % 2 ? rows[mid] : (rows[mid - 1] + rows[mid]) / 2;
+  }
+
+  // pointType=13은 길드 식별자가 없는 경우가 많아 활성 길드와 ID로 직접 매칭할 수 없다.
+  // V2.14.9.61부터는 풀스캔에서 이미 확인한 실제 길드 멤버 기지 좌표의 중앙값을
+  // 빠른보상용 대표 앵커로 사용한다. 활성 길드 1개당 최대 1좌표만 저장한다.
+  function buildActiveAllianceRewardAnchors(allianceResults, playerSource, threshold = 50) {
+    const players = Array.from(playerSource || []);
+    const anchors = [];
+    const activeRows = [];
+
+    for (const allianceResult of allianceResults || []) {
+      if (!allianceResult?.ok) continue;
+      const memberCount = Number(allianceResult?.count ?? 0);
+      if (!Number.isFinite(memberCount) || memberCount < Number(threshold || 50)) continue;
+
+      const target = allianceResult?.target || {};
+      const aid = target?.allianceId != null && target.allianceId !== "" ? String(target.allianceId) : null;
+      const tag = target?.allianceTag != null && target.allianceTag !== "" ? String(target.allianceTag) : null;
+      const name = target?.allianceName ?? null;
+
+      const members = players.filter(player => {
+        if (!player || !Number.isFinite(Number(player.x)) || !Number.isFinite(Number(player.y))) return false;
+        const playerAid = player?.allianceId != null && player.allianceId !== "" ? String(player.allianceId) : null;
+        const playerTag = player?.allianceTag != null && player.allianceTag !== "" ? String(player.allianceTag) : null;
+        return (aid && playerAid === aid) || (!aid && tag && playerTag === tag);
+      });
+
+      let centerX = medianCoordinate(members.map(row => row.x));
+      let centerY = medianCoordinate(members.map(row => row.y));
+      let anchorType = "active-alliance-member-center";
+
+      // 지도에서 멤버 좌표를 확보하지 못한 예외 케이스는 해당 길드 대표 기지 좌표를 사용한다.
+      if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+        const tx = Number(target?.x);
+        const ty = Number(target?.y);
+        if (!Number.isFinite(tx) || !Number.isFinite(ty)) continue;
+        centerX = tx;
+        centerY = ty;
+        anchorType = "active-alliance-representative-fallback";
+      }
+
+      const anchor = {
+        x: Math.round(centerX),
+        y: Math.round(centerY),
+        allianceId: aid,
+        allianceTag: tag,
+        allianceName: name,
+        memberCount,
+        anchorType,
+        centerX: Number(centerX.toFixed(2)),
+        centerY: Number(centerY.toFixed(2)),
+        sampleMemberCount: members.length
+      };
+
+      anchors.push(anchor);
+      activeRows.push({ allianceId: aid, allianceTag: tag, allianceName: name, memberCount, sampleMemberCount: members.length, anchor });
+    }
+
+    // 같은 좌표가 우연히 겹쳐도 1회만 방문한다.
+    const unique = new Map();
+    for (const anchor of anchors) {
+      const key = `${anchor.x}:${anchor.y}`;
+      if (!unique.has(key)) unique.set(key, anchor);
+    }
+
+    return {
+      anchors: [...unique.values()],
+      activeRows,
+      activeAllianceCount: activeRows.length
+    };
+  }
+
+  function isUsableActiveAllianceAnchorCache(cache) {
+    return !!(
+      cache &&
+      cache.complete !== false &&
+      cache.activeAllianceFiltered === true &&
+      Number(cache.version ?? 0) >= 3 &&
+      cache.source === "full-active-alliance-center-v3"
+    );
   }
 
   function captureFortPoints(points, targetServerId, outputMap, fallbackServerId = null) {
@@ -8807,7 +9036,7 @@ function inspectCurrentProfileItems() {
     const scannedAt = meta.scannedAt || now();
 
     store.servers[key] = {
-      version: 2,
+      version: 3,
       serverId: Math.trunc(id),
       updatedAt: now(),
       scannedAt,
@@ -8864,6 +9093,9 @@ function inspectCurrentProfileItems() {
     getFortCacheEntry,
     getFortLocations,
     captureFortPoints,
+    buildActiveAllianceRewardAnchors,
+    isUsableActiveAllianceAnchorCache,
+    mergeRemoteFortCacheStore,
     saveFortLocations,
     clearFortCache,
     fortCacheStatus
@@ -9494,11 +9726,15 @@ function inspectCurrentProfileItems() {
       maxEvents: 512,
       events: [],
       nextEventId: 1,
+      packetEvents: [],
+      nextPacketEventId: 1,
       activeTargetServerId: null,
       stats: {}
     };
     buffer.events ??= [];
+    buffer.packetEvents ??= [];
     buffer.nextEventId = Number(buffer.nextEventId ?? 1);
+    buffer.nextPacketEventId = Number(buffer.nextPacketEventId ?? 1);
     buffer.maxEvents = Math.max(32, Number(buffer.maxEvents ?? 512));
     buffer.stats ??= {};
     return buffer;
@@ -9518,6 +9754,22 @@ function inspectCurrentProfileItems() {
     const scanServerId = Number.isFinite(activeTargetServerIdRaw) && activeTargetServerIdRaw > 0
       ? activeTargetServerIdRaw
       : null;
+    // 빈 pointList도 "해당 위치를 새로 조회했다"는 근거가 될 수 있다.
+    // 133이 없는 901을 버리면 '사라진 도둑' 확인 자체가 불가능하다.
+    // packetEvents에는 pointList 원본을 저장하지 않아 메모리 사용을 제한한다.
+    if (scanServerId != null) {
+      const packetEventId = Number(buffer.nextPacketEventId ?? 1);
+      buffer.nextPacketEventId = packetEventId + 1;
+      pushLimited(buffer.packetEvents, {
+        id: packetEventId,
+        time: record?.time ?? now(),
+        scanServerId,
+        packetSeq: record?.packet?.seq ?? null,
+        thiefCount: detail.pointList.reduce((count, point) =>
+          count + (Number(point?.pointType) === 133 ? 1 : 0), 0)
+      }, buffer.maxEvents);
+    }
+
     const thieves = [];
 
     for (const point of detail.pointList) {
@@ -9633,7 +9885,7 @@ function inspectCurrentProfileItems() {
         range()?.k ?? null;
       const collectedServerId = Number(detail?.k) > 0 ? detail.k : activeSurveyServerId;
 
-      // V2.14.9.58 빠른보상은 playerMap/recentPackets 재검색에 의존하지 않는다.
+      // V2.14.9.61 빠른보상은 playerMap/recentPackets 재검색에 의존하지 않는다.
       // 901이 디코딩되는 바로 이 순간 cityReward만 작은 전용 Map에 복사한다.
       // raw point/playerInfo 참조는 보존하지 않으므로 저메모리 특성은 유지된다.
       if (quickRewardOnly && state.watch133?.quickRewardMap instanceof Map) {
@@ -9905,6 +10157,7 @@ function inspectCurrentProfileItems() {
     guard.detectedAt = now();
     guard.lastFailureInfo = info;
 
+    state.watch133.stopping = state.watch133.running === true || state.watch133.stopping === true;
     state.watch133.running = false;
     state.watch133.paused = false;
     state.watch133.pauseReason = "connection failure";
@@ -10773,6 +11026,8 @@ function inspectCurrentProfileItems() {
     if (state.thiefBuffer) {
       state.thiefBuffer.events = [];
       state.thiefBuffer.nextEventId = 1;
+      state.thiefBuffer.packetEvents = [];
+      state.thiefBuffer.nextPacketEventId = 1;
       state.thiefBuffer.stats ??= {};
       state.thiefBuffer.stats.lastCollected = null;
     }
@@ -10955,8 +11210,12 @@ function inspectCurrentProfileItems() {
   }
 
   function resetThiefWatch() {
+    const wasRunning = state.watch133.running === true;
     state.thiefQueue = [];
     state.watch133.running = false;
+    state.watch133.stopping = wasRunning || state.watch133.stopping === true;
+    if (!state.watch133.stopping) state.watch133.operation = null;
+    state.watch133.quickRewardOnly = false;
     state.watch133.paused = false;
     state.watch133.pauseReason = null;
     state.watch133.pauseInfo = null;
@@ -10969,8 +11228,11 @@ function inspectCurrentProfileItems() {
   }
 
   function stopWatch133() {
+    const wasRunning = state.watch133.running === true;
     state.watch133.quickRewardOnly = false;
     state.watch133.running = false;
+    state.watch133.stopping = wasRunning || state.watch133.stopping === true;
+    if (!state.watch133.stopping) state.watch133.operation = null;
     state.watch133.paused = false;
     console.log("[TopWar] watch stopped");
     return true;
@@ -12002,218 +12264,178 @@ function inspectCurrentProfileItems() {
     }
   }
 
+  // v2.14.9.64: 도둑찾기 전용 지도 순회. 공유/채팅/클립보드 경로는 호출하지 않는다.
+  // 부분 갱신은 "새로 디코딩한 901 pointList"로 확인한 셀만 포함한다.
   async function watchPointTypeAndNotify(options = {}) {
-    if (state.connectionGuard?.disconnected) return { ok: false, stopped: true, reason: "connection guard disconnected" };
-    const pointType = Number(options.pointType ?? 133);
-    const serverId = options.serverId ?? range()?.k;
-    const startX = Number(options.startX ?? 0);
-    const startY = Number(options.startY ?? 0);
-    const endX = Number(options.endX ?? 815);
-    const endY = Number(options.endY ?? 950);
-    const stepX = Number(options.stepX ?? 45);
-    const stepY = Number(options.stepY ?? 30);
-    const scale = Number(options.scale ?? 0.27);
-    const loopDelay = Number(options.loopDelay ?? 3000);
-    const stopAfterFound = options.stopAfterFound ?? false;
-    const clearEachCycle = options.clearEachCycle ?? true;
-    const maxCycles = options.maxCycles == null
-      ? Infinity
-      : Math.max(1, Number(options.maxCycles) || 1);
-
-    if (!serverId) {
-      console.error("[TopWar] serverId가 없습니다. TOPWAR.range().k를 확인하세요.");
-      return null;
-    }
-
-    let xs, ys;
-    try {
-      xs = buildScanCoords(startX, endX, stepX, "x");
-      ys = buildScanCoords(startY, endY, stepY, "y");
-    } catch (e) {
-      console.error("[TopWar] 좌표 생성 실패:", e.message);
-      return null;
-    }
-
-    window.TOPWAR_REWARD_TRACKER?.stop?.("watch133-start");
+    if (state.connectionGuard?.disconnected) return { ok: false, stopped: true, reason: "connection disconnected" };
+    const serverId = Number(options.serverId ?? range()?.k);
+    if (!Number.isInteger(serverId) || serverId <= 0) return { ok: false, reason: "invalid serverId" };
+    const xs = buildScanCoords(Number(options.startX ?? 50), Number(options.endX ?? 750), Number(options.stepX ?? 80), "x");
+    const ys = buildScanCoords(Number(options.startY ?? 50), Number(options.endY ?? 875), Number(options.stepY ?? 75), "y");
+    const plan = buildScanPlan(xs, ys, { startCorner: options.startCorner ?? "top-left", snake: options.snake !== false });
+    const totalMoves = plan.reduce((n, row) => n + row.xOrder.length, 0);
+    const maxCycles = options.maxCycles == null ? Infinity : Math.max(1, Number(options.maxCycles) || 1);
+    const batchSize = Math.max(1, Number(options.thiefSyncEveryMoves ?? 8));
+    const keyFor = obj => obj.id != null ? `id:${obj.id}` : `coord:${obj.x}:${obj.y}`;
+    const nearest = (v, coords) => coords.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a, coords[0]);
+    const cellFor = obj => `${nearest(Number(obj.x), xs)}:${nearest(Number(obj.y), ys)}`;
+    const isRunning = () => state.watch133.running && !state.connectionGuard?.disconnected;
+    const buffer = ensureThiefBuffer();
+    const previousTarget = buffer.activeTargetServerId;
+    buffer.activeTargetServerId = serverId;
     state.watch133.running = true;
     state.watch133.paused = false;
-    state.watch133.pauseReason = null;
-    state.watch133.pauseInfo = null;
-    state.watch133.handledKeys ??= new Set();
-    state.watch133.sharedLocationKeys ??= new Set();
-    state.watch133.sentMessages ??= [];
-    ensurePendingThiefState();
-
-    const startCorner = options.startCorner ?? "top-left";
-    const snake = options.snake !== false;
-    const scanPlan = buildScanPlan(xs, ys, { startCorner, snake });
-
-    console.log("[TopWar] auto-share watcher started:", {
-      pointType, serverId, startX, startY, endX, endY, stepX, stepY,
-      totalPerCycle: xs.length * ys.length,
-      scale,
-      startCorner,
-      snake,
-      action: "found -> schedule -> keep scanning -> check saved coordinate once when due -> share or remove"
-    });
-
+    state.watch133.stopping = false;
     let cycle = 0;
+    let lastResult = null;
+    try {
+      while (isRunning() && cycle < maxCycles) {
+        cycle++;
+        const found = new Map();
+        const verified = new Set();
+        const failed = new Set();
+        let moveIndex = 0;
+        let dirty = false;
+        let uploadedAt = 0;
+        let lastUpload = null;
+        let uploadError = null;
+        // previous server/cycle observations must never be used to assert survival.
+        clearCollected({ keepWatch: true });
+        buffer.activeTargetServerId = serverId;
+        state.watch133.current = { phase: "thiefScan", serverId, cycle, moveIndex: 0, totalMoves, thiefCount: 0 };
 
-    while (state.watch133.running && cycle < maxCycles) {
-      cycle++;
-      if (clearEachCycle) clearCollected({ keepWatch: true });
-      let scanCount = 0;
-      console.log(`[TopWar] watch cycle ${cycle} start`);
-
-      for (const rowInfo of scanPlan) {
-        if (!state.watch133.running) break;
-        const y = rowInfo.y;
-        const xOrder = rowInfo.xOrder;
-
-        for (const x of xOrder) {
-          if (!state.watch133.running) break;
-          await waitWhilePaused();
-          if (!state.watch133.running) break;
-
-          const result = await moveMapToStableUnified(x, y, {
-            serverId,
-            subMap: options.subMap ?? 0,
-            scale,
-            afterMoveWait: options.afterMoveWait ?? 120,
-            wait901Timeout: options.wait901Timeout ?? 1800,
-            quietMs: options.quietMs ?? 220,
-            interval: options.interval ?? 30,
-            maxRetries: options.maxRetries ?? 1,
-            retryDelay: options.retryDelay ?? 250,
-            collectCache: options.collectCache ?? true
-          });
-
-          scanCount++;
-
-          const currentPlayers = Number(TOPWAR.summary?.()?.players ?? state.playerMap?.size ?? 0);
-          const maxPlayersPerServer = Number(options.maxPlayersPerServer ?? 2000);
-          if (Number.isFinite(maxPlayersPerServer) && maxPlayersPerServer > 0 &&
-              currentPlayers >= maxPlayersPerServer) {
-            console.warn(`[TopWar Player Guard] server=${serverId} players=${currentPlayers} - 도둑조사 폐기, 다음 서버로 이동`);
-            clearHeavySurveyData({ packetLimit: 0, outgoingLimit: 0 });
-            return {
-              ok: false,
-              stopped: false,
-              completed: false,
-              skipped: true,
-              playerLimitExceeded: true,
-              serverId,
-              players: currentPlayers,
-              maximumPlayers: maxPlayersPerServer,
-              reason: `player limit exceeded: ${currentPlayers}/${maxPlayersPerServer}`
-            };
+        const sync = async (snapshot = false) => {
+          if (!snapshot && (!dirty || verified.size === 0)) return null;
+          const locations = [...found.values()];
+          try {
+            const upload = snapshot
+              ? await TOPWAR.uploadCompletedThiefServer(
+                  TOPWAR.buildCompletedThiefServerResult(serverId, locations, { ok: true, completed: true, cycle }))
+              : await TOPWAR.uploadDetectedThieves(serverId, locations, {
+                  detectedAt: new Date().toISOString(),
+                  newDetectedCount: locations.length,
+                  scanProgress: {
+                    mode: "thief-network-901",
+                    moveIndex, totalMoves,
+                    scanXs: xs.slice(), scanYs: ys.slice(),
+                    confirmedScanCells: [...verified]
+                  }
+                });
+            lastUpload = upload;
+            state.watch133.lastLiveThiefUpload = upload;
+            if (upload?.ok) {
+              dirty = false;
+              uploadedAt = moveIndex;
+              uploadError = null;
+            } else {
+              uploadError = upload?.error || upload?.reason || "DataHub upload not acknowledged";
+              console.warn("[Thief DataHub] 업로드 보류:", { serverId, cycle, snapshot, upload });
+            }
+            return upload;
+          } catch (error) {
+            uploadError = error?.message || String(error);
+            lastUpload = { ok: false, error: uploadError, serverId, snapshot };
+            state.watch133.lastLiveThiefUpload = lastUpload;
+            console.error("[Thief DataHub] 업로드 실패:", error);
+            return lastUpload;
           }
+        };
 
-          const current = getObjectsByTypeRaw(pointType);
-          const skipSharedLocations = options.skipSharedLocations ?? true;
-
-          // 예약 시간이 지나기 전에는 좌표를 재방문하지 않는다.
-          // 시간이 된 항목만 저장 좌표를 한 번 확인한 뒤 공유하거나 큐에서 삭제한다.
-          const dueResults = await processDuePendingThiefQueue({ ...options, pointType, serverId });
-          if (dueResults.length > 0) {
-            console.log("[TopWar] delayed thief queue results:", dueResults);
+        for (const row of plan) {
+          if (!isRunning()) break;
+          for (const x of row.xOrder) {
+            if (!isRunning()) break;
             await waitWhilePaused();
-          }
+            if (!isRunning()) break;
+            const y = row.y;
+            const thiefMarker = Number(buffer.nextEventId ?? 1);
+            const packetMarker = Number(buffer.nextPacketEventId ?? 1);
+            let result = null;
+            try {
+              result = await moveMapToStableUnified(x, y, {
+                serverId, subMap: options.subMap ?? 0,
+                scale: Number(options.scale ?? 0.27),
+                afterMoveWait: options.afterMoveWait ?? 120,
+                wait901Timeout: options.wait901Timeout ?? 2200,
+                quietMs: options.quietMs ?? 300,
+                interval: options.interval ?? 30,
+                maxRetries: options.maxRetries ?? 1,
+                retryDelay: options.retryDelay ?? 250,
+                collectCache: false
+              });
+            } catch (error) {
+              console.warn("[Thief] 지도 이동 실패:", { serverId, x, y, error });
+            }
+            moveIndex++;
+            // Blob/async 901 decoder can settle after the raw-message counter.
+            await sleep(Math.max(0, Number(options.thiefCaptureSettleMs ?? 450)));
+            const cell = `${Number(x)}:${Number(y)}`;
+            const observedPackets = (buffer.packetEvents || []).filter(e =>
+              Number(e?.id ?? 0) >= packetMarker && Number(e?.scanServerId) === serverId);
+            const confirmed = result?.source === "network901" &&
+              result?.serverArrival?.ok === true && observedPackets.length > 0;
 
-          const newlyFound = current.filter(o => {
-            if (!o?.objectKey || state.watch133.handledKeys.has(o.objectKey)) return false;
-
-            const trackingKey = getThiefTrackingKey(o, { serverId });
-            if (state.pendingThiefObjectKeys.has(trackingKey)) return false;
-            if (state.resolvedThiefObjectKeys.has(trackingKey)) return false;
-
-            if (!skipSharedLocations) return true;
-            return !state.watch133.sharedLocationKeys.has(getThiefLocationKey(o, { serverId }));
-          });
-
-          if (newlyFound.length > 0) {
-            for (const obj of newlyFound) {
-              state.watch133.handledKeys.add(obj.objectKey);
-              const trackingKey = getThiefTrackingKey(obj, { serverId });
-              const locationKey = getThiefLocationKey(obj, { serverId });
-              const shareDelayMs = Math.max(0, Number(options.shareDelayMs ?? 3 * 60 * 1000));
-              let foundResult;
-
-              if (shareDelayMs === 0) {
-                foundResult = await handleFoundAutoShare(obj, {
-                  ...options,
-                  pointType,
-                  serverId,
-                  shareDelayMs: 0
-                });
-
-                if (foundResult?.shareResult?.ok) {
-                  state.sharedThiefObjectKeys.add(trackingKey);
-                  state.resolvedThiefObjectKeys.add(trackingKey);
-                  state.watch133.sharedLocationKeys.add(locationKey);
-                } else {
-                  // 즉시 공유 실패 시 다음 스캔에서 다시 시도할 수 있게 발견 처리만 되돌린다.
-                  state.watch133.handledKeys.delete(obj.objectKey);
+            if (!confirmed) {
+              failed.add(cell);
+            } else {
+              verified.add(cell);
+              // Re-visiting a cell invalidates that cell's older local readings.
+              for (const [key, obj] of found) if (cellFor(obj) === cell) found.delete(key);
+              let newThievesInThisMove = 0;
+              for (const event of buffer.events || []) {
+                if (Number(event?.id ?? 0) < thiefMarker || Number(event?.scanServerId) !== serverId) continue;
+                for (const point of event.thieves || []) {
+                  const px = Number(point.x), py = Number(point.y);
+                  if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+                  const obj = {
+                    serverId, id: point.id ?? null, x: px, y: py,
+                    pointType: 133, time: event.time ?? new Date().toISOString()
+                  };
+                  if (!found.has(keyFor(obj))) newThievesInThisMove++;
+                  found.set(keyFor(obj), obj);
                 }
-
-                console.log("[TopWar] found immediate-share result:", {
-                  ...foundResult,
-                  trackingKey,
-                  locationKey
-                });
-              } else {
-                foundResult = await scheduleThiefShare(obj, {
-                  ...options,
-                  pointType,
-                  serverId,
-                  shareDelayMs
-                });
-
-                console.log("[TopWar] found delayed-share schedule result:", {
-                  ...foundResult,
-                  trackingKey,
-                  locationKey,
-                  shareDelayMs
-                });
               }
-
-              if (stopAfterFound) {
-                state.watch133.running = false;
-                return {
-                  stopped: true,
-                  reason: shareDelayMs === 0 ? "found-and-shared" : "found-and-scheduled",
-                  cycle,
-                  object: obj,
-                  foundResult,
-                  thiefQueue: thiefQueue()
-                };
+              dirty = true;
+              // New discoveries sync immediately; absent thieves sync at intervals.
+              if (newThievesInThisMove > 0 || moveIndex - uploadedAt >= batchSize) {
+                await sync(false);
               }
             }
+            state.watch133.current = {
+              phase: "thiefScan", serverId, cycle, x, y, moveIndex, totalMoves,
+              thiefCount: found.size, confirmedCells: verified.size, failedCells: failed.size,
+              lastUploadOk: lastUpload?.ok ?? null, uploadError
+            };
+            if (moveIndex % Math.max(1, Number(options.logEvery ?? 20)) === 0) {
+              console.log(`[Thief] server=${serverId} cycle=${cycle} ${moveIndex}/${totalMoves} found=${found.size} confirmed=${verified.size} failed=${failed.size}`);
+            }
+            // Clearing large collector maps must not reset the thief packet markers.
+            if (moveIndex % Math.max(1, Number(options.cleanupEveryMoves ?? 10)) === 0) {
+              TOPWAR.clearHeavySurveyData?.({ clearPackets: false, packetLimit: 0, outgoingLimit: 0 });
+            }
+            await sleep(Math.max(0, Number(options.stepDelay ?? 0)));
           }
-
-          if (scanCount % Number(options.logEvery ?? 20) === 0 || newlyFound.length > 0 || !result?.ok) {
-            console.log(`[TopWar] watch cycle=${cycle}, scan=${scanCount}/${xs.length * ys.length}, coord=(${x},${y}), ok=${result?.ok}, source=${result?.source}, type${pointType}=${current.length}, new=${newlyFound.length}, queue=${state.thiefQueue.length}`);
-          }
-
-          await sleep(Number(options.stepDelay ?? 0));
         }
+        // Also flush confirmed disappearances on manual stop or an incomplete scan.
+        if (dirty) await sync(false);
+        const complete = isRunning() && verified.size === totalMoves && failed.size === 0;
+        // Never send an authoritative empty snapshot after any uncertain cell.
+        if (complete) await sync(true);
+        lastResult = {
+          ok: complete, completed: complete, stopped: !isRunning(), serverId, cycle,
+          moveIndex, totalMoves, confirmedCells: verified.size, failedCells: failed.size,
+          thiefCount: found.size, locations: [...found.values()], lastUpload, uploadError
+        };
+        state.watch133.lastThiefServerResult = lastResult;
+        console.log("[Thief] 서버 스캔 결과", lastResult);
+        if (!complete || !isRunning()) break;
+        if (cycle < maxCycles) await sleep(Math.max(0, Number(options.loopDelay ?? 3000)));
       }
-
-      console.log(`[TopWar] watch cycle ${cycle} done`, { handledTotal: state.watch133.handledKeys.size, queueLength: state.thiefQueue.length, lastFound: state.watch133.lastFound });
-      if (!state.watch133.running) break;
-      await sleep(loopDelay);
+      return lastResult ?? { ok: false, stopped: true, serverId, cycle };
+    } finally {
+      buffer.activeTargetServerId = previousTarget;
+      if (!state.watch133.multiServer?.running) state.watch133.running = false;
     }
-
-    return {
-      ok: state.watch133.running && cycle >= maxCycles,
-      stopped: !state.watch133.running,
-      completedCycles: cycle,
-      cycle,
-      handledTotal: state.watch133.handledKeys.size,
-      queueLength: state.thiefQueue.length,
-      lastFound: state.watch133.lastFound,
-      thiefQueue: thiefQueue()
-    };
   }
 
   function resetWatch133() { return resetThiefWatch(); }
@@ -17315,8 +17537,9 @@ TOPWAR.clearThiefQueue()
         await interruptibleSleep(Number(surveyOptions.betweenAllianceDelay ?? 1000));
       }
 
-      // V2.14.9.58: 빠른보상용 보루 캐시는 풀스캔 결과만 authoritative source로 사용한다.
-      // 동맹창에서 실제 읽은 인원이 50명 이상인 길드만 활성 길드로 보고 그 길드의 보루만 저장한다.
+      // V2.14.9.61: pointType=13 자체에는 길드 식별자가 없는 경우가 많다.
+      // 따라서 50명 이상 활성 길드마다 실제 지도 멤버 좌표의 중앙값을 계산하여
+      // 길드당 1개의 빠른보상 대표 앵커만 저장한다.
       if (
         !result.stopped &&
         !state.connectionGuard?.disconnected &&
@@ -17326,52 +17549,77 @@ TOPWAR.clearThiefQueue()
         typeof TOPWAR.saveFortLocations === "function"
       ) {
         const ACTIVE_ALLIANCE_MEMBER_THRESHOLD = 50;
-        const activeAllianceIds = new Set();
-        const activeAllianceTags = new Set();
+        const playerSource = typeof TOPWAR.playerValues === "function"
+          ? TOPWAR.playerValues()
+          : (typeof TOPWAR.players === "function" ? TOPWAR.players() : []);
+        const anchorBuild = TOPWAR.buildActiveAllianceRewardAnchors?.(
+          result.allianceResults || [],
+          playerSource,
+          ACTIVE_ALLIANCE_MEMBER_THRESHOLD
+        ) ?? { anchors: [], activeRows: [], activeAllianceCount: 0 };
 
-        for (const allianceResult of result.allianceResults || []) {
-          if (!allianceResult?.ok) continue;
-          const memberCount = Number(allianceResult?.count ?? 0);
-          if (!Number.isFinite(memberCount) || memberCount < ACTIVE_ALLIANCE_MEMBER_THRESHOLD) continue;
-          const aid = allianceResult?.target?.allianceId;
-          const tag = allianceResult?.target?.allianceTag;
-          if (aid != null && aid !== "") activeAllianceIds.add(String(aid));
-          if (tag != null && tag !== "") activeAllianceTags.add(String(tag));
-        }
-
-        const fortMap = state.ui.serverSurvey?.fortMap instanceof Map ? state.ui.serverSurvey.fortMap : new Map();
-        const allForts = [...fortMap.values()];
-        const activeForts = allForts.filter(fort => {
-          const aid = fort?.allianceId != null ? String(fort.allianceId) : null;
-          const tag = fort?.allianceTag != null ? String(fort.allianceTag) : null;
-          return (aid && activeAllianceIds.has(aid)) || (tag && activeAllianceTags.has(tag));
-        });
-
+        const anchors = Array.isArray(anchorBuild.anchors) ? anchorBuild.anchors : [];
         const mapSummary = result.stages?.mapScan?.summary ?? result.stages?.mapScan ?? {};
         const totalMoves = Number(mapSummary?.totalMoves ?? result.stages?.mapScan?.totalMoves ?? 0);
         const failCount = Number(mapSummary?.failCount ?? result.stages?.mapScan?.failCount ?? 0);
-        result.fortCache = TOPWAR.saveFortLocations(serverId, activeForts, {
+
+        result.fortCache = TOPWAR.saveFortLocations(serverId, anchors, {
           scannedAt: nowIso(),
           complete: totalMoves > 0 && failCount === 0,
           totalMoves,
           failCount,
           activeAllianceFiltered: true,
           activeAllianceThreshold: ACTIVE_ALLIANCE_MEMBER_THRESHOLD,
-          activeAllianceCount: activeAllianceIds.size || activeAllianceTags.size,
-          source: "full-active-alliance-v1"
+          activeAllianceCount: Number(anchorBuild.activeAllianceCount ?? 0),
+          source: "full-active-alliance-center-v3"
         });
+
+        // V2.14.9.61: 풀스캔으로 만든 활성길드 앵커를 DataHub 중앙 캐시에도 즉시 반영한다.
+        // POST 실패가 네트워크 계열이면 DataHub 공통 IndexedDB queue가 재전송을 담당한다.
+        try {
+          if (typeof window.TOPWAR_DATAHUB?.uploadFortCache !== "function") {
+            throw new Error("DataHub fort-cache uploader not installed");
+          }
+          result.fortCacheUpload = await window.TOPWAR_DATAHUB.uploadFortCache({
+            version: 3,
+            serverId: Number(serverId),
+            scannedAt: result.fortCache?.scannedAt ?? nowIso(),
+            complete: result.fortCache?.complete !== false,
+            totalMoves: Number(result.fortCache?.totalMoves ?? totalMoves),
+            failCount: Number(result.fortCache?.failCount ?? failCount),
+            activeAllianceFiltered: true,
+            activeAllianceThreshold: ACTIVE_ALLIANCE_MEMBER_THRESHOLD,
+            activeAllianceCount: Number(anchorBuild.activeAllianceCount ?? 0),
+            source: "full-active-alliance-center-v3",
+            count: anchors.length,
+            forts: anchors
+          });
+          console.log("[Topwar Helper] 활성 길드 앵커 DataHub 업로드", {
+            serverId,
+            anchors: anchors.length,
+            result: result.fortCacheUpload
+          });
+        } catch (error) {
+          result.fortCacheUpload = { ok: false, error: error?.message || String(error) };
+          console.error("[Topwar Helper] 활성 길드 앵커 DataHub 업로드 실패:", error);
+        }
+
         result.activeAllianceFortSummary = {
           threshold: ACTIVE_ALLIANCE_MEMBER_THRESHOLD,
-          activeAllianceCount: activeAllianceIds.size || activeAllianceTags.size,
-          allFortCount: allForts.length,
-          savedFortCount: activeForts.length
+          activeAllianceCount: Number(anchorBuild.activeAllianceCount ?? 0),
+          rawPointType13Count: state.ui.serverSurvey?.fortMap instanceof Map ? state.ui.serverSurvey.fortMap.size : 0,
+          savedAnchorCount: anchors.length,
+          anchors,
+          alliances: anchorBuild.activeRows || []
         };
-        console.log("[Topwar Helper] 활성 길드 보루 캐시 갱신", {
+
+        console.log("[Topwar Helper] 활성 길드 빠른보상 앵커 캐시 갱신", {
           serverId,
           threshold: ACTIVE_ALLIANCE_MEMBER_THRESHOLD,
           activeAlliances: result.activeAllianceFortSummary.activeAllianceCount,
-          allForts: allForts.length,
-          savedForts: activeForts.length
+          rawPointType13: result.activeAllianceFortSummary.rawPointType13Count,
+          savedAnchors: result.activeAllianceFortSummary.savedAnchorCount,
+          anchors
         });
       }
 
@@ -17929,7 +18177,7 @@ TOPWAR.clearThiefQueue()
         font-weight:700;
         border-bottom:1px solid rgba(255,255,255,0.08);
       ">
-        <span>Topwar Helper V2.14.9.58</span>
+        <span>Topwar Helper V2.14.9.62</span>
         <span id="tw26-memory-gauge" title="JavaScript 힙 메모리 사용량" style="display:flex;align-items:center;gap:5px;margin-left:auto;margin-right:10px;font-size:10px;color:#aaa;font-weight:600;">
           <span style="width:62px;height:6px;overflow:hidden;border-radius:999px;background:rgba(255,255,255,.14);">
             <span id="tw26-memory-fill" style="display:block;width:0%;height:100%;border-radius:inherit;background:#42b883;transition:width .3s ease,background .3s ease;"></span>
@@ -17971,8 +18219,9 @@ TOPWAR.clearThiefQueue()
           <span style="grid-column:1 / -1;color:#888;">역할 · 비인기 기준(명) · 인기 조사기 수</span>
         </div>
 
-        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin-top:8px;">
+        <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px;">
           <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">빠른보상</button>
+          <button id="tw26-thief-watch" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">도둑찾기</button>
           <button id="tw26-survey" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">지도스캔</button>
           <button id="tw26-full-scan" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">풀스캔</button>
         </div>
@@ -18130,6 +18379,7 @@ TOPWAR.clearThiefQueue()
     const dataHubScannerIdInput = panel.querySelector("#tw26-datahub-scanner-id");
     const githubTokenInput = panel.querySelector("#tw26-github-token");
     const thiefButton = panel.querySelector("#tw26-thief");
+    const thiefOnlyButton = panel.querySelector("#tw26-thief-watch");
     const surveyButton = panel.querySelector("#tw26-survey");
     const fullScanButton = panel.querySelector("#tw26-full-scan");
     const status = panel.querySelector("#tw26-status");
@@ -18538,31 +18788,51 @@ TOPWAR.clearThiefQueue()
 
     async function runThiefShareWatchForServers(serverIds, overrides = {}) {
       const requestedIds = parseServerIdsStrict(serverIds);
-      const ids = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
-      if (!ids.length) return { ok: false, reason: "serverIds is required" };
+      const allIds = TOPWAR.mapSurveyServerIds?.(requestedIds) ?? requestedIds;
+      const resumedIds = window.TOPWAR_RECOVERY?.consumeResumeServerList?.("thief", allIds) ?? allIds;
+      if (!resumedIds.length) return { ok: false, reason: "serverIds is required" };
 
       window.TOPWAR_REWARD_TRACKER?.stop?.("watch133-start");
-    state.watch133.running = true;
+      const runId = Number(state.watch133.runId || 0) + 1;
+      state.watch133.runId = runId;
+      state.watch133.stopping = false;
+      state.watch133.quickRewardOnly = false;
+      state.watch133.operation = "thief";
+      state.watch133.running = true;
       state.watch133.multiServer = {
         running: true,
+        mode: "thief",
         cycle: 0,
         serverIndex: 0,
-        totalServers: ids.length,
+        totalServers: resumedIds.length,
         serverId: null,
-        serverIds: ids.slice()
+        serverIds: resumedIds.slice()
+      };
+      state.watch133.current = {
+        phase: "thiefStarting",
+        cycle: 0,
+        serverId: null,
+        serverIndex: 0,
+        totalServers: resumedIds.length
       };
 
       let cycle = 0;
       try {
         while (state.watch133.running) {
           cycle++;
-          state.watch133.multiServer.cycle = cycle;
+          const ids = cycle === 1 ? resumedIds : allIds;
+          state.watch133.multiServer = {
+            ...state.watch133.multiServer,
+            cycle,
+            totalServers: ids.length,
+            serverIds: ids.slice()
+          };
 
           for (let index = 0; index < ids.length; index++) {
             if (!state.watch133.running) break;
 
             const serverId = ids[index];
-            window.TOPWAR_RECOVERY?.updateServer?.(serverId, "reward");
+            window.TOPWAR_RECOVERY?.updateServer?.(serverId, "thief");
             state.watch133.multiServer = {
               ...state.watch133.multiServer,
               running: true,
@@ -18570,6 +18840,13 @@ TOPWAR.clearThiefQueue()
               serverIndex: index + 1,
               totalServers: ids.length,
               serverId
+            };
+            state.watch133.current = {
+              phase: "thiefScan",
+              cycle,
+              serverId,
+              serverIndex: index + 1,
+              totalServers: ids.length
             };
 
             const result = await TOPWAR.watchPointTypeAndNotify(
@@ -18580,41 +18857,9 @@ TOPWAR.clearThiefQueue()
               })
             );
 
-            // CityReward와 같은 방식으로 서버의 전체 스캔이 정상 완료된 시점에만 GitHub를 갱신한다.
-            // 현재 서버에서 이번 스캔 중 관측된 pointType 133 전체를 스냅샷으로 사용하므로,
-            // 해당 서버의 예전 결과는 교체되고 다른 서버 결과는 유지된다.
-            if (
-              result?.ok === true &&
-              result?.stopped !== true &&
-              overrides.githubUpload !== false &&
-              typeof TOPWAR.uploadCompletedThiefServer === "function"
-            ) {
-              try {
-                const observed = (TOPWAR.getObjectsByTypeRaw?.(133) || [])
-                  .filter(obj => Number(obj?.serverId) === Number(serverId));
-
-                const serverResult = typeof TOPWAR.buildCompletedThiefServerResult === "function"
-                  ? TOPWAR.buildCompletedThiefServerResult(serverId, observed, {
-                      ok: true,
-                      completed: true,
-                      cycle
-                    })
-                  : {
-                      ok: true,
-                      completed: true,
-                      serverId,
-                      cycle,
-                      locations: observed
-                    };
-
-                const upload = await TOPWAR.uploadCompletedThiefServer(serverResult);
-                state.watch133.lastGithubUpload = upload;
-                console.log("[TopWar Thief GitHub] 서버 스캔 결과 업로드 완료:", upload);
-              } catch (error) {
-                state.watch133.lastGithubUpload = { ok: false, serverId, error: error?.message || String(error) };
-                console.error("[TopWar Thief GitHub] 서버 스캔 결과 업로드 실패:", error);
-              }
-            }
+            // 독립형 watcher가 네트워크 확인된 셀을 partial 반영하고
+            // 완전 확인 시 서버 snapshot을 백엔드에 업로드한다. 중복 업로드 금지.
+            state.watch133.lastThiefServerResult = result;
 
             if (!state.watch133.running) break;
             if (result?.error) console.warn("[TopWar V2.10.5.1] 도둑찾기 서버 처리 오류:", { serverId, result });
@@ -18625,10 +18870,20 @@ TOPWAR.clearThiefQueue()
           await TOPWAR.sleep?.(Number(overrides.betweenCycleDelay ?? 1000));
         }
       } finally {
-        if (state.watch133.multiServer) state.watch133.multiServer.running = false;
+        if (state.watch133.runId === runId) {
+          if (state.watch133.multiServer) state.watch133.multiServer.running = false;
+          state.watch133.running = false;
+          state.watch133.stopping = false;
+          state.watch133.quickRewardOnly = false;
+          state.watch133.operation = null;
+          state.watch133.current = {
+            ...(state.watch133.current || {}),
+            phase: state.connectionGuard?.disconnected ? "connectionFailure" : "stopped"
+          };
+        }
       }
 
-      return { ok: true, stopped: true, cycle, serverIds: ids };
+      return { ok: true, stopped: true, cycle, serverIds: allIds };
     }
 
     TOPWAR.watchPointTypeOnServers = runThiefShareWatchForServers;
@@ -18789,15 +19044,15 @@ TOPWAR.clearThiefQueue()
 
       const fortCache = TOPWAR.getFortCacheEntry?.(targetServerId) ?? null;
       const forts = Array.isArray(fortCache?.forts) ? fortCache.forts : [];
-      const hasActiveAllianceFortCache = fortCache?.complete !== false && fortCache?.activeAllianceFiltered === true;
+      const hasActiveAllianceFortCache = TOPWAR.isUsableActiveAllianceAnchorCache?.(fortCache) === true;
       const fastFortMode = hasActiveAllianceFortCache && forts.length > 0;
       const noActiveAllianceForts = hasActiveAllianceFortCache && forts.length === 0;
       if (noActiveAllianceForts) {
-        console.log(`[Topwar Helper QuickReward] server=${targetServerId} 활성 길드(50명+) 보루 0개 → 빠른보상 스킵`);
+        console.log(`[Topwar Helper QuickReward] server=${targetServerId} 활성 길드(50명+) 앵커 0개 → 빠른보상 스킵`);
         return {
           ok: true, completed: true, skipped: true, serverId: targetServerId,
           scanMode: "fort-fast-empty", fortCount: 0, rewardCount: 0,
-          reason: "no active alliance forts (memberCount >= 50)"
+          reason: "no active alliance anchors (memberCount >= 50)"
         };
       }
 
@@ -18810,7 +19065,7 @@ TOPWAR.clearThiefQueue()
         xs = [...new Set(forts.map(row => Number(row.x)).filter(Number.isFinite))];
         ys = [...new Set(forts.map(row => Number(row.y)).filter(Number.isFinite))];
         plan = forts.map(row => ({ y: Number(row.y), xOrder: [Number(row.x)] }));
-        console.log(`[Topwar Helper QuickReward] server=${targetServerId} 보루 캐시 ${forts.length}개 사용 → 고속 모드`);
+        console.log(`[Topwar Helper QuickReward] server=${targetServerId} 활성 길드 앵커 ${forts.length}개 사용 → 고속 모드`);
       } else {
         // AUTO-LEARN MODE: 캐시가 없거나 불완전하면 이 서버만 기존 전체 지도 스캔을 수행한다.
         // 스캔 중 901에서 pointType=13을 수집하고 정상 완료 시 캐시로 저장한다.
@@ -19119,7 +19374,7 @@ TOPWAR.clearThiefQueue()
             }
           }
 
-          // V2.14.9.58 빠른보상은 handleDecodedPacket에서 901 도착 즉시 rewardMap에 적재한다.
+          // V2.14.9.61 빠른보상은 handleDecodedPacket에서 901 도착 즉시 rewardMap에 적재한다.
           // 따라서 playerMap/recentPackets 전체 재검색을 하지 않는다.
           let rewardCollect = {
             added: Math.max(0, rewardMap.size - rewardCountBeforeMove),
@@ -19261,7 +19516,16 @@ TOPWAR.clearThiefQueue()
         };
 
         // 서로 다른 저장소이므로 한쪽 실패가 다른쪽 업로드를 막지 않게 독립 처리한다.
-        if (fastFortMode) {
+        if (state.watch133?.quickRewardOnly === true) {
+          // 빠른보상은 도둑 수집을 의도적으로 끈 경량 모드다.
+          // 캐시가 없어 전체지도 fallback을 했더라도 빈 도둑 snapshot으로 기존 데이터를 지우면 안 된다.
+          result.thiefUpload = {
+            ok: true,
+            skipped: true,
+            serverId: targetServerId,
+            reason: "quick reward mode does not collect thieves"
+          };
+        } else if (fastFortMode) {
           // 보루만 방문한 결과는 전체 지도 authoritative snapshot이 아니다.
           // 따라서 기존 탐사선 위치를 통째로 교체하지 않고, 위의 live upsert만 허용한다.
           result.thiefUpload = {
@@ -19368,7 +19632,7 @@ TOPWAR.clearThiefQueue()
     function hasUsableUnifiedFortCache(serverId) {
       try {
         const cache = TOPWAR.getFortCacheEntry?.(serverId) ?? null;
-        return cache?.complete !== false && cache?.activeAllianceFiltered === true;
+        return TOPWAR.isUsableActiveAllianceAnchorCache?.(cache) === true;
       } catch {
         return false;
       }
@@ -19414,7 +19678,6 @@ TOPWAR.clearThiefQueue()
         "moveMapToStableUnified",
         "clearCollected",
         "collectRewardsFromRecent901",
-        "uploadDetectedThieves",
         "uploadRewardServerResults"
       ];
       const missingApis = requiredApis.filter(name => typeof TOPWAR[name] !== "function");
@@ -19434,14 +19697,18 @@ TOPWAR.clearThiefQueue()
       state.watch133.lastUnifiedError = null;
       window.TOPWAR_REWARD_TRACKER?.stop?.("watch133-start");
       // 빠른보상 전용 경량 모드: 901에서 cityReward 외 대형 맵/플레이어/도둑 캐시를 만들지 않는다.
+      const runId = Number(state.watch133.runId || 0) + 1;
+      state.watch133.runId = runId;
+      state.watch133.stopping = false;
       state.watch133.quickRewardOnly = true;
+      state.watch133.operation = "quickReward";
       state.watch133.running = true;
       state.watch133.paused = false;
       state.watch133.pauseReason = null;
       state.watch133.pauseInfo = null;
       state.watch133.multiServer = {
         running: true,
-        mode: "thief+cityReward",
+        mode: "quickReward",
         cycle: 0,
         serverIndex: 0,
         totalServers: ids.length,
@@ -19482,7 +19749,7 @@ TOPWAR.clearThiefQueue()
             state.watch133.multiServer = {
               ...state.watch133.multiServer,
               running: true,
-              mode: "thief+cityReward",
+              mode: "quickReward",
               cycle,
               serverIndex: index + 1,
               totalServers: ids.length,
@@ -19536,19 +19803,24 @@ TOPWAR.clearThiefQueue()
         console.error("[Topwar Helper QuickReward] 반복 실행 오류:", error);
         state.watch133.lastUnifiedError = error?.message || String(error);
       } finally {
-        state.watch133.quickRewardOnly = false;
-        state.watch133.quickRewardMap = null;
-        state.watch133.quickRewardServerId = null;
-        state.watch133.quickReward901Count = 0;
-        state.watch133.quickRewardBaseSeen = 0;
-        state.watch133.quickRewardLast901At = null;
-        // 빠른보상 종료 시 마지막 901/raw map 참조까지 즉시 해제한다.
-        try { TOPWAR.clearCollected?.({ keepWatch: true }); } catch {}
-        if (state.watch133.multiServer) state.watch133.multiServer.running = false;
-        state.watch133.current = {
-          ...(state.watch133.current || {}),
-          phase: state.connectionGuard?.disconnected ? "connectionFailure" : "stopped"
-        };
+        if (state.watch133.runId === runId) {
+          state.watch133.quickRewardOnly = false;
+          state.watch133.operation = null;
+          state.watch133.running = false;
+          state.watch133.stopping = false;
+          state.watch133.quickRewardMap = null;
+          state.watch133.quickRewardServerId = null;
+          state.watch133.quickReward901Count = 0;
+          state.watch133.quickRewardBaseSeen = 0;
+          state.watch133.quickRewardLast901At = null;
+          // 빠른보상 종료 시 마지막 901/raw map 참조까지 즉시 해제한다.
+          try { TOPWAR.clearCollected?.({ keepWatch: true }); } catch {}
+          if (state.watch133.multiServer) state.watch133.multiServer.running = false;
+          state.watch133.current = {
+            ...(state.watch133.current || {}),
+            phase: state.connectionGuard?.disconnected ? "connectionFailure" : "stopped"
+          };
+        }
       }
 
       const fatalReason = state.watch133.lastUnifiedError || null;
@@ -19622,20 +19894,32 @@ TOPWAR.clearThiefQueue()
       const logStatus = window.TOPWAR_LOG_CONTROL?.status?.() ?? { programLogs: true, gameFontWarnings: true };
 
       const activeSurveyMode = String(survey.mode || batch.mode || "").toLowerCase();
-      setButton(thiefButton, !!watch.running, "빠른보상");
+      const thiefMulti = watch.multiServer || {};
+      const watchOperation = String(
+        watch.operation || thiefMulti.mode || (watch.quickRewardOnly ? "quickReward" : "thief")
+      ).toLowerCase();
+      const watchStopping = watch.stopping === true;
+      const watchBusy = !!watch.running || watchStopping;
+      const thiefOnlyRunning = watchBusy && watchOperation === "thief";
+      const quickRewardRunning = watchBusy && !thiefOnlyRunning;
+
+      setButton(thiefButton, quickRewardRunning, "빠른보상");
+      setButton(thiefOnlyButton, thiefOnlyRunning, "도둑찾기");
       setButton(surveyButton, surveyRunning && activeSurveyMode === "map", "지도스캔");
       setButton(fullScanButton, surveyRunning && activeSurveyMode === "full", "풀스캔");
       setLogButton(programLogsButton, !!logStatus.programLogs, "프로그램 로그");
       setLogButton(gameFontLogsButton, !!logStatus.gameFontWarnings, "게임 폰트경고");
 
-      thiefButton.disabled = surveyRunning || realPowerRunning || disconnected;
-      surveyButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
-      fullScanButton.disabled = (!!watch.running && !surveyRunning) || realPowerRunning || disconnected;
+      thiefButton.disabled = surveyRunning || realPowerRunning || disconnected || watchStopping || thiefOnlyRunning;
+      thiefOnlyButton.disabled = surveyRunning || realPowerRunning || disconnected || watchStopping || quickRewardRunning;
+      surveyButton.disabled = (watchBusy && !surveyRunning) || realPowerRunning || disconnected;
+      fullScanButton.disabled = (watchBusy && !surveyRunning) || realPowerRunning || disconnected;
 
       thiefButton.style.opacity = thiefButton.disabled ? "0.55" : "1";
+      thiefOnlyButton.style.opacity = thiefOnlyButton.disabled ? "0.55" : "1";
       surveyButton.style.opacity = surveyButton.disabled ? "0.55" : "1";
       fullScanButton.style.opacity = fullScanButton.disabled ? "0.55" : "1";
-      const anyAutomationRunning = !!(watch.running || surveyRunning || realPowerRunning || state.cityRewardFinder?.running);
+      const anyAutomationRunning = !!(watchBusy || surveyRunning || realPowerRunning || state.cityRewardFinder?.running);
       githubTokenInput.disabled = anyAutomationRunning || thiefUploadTestRunning;
       githubTokenInput.style.opacity = githubTokenInput.disabled ? "0.6" : "1";
       if (thiefUploadTestButton) {
@@ -19654,10 +19938,10 @@ TOPWAR.clearThiefQueue()
         input.style.opacity = input.disabled ? "0.55" : "1";
       }
 
-      const thiefMulti = watch.multiServer || {};
-
-      const runningLabel = watch.running
-        ? `빠른보상 ${watch.current?.moveIndex ?? 0}/${watch.current?.totalMoves ?? "-"}`
+      const runningLabel = thiefOnlyRunning
+        ? `도둑찾기${watchStopping ? " 중지 중" : ` ${thiefMulti.serverIndex ?? 0}/${thiefMulti.totalServers ?? "-"} · ${thiefMulti.cycle ?? 1}회차`}`
+        : quickRewardRunning
+          ? `빠른보상${watchStopping ? " 중지 중" : ` ${watch.current?.moveIndex ?? 0}/${watch.current?.totalMoves ?? "-"}`}`
         : surveyRunning
           ? `${activeSurveyMode === "map" ? "지도스캔" : "풀스캔"} ${current.index ?? "-"}/${current.total ?? "-"}`
           : realPowerRunning
@@ -19668,7 +19952,7 @@ TOPWAR.clearThiefQueue()
 
       status.innerHTML = `
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-          <span><b style="color:#eee">${runningLabel}</b>${current.serverId ? ` · ${current.serverId}` : ""}</span>
+          <span><b style="color:#eee">${runningLabel}</b>${(watchBusy ? (watch.current?.serverId ?? thiefMulti.serverId) : current.serverId) ? ` · ${watchBusy ? (watch.current?.serverId ?? thiefMulti.serverId) : current.serverId}` : ""}</span>
           <span style="white-space:nowrap;color:${disconnected ? "#ff7777" : "#8fd6a8"}">${disconnected ? "연결 오류" : "정상"}</span>
         </div>
         <div style="margin-top:2px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
@@ -19724,6 +20008,11 @@ TOPWAR.clearThiefQueue()
     thiefButton.addEventListener("click", async event => {
       event.stopPropagation();
 
+      if (state.watch133?.stopping) {
+        render();
+        return;
+      }
+
       if (state.watch133?.running) {
         TOPWAR.stopWatch133?.();
         window.TOPWAR_RECOVERY?.clear?.("manual-stop-reward");
@@ -19762,13 +20051,27 @@ ${lastServerListError}`
           return;
         }
 
+        // V2.14.9.61: 빠른보상 시작 시 전체 서버 캐시를 DataHub에서 딱 한 번 읽어온다.
+        // 이후 각 서버에서는 localStorage에 동기화된 캐시만 사용하므로 서버마다 GET하지 않는다.
+        try {
+          if (typeof window.TOPWAR_DATAHUB?.fetchFortCacheAll === "function" &&
+              typeof TOPWAR.mergeRemoteFortCacheStore === "function") {
+            const remoteFortCache = await window.TOPWAR_DATAHUB.fetchFortCacheAll();
+            const syncResult = TOPWAR.mergeRemoteFortCacheStore(remoteFortCache);
+            console.log("[Topwar Helper QuickReward] DataHub 전체 앵커 캐시 동기화 완료:", syncResult);
+          }
+        } catch (error) {
+          // 중앙 조회 실패 시 기존 localStorage를 그대로 사용한다.
+          console.warn("[Topwar Helper QuickReward] DataHub 앵커 캐시 조회 실패 - localStorage fallback:", error);
+        }
+
         const thiefUiSettings = selectedThiefUiSettings();
 
         runUnifiedFinderForServers(serverIds, { ...thiefUiSettings, githubUpload: true })
           .then(result => {
-            console.log("[Topwar Helper V2.14.9.58 UI] 빠른보상 종료:", result);
+            console.log("[Topwar Helper V2.14.9.61 UI] 빠른보상 종료:", result);
             if (result?.ok === false && result?.reason) {
-              console.error("[Topwar Helper V2.14.9.58 UI] 통합찾기 실패 원인:", result.reason);
+              console.error("[Topwar Helper V2.14.9.61 UI] 통합찾기 실패 원인:", result.reason);
               alert(`빠른보상 실행 실패\n\n${result.reason}`);
             }
             render();
@@ -19777,11 +20080,87 @@ ${lastServerListError}`
             state.watch133.running = false;
             if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.("reward-error");
             state.watch133.lastUnifiedError = error?.message || String(error);
-            console.error("[Topwar Helper V2.14.9.58 UI] 빠른보상 오류:", error);
+            console.error("[Topwar Helper V2.14.9.61 UI] 빠른보상 오류:", error);
             alert(`빠른보상 오류\n\n${error?.message || String(error)}`);
             render();
           });
       }
+
+      render();
+    });
+
+    thiefOnlyButton.addEventListener("click", async event => {
+      event.stopPropagation();
+
+      const activeOperation = String(
+        state.watch133?.operation || state.watch133?.multiServer?.mode || ""
+      ).toLowerCase();
+
+      if (state.watch133?.stopping) {
+        render();
+        return;
+      }
+
+      if (state.watch133?.running) {
+        if (activeOperation === "thief") {
+          TOPWAR.stopWatch133?.();
+          window.TOPWAR_RECOVERY?.clear?.("manual-stop-thief");
+        }
+        render();
+        return;
+      }
+
+      if (state.connectionGuard?.disconnected) {
+        alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요.");
+        return;
+      }
+      if (state.ui.serverSurvey?.running || state.ui.serverSurveyBatch?.running) {
+        alert("지도스캔/풀스캔이 진행 중입니다. 먼저 OFF 하세요.");
+        return;
+      }
+      if (window.REALPOWER?.getState?.()?.running === true) {
+        alert("Top100조사가 진행 중입니다. 먼저 Top100조사를 OFF 하세요.");
+        return;
+      }
+
+      await saveGithubTokenFromUi();
+      window.TOPWAR_REWARD_TRACKER?.stop?.("thief-ui-start");
+      window.TOPWAR_RECOVERY?.begin?.("thief");
+
+      try {
+        await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD");
+      } catch (error) {
+        window.TOPWAR_RECOVERY?.clear?.("thief-navigation-failed");
+        alert(`도둑찾기 시작 전 월드 이동 실패\n\n${error?.message || String(error)}`);
+        return;
+      }
+
+      const serverIds = await resolveMapSurveyServerIds();
+      if (!serverIds.length) {
+        window.TOPWAR_RECOVERY?.clear?.("thief-no-server");
+        alert(explicitInputServerIds().length
+          ? "입력한 서버 중 현재 지도 대상 및 담당 필터에 해당하는 서버가 없습니다. 역할을 전체 (필터 없음)로 선택하거나 서버 목록을 확인하세요."
+          : lastServerListError
+          ? `서버목록을 읽지 못했습니다. 직접 서버번호를 입력하세요.\n\n${lastServerListError}`
+          : "서버번호를 입력하거나 서버목록을 확인하세요.");
+        return;
+      }
+
+      const thiefUiSettings = selectedThiefUiSettings();
+      runThiefShareWatchForServers(serverIds, { thiefSyncEveryMoves: 8 })
+        .then(result => {
+          console.log("[Topwar Helper V2.14.9.65 UI] 도둑찾기 종료:", result);
+          render();
+        })
+        .catch(error => {
+          TOPWAR.stopWatch133?.();
+          if (!window.TOPWAR_RECOVERY?.status?.()?.pending) {
+            window.TOPWAR_RECOVERY?.clear?.("thief-error");
+          }
+          console.error("[Topwar Helper V2.14.9.62 UI] 도둑찾기 오류:", error);
+          alert(`도둑찾기 오류\n\n${error?.message || String(error)}`);
+          render();
+        });
 
       render();
     });
@@ -19809,8 +20188,11 @@ ${lastServerListError}`
         alert("서버 연결 실패 상태입니다. 게임 연결을 복구한 뒤 연결상태 초기화를 눌러주세요.");
         return;
       }
-      if (state.watch133?.running) {
-        alert("빠른보상이 진행 중입니다. 먼저 OFF 하세요.");
+      if (state.watch133?.running || state.watch133?.stopping) {
+        const activeWatchLabel = String(state.watch133?.operation || "").toLowerCase() === "thief"
+          ? "도둑찾기"
+          : "빠른보상";
+        alert(`${activeWatchLabel}가 진행 중입니다. 먼저 OFF 하세요.`);
         return;
       }
       if (window.REALPOWER?.getState?.()?.running === true) {
@@ -19870,7 +20252,7 @@ ${lastServerListError}`
         flushCompactHistoryAfterEachCycle: isFull
       })
         .then(result => {
-          console.log(`[Topwar Helper V2.14.9.58 UI] ${label} 종료:`, result);
+          console.log(`[Topwar Helper V2.14.9.61 UI] ${label} 종료:`, result);
           if (result?.ok === false && !result?.stopped) {
             const firstError = result?.errors?.[0]?.result;
             const message = firstError?.error?.message || firstError?.reason || result?.reason || "알 수 없는 오류";
@@ -19880,7 +20262,7 @@ ${lastServerListError}`
         })
         .catch(error => {
           if (!window.TOPWAR_RECOVERY?.status?.()?.pending) window.TOPWAR_RECOVERY?.clear?.(`${normalizedMode}-error`);
-          console.error(`[Topwar Helper V2.14.9.58 UI] ${label} 오류:`, error);
+          console.error(`[Topwar Helper V2.14.9.61 UI] ${label} 오류:`, error);
           alert(`${label} 오류\n\n${error?.message || String(error)}`);
           render();
         });
@@ -19899,7 +20281,7 @@ ${lastServerListError}`
         return;
       }
 
-      if (confirm("빠른보상 큐와 저장된 지도스캔/풀스캔 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
+      if (confirm("도둑 큐와 저장된 지도스캔/풀스캔 진행 위치를 초기화할까요?\n\n초기화하지 않으면 다음 실행 시 저장된 서버부터 이어서 조사합니다.")) {
         TOPWAR.clearThiefQueue?.();
         TOPWAR.clearServerSurveyResume?.();
         render();
@@ -20040,7 +20422,7 @@ ${lastServerListError}`
 
       if (count >= 80) {
         clearInterval(timer);
-        console.error("[Topwar Helper V2.14.9.58 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
+        console.error("[Topwar Helper V2.14.9.61 UI] 통합 패널 설치 실패: TOPWAR 준비 시간 초과");
       }
     }, 500);
   }
@@ -21894,7 +22276,17 @@ ${lastServerListError}`
     const originalServerIds = serverIds.slice();
     serverIds = sortServerIdsByPopularity(serverIds, { enabled: popularFirst });
 
-    const recoveryMode = normalizedOptions.includeRewards === true ? "mapReward" : "map";
+    const normalizedSurveyMode = String(normalizedOptions.surveyMode || "").toLowerCase();
+    const recoveryMode = String(
+      normalizedOptions.recoveryMode ||
+      (normalizedSurveyMode === "map"
+        ? "map"
+        : normalizedSurveyMode === "full"
+          ? "mapReward"
+          : normalizedOptions.includeRewards === true
+            ? "mapReward"
+            : "map")
+    );
     const recoveryFirstCycleIds = window.TOPWAR_RECOVERY?.consumeResumeServerList?.(recoveryMode, serverIds) ?? serverIds;
     const recoveryStartServerId = recoveryFirstCycleIds[0] ?? null;
     const recoveryStartIndex = recoveryStartServerId == null
@@ -24946,17 +25338,17 @@ ${lastServerListError}`
     const subMap = options.subMap ?? range?.sub ?? 0;
     const fortCache = TOPWAR.getFortCacheEntry(serverId);
     const forts = Array.isArray(fortCache?.forts) ? fortCache.forts : [];
-    const hasActiveAllianceFortCache = fortCache?.complete !== false && fortCache?.activeAllianceFiltered === true;
+    const hasActiveAllianceFortCache = TOPWAR.isUsableActiveAllianceAnchorCache?.(fortCache) === true;
     const fastFortMode = hasActiveAllianceFortCache && forts.length > 0;
     if (hasActiveAllianceFortCache && forts.length === 0) {
       console.log(`[TopWar Reward Finder] server=${serverId} 활성 길드(50명+) 보루 0개 → 스킵`);
-      return { ok: true, completed: true, skipped: true, serverId: Number(serverId), count: 0, locations: [], reason: "no active alliance forts" };
+      return { ok: true, completed: true, skipped: true, serverId: Number(serverId), count: 0, locations: [], reason: "no active alliance anchors" };
     }
 
     let plan = [];
     if (fastFortMode) {
       plan = forts.map(row => ({ y: Number(row.y), xOrder: [Number(row.x)] }));
-      console.log(`[TopWar Reward Finder] server=${serverId} 보루 캐시 ${forts.length}개 사용 → 고속 모드`);
+      console.log(`[TopWar Reward Finder] server=${serverId} 활성 길드 앵커 ${forts.length}개 사용 → 고속 모드`);
     } else {
       if (typeof TOPWAR.buildScanCoords !== "function" || typeof TOPWAR.buildScanPlan !== "function") {
         return { ok: false, completed: false, serverId: Number(serverId), reason: "scan helper not found" };
@@ -26444,6 +26836,41 @@ return null;
 
 }
 
+function getActiveComponent(componentName) {
+  const root = scene();
+  if (!root) return null;
+  const valid = component => component && component.node &&
+    component.node.active !== false && component.node.activeInHierarchy !== false &&
+    component.enabled !== false;
+
+  // Cocos 기본 검색을 우선하고 비활성화된 풀링 인스턴스는 걸러낸다.
+  try {
+    const rows = root.getComponentsInChildren?.(componentName);
+    if (Array.isArray(rows)) {
+      const active = rows.find(valid);
+      if (active) return active;
+      if (rows.length) return null;
+    }
+  } catch {}
+
+  // 일부 빌드에서는 문자열 기반 getComponentsInChildren이 지원되지 않는다.
+  const stack = [root];
+  const seen = new Set();
+  while (stack.length) {
+    const node = stack.pop();
+    if (!node || seen.has(node)) continue;
+    seen.add(node);
+    if (node.active === false || node.activeInHierarchy === false) continue;
+    for (const component of node._components || []) {
+      if (componentClassName(component) === componentName && valid(component)) {
+        return component;
+      }
+    }
+    for (const child of node.children || []) stack.push(child);
+  }
+  return null;
+}
+
 function getComponentSafe(componentName) {try {return getComponent(componentName);} catch {return null;}}
 
 function deepCopy(value) {return JSON.parse(JSON.stringify(value ?? null));}
@@ -27273,7 +27700,7 @@ return Number.isFinite(number) ? number : null;
 
 }
 
-function isServerListPanelActive() {const panel = getComponentSafe("WorldServerListPanel");if (!panel?.node) return false;return panel.node.active !== false && panel.node.activeInHierarchy !== false;}
+function isServerListPanelActive() {return !!getActiveComponent("WorldServerListPanel");}
 
 function collectActiveSceneTexts() {const root = scene();if (!root) return [];
 
@@ -27320,21 +27747,27 @@ return texts.some(text => patterns.some(pattern => pattern.test(String(text))));
 
 function hasBattleAreaRankButtons() {try {return !!findRankButton("personal")?.match && !!findRankButton("alliance")?.match;} catch {return false;}}
 
-async function waitForServerSelection(serverId, options = {}) {const target = Number(serverId);const waitMs = Number(options.serverSelectionWaitMs ?? options.moveDelayMs ?? 1800);
-
-// gotoServerById()는 서버 목록에서 대상을 선택/표시하는 단계다.
-// 이 시점에는 아직 중앙 서버 카드를 클릭하지 않았으므로
-// 전투 지역 제목이나 랭킹 버튼이 나타나지 않는 것이 정상이다.
-await sleep(waitMs);
-
-return {
-  ok: true,
-  verification: "selection-delay",
-  targetServerId: target,
-  elapsedMs: waitMs,
-  panelActive: isServerListPanelActive()
-};
-
+async function waitForServerSelection(serverId, options = {}) {
+  const target = Number(serverId);
+  const waitMs = Math.max(150, Number(options.serverSelectionWaitMs ?? options.moveDelayMs ?? 1800));
+  const startedAt = Date.now();
+  if (!isServerListPanelActive()) {
+    throw new Error(`서버 ${target} 선택 전 WorldServerListPanel이 비활성 상태입니다.`);
+  }
+  await sleep(waitMs);
+  if (!isServerListPanelActive()) {
+    throw new Error(`서버 ${target} 선택 중 서버 목록 화면이 사라졌습니다.`);
+  }
+  // gotoServerById는 선택 요청이다. 실제 이동 성공은 Theater 진입으로만 확정한다.
+  return {
+    ok: true,
+    verification: "server-list-still-active;selection-unverified",
+    selectionVerified: false,
+    targetServerId: target,
+    viewportServerId: getCurrentServerId(),
+    elapsedMs: Date.now() - startedAt,
+    panelActive: true
+  };
 }
 
 async function waitForBattleAreaEntry(serverId, options = {}) {const target = Number(serverId);const timeoutMs = Number(options.moveTimeoutMs ?? 15000);const intervalMs = Number(options.movePollIntervalMs ?? 200);const minimumSettleMs = Number(options.minimumMoveSettleMs ?? 700);const startedAt = Date.now();
@@ -27390,7 +27823,7 @@ const retryCount = Math.max(0, Number(settings.moveRetryCount ?? 2));
 let lastResult = null;
 
 for (let attempt = 1; attempt <= retryCount + 1; attempt++) {
-  const comp = getComponent("WorldServerListPanel");
+  const comp = getActiveComponent("WorldServerListPanel");
 
   if (!comp || typeof comp.gotoServerById !== "function") {
     throw new Error(
@@ -27863,32 +28296,40 @@ function clickCanvasCenter() {const point = getCanvasCenterPoint();
 
 // 처음 실제 동작이 확인됐던 DOM Canvas 이벤트만 정확히 한 번 보낸다.
 // Cocos 메서드 호출, 버튼 후보 탐색, 재클릭은 하지 않는다.
-dispatchDomClick(point);
+dispatchDomMousePress(point);
 
-pushLog("Canvas 중앙 서버 카드 클릭", point);
+pushLog("Canvas 중앙 서버 카드 단일 입력 (mousedown/up)", point);
 return point;
 
 }
 
-async function openSelectedServerByCanvasCenter(serverId, options = {}) {const settings = getSettings(options);
-
-throwIfStopped();
-
-const click = clickCanvasCenter();
-
-// UI 로딩만 기다리고 TheaterPanel 탐지 실패로 조사를 중단하지 않는다.
-// 실제 진입 여부는 다음 개인 랭킹 단계에서 자연스럽게 검증된다.
-await sleep(Number(settings.serverCardOpenDelayMs ?? 2600));
-
-throwIfStopped();
-
-return {
-  ok: true,
-  method: "canvas-center-dom-click",
-  serverId: Number(serverId),
-  click
-};
-
+async function openSelectedServerByCanvasCenter(serverId, options = {}) {
+  const settings = getSettings(options);
+  const target = Number(serverId);
+  throwIfStopped();
+  if (!isServerListPanelActive()) {
+    throw new Error(`${target} 중앙 카드 클릭 차단: 서버 목록 화면이 활성화되어 있지 않습니다.`);
+  }
+  const beforeSnapshot = theaterPanelSnapshot();
+  const click = clickCanvasCenter();
+  // 클릭 후 고정 지연이 아니라 실제 Theater 컴포넌트의 신규 활성화/전환을 확인한다.
+  const entered = await waitForFreshTheaterPanel(
+    beforeSnapshot,
+    Number(settings.theaterOpenTimeoutMs ?? 7000)
+  );
+  if (!entered.ok) {
+    const diag = diagnoseTop100Ui("theater-open-timeout");
+    throw top100UiFatal(`${target} 서버 Theater 진입을 확인하지 못했습니다. 추가 랭킹 클릭을 중단합니다. (${JSON.stringify(diag.status)})`);
+  }
+  throwIfStopped();
+  return {
+    ok: true,
+    method: "canvas-center-single-mouse-press-verified",
+    serverId: target,
+    click,
+    freshTheater: entered.fresh,
+    elapsedMs: entered.elapsedMs
+  };
 }
 
 function clickCanvasNormalized(normalizedX, normalizedY) {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
@@ -28959,7 +29400,7 @@ throw new Error(
 
 }
 
-function getTheaterPanelComponent() {return getComponentSafe("WorldServerTheaterPanel");}
+function getTheaterPanelComponent() {return getActiveComponent("WorldServerTheaterPanel");}
 
 function componentsFromNodeAndAncestors(node, maxDepth = 8) {const rows = [];const seen = new Set();let current = node;let depth = 0;
 
@@ -29351,108 +29792,131 @@ try {
 
 }
 
-function collectPanelCloseCommands(componentName) {const target = getComponentSafe(componentName);
-
-if (!target?.node) {
-  return {
-    componentName,
-    target: null,
-    methods: [],
-    handlers: []
-  };
+// Top100 전용 UI 안전장치. 가장 가까운 프레임 밖의 닫기 명령은 절대로 실행하지 않는다.
+function top100NodeWithin(node, root) {
+  for (let current = node; current; current = current.parent) {
+    if (current === root) return true;
+  }
+  return false;
 }
 
-const componentRows = componentsFromNodeAndAncestors(
-  target.node,
-  12
-);
+function top100ModalFrame(componentName, targetNode) {
+  const guardName = componentName === "WorldServerTheaterPanel"
+    ? "WorldServerListPanel" : "WorldServerTheaterPanel";
+  const guard = getActiveComponent(guardName) || getComponentSafe(guardName);
+  let current = targetNode;
+  for (let depth = 0; current && depth <= 5; depth++, current = current.parent) {
+    if (!/^(UIFrameScreen|UIFrameNone|UIFramePopup)$/i.test(String(current.name || ""))) continue;
+    // 월드맵/상위 컨테이너를 공유하는 프레임은 보호하고 닫기 후보로 수집하지 않는다.
+    if (guard?.node && top100NodeWithin(guard.node, current)) return targetNode;
+    return current;
+  }
+  return targetNode;
+}
 
-const methods = [];
+function top100UiStatus() {
+  const named = ["WorldServerListPanel", "WorldServerTheaterPanel",
+    "WorldServerPowerRank", "WorldServerAlliancePowerRank"];
+  const status = {};
+  for (const name of named) {
+    const active = getActiveComponent(name);
+    const any = active || getComponentSafe(name);
+    status[name] = {
+      active: !!active,
+      present: !!any,
+      path: any?.node ? nodePathText(any.node, 12) : null
+    };
+  }
+  try { status.navigation = window.TOPWAR_NAV?.detect?.()?.state || null; } catch {}
+  return status;
+}
 
-for (const row of componentRows) {
-  for (const methodName of componentMethodNames(row.component)) {
-    const score = closeCommandScore(
-      methodName,
-      row.className,
-      nodePathText(row.node)
-    );
+function diagnoseTop100Ui(reason = "manual") {
+  const status = top100UiStatus();
+  const overlays = [];
+  const root = scene();
+  const stack = root ? [root] : [];
+  const seen = new Set();
+  while (stack.length && overlays.length < 35) {
+    const node = stack.pop();
+    if (!node || seen.has(node)) continue;
+    seen.add(node);
+    if (node.active === false || node.activeInHierarchy === false) continue;
+    const n = String(node.name || "");
+    const classes = (node._components || []).map(componentClassName);
+    if (/frame|block|mask|modal|shield|touch|input/i.test(n) ||
+        classes.some(c => /blockinputevents|mask/i.test(c))) {
+      overlays.push({ node: n, path: nodePathText(node, 9), classes: classes.slice(0, 8) });
+    }
+    for (const child of node.children || []) stack.push(child);
+  }
+  const result = { reason, time: nowIso(), serverId: loopRuntime.progress.currentServerId,
+    phase: loopRuntime.progress.phase, status, overlays };
+  pushLog(`Top100 UI 진단: ${reason}`, result);
+  return result;
+}
 
-    if (score <= 0) continue;
+async function verifyTop100Close(componentName, timeoutMs = 1500) {
+  const guardName = componentName === "WorldServerTheaterPanel"
+    ? "WorldServerListPanel" : "WorldServerTheaterPanel";
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    throwIfStopped();
+    if (!componentIsActive(componentName) && componentIsActive(guardName)) {
+      return { ok: true, guardName, elapsedMs: Date.now() - started };
+    }
+    await sleep(100);
+  }
+  return { ok: false, guardName, status: top100UiStatus() };
+}
 
+function top100UiFatal(message) {
+  const error = new Error(message);
+  error.top100UiUnsafe = true;
+  return error;
+}
+
+function collectPanelCloseCommands(componentName) {
+  // 활성 대상의 자체 close/back 명령만 허용한다. 상위 UIFrame.close()는 금지한다.
+  const target = getActiveComponent(componentName);
+  if (!target?.node) return { componentName, target: null, methods: [], handlers: [] };
+  const methods = [];
+  for (const methodName of componentMethodNames(target)) {
+    const score = closeCommandScore(methodName, componentName, "");
+    if (score <= 0 || !/^(on.*(close|back)|close|closepanel|closeview|closewindow|closeself|goback|back|onback|dismiss)$/i.test(normalizeCommandName(methodName))) continue;
     methods.push({
-      component: row.component,
-      componentClassName: row.className,
-      node: row.node,
-      depth: row.depth,
+      component: target,
+      componentClassName: componentName,
+      node: target.node,
+      depth: 0,
       methodName,
-      argCount: Number(
-        row.component?.[methodName]?.length ?? 0
-      ),
+      argCount: Number(target[methodName]?.length ?? 0),
       score,
-      path: nodePathText(row.node, 12)
+      path: nodePathText(target.node, 12)
     });
   }
-}
-
-methods.sort((a, b) =>
-  b.score - a.score ||
-  a.depth - b.depth ||
-  a.argCount - b.argCount
-);
-
-let root = target.node;
-for (let i = 0; i < 6 && root?.parent; i++) {
-  root = root.parent;
-}
-
-const handlers = [];
-
-for (const buttonRow of buttonsInsideNode(root)) {
-  const buttonScore = semanticCloseScore(
-    buttonRow.descriptor
-  );
-
-  for (
-    const handler of buttonRow.button?.clickEvents || []
-  ) {
-    const resolved = resolveEventHandlerTarget(handler);
-    const methodScore = closeCommandScore(
-      resolved.handlerName,
-      resolved.componentName,
-      buttonRow.descriptor
-    );
-
-    const score = Math.max(
-      buttonScore,
-      methodScore
-    );
-
-    if (score <= 0) continue;
-
-    handlers.push({
-      handler,
-      buttonNode: buttonRow.node,
-      buttonName: buttonRow.name,
-      descriptor: buttonRow.descriptor,
-      resolved,
-      score,
-      depth: buttonRow.depth
-    });
+  // 인자가 없는 명확한 메서드 우선. 임의의 값으로 UI API를 호출하지 않는다.
+  methods.sort((a, b) => a.argCount - b.argCount || b.score - a.score);
+  const modalFrame = top100ModalFrame(componentName, target.node);
+  const handlers = [];
+  for (const row of buttonsInsideNode(modalFrame)) {
+    const buttonScore = semanticCloseScore(row.descriptor);
+    for (const handler of row.button?.clickEvents || []) {
+      const resolved = resolveEventHandlerTarget(handler);
+      const score = Math.max(buttonScore, closeCommandScore(resolved.handlerName, resolved.componentName, ""));
+      if (score <= 0 || !resolved.component || !resolved.targetNode) continue;
+      // 프레임 외부/다른 팝업의 핸들러는 실행하지 않는다.
+      if (!top100NodeWithin(resolved.targetNode, modalFrame)) continue;
+      // 일반 버튼을 close로 착각하지 않도록 handler 자체도 close/back 의미여야 한다.
+      if (closeCommandScore(resolved.handlerName, resolved.componentName, "") <= 0) continue;
+      handlers.push({
+        handler, buttonNode: row.node, buttonName: row.name,
+        descriptor: row.descriptor, resolved, score, depth: row.depth
+      });
+    }
   }
-}
-
-handlers.sort((a, b) =>
-  b.score - a.score ||
-  b.depth - a.depth
-);
-
-return {
-  componentName,
-  target,
-  methods,
-  handlers
-};
-
+  handlers.sort((a, b) => b.score - a.score || b.depth - a.depth);
+  return { componentName, target, modalFramePath: nodePathText(modalFrame, 12), methods, handlers };
 }
 
 function inspectPanelCloseCommands(componentName) {const result = collectPanelCloseCommands(componentName);
@@ -29484,140 +29948,71 @@ return result;
 
 }
 
-async function invokeCloseMethodCandidate(candidate,componentName,settings) {const fn = candidate.component?.[candidate.methodName];
-
-if (typeof fn !== "function") {
-  return {
-    ok: false,
-    reason: "method missing"
-  };
-}
-
-const argSets = candidate.argCount <= 0
-  ? [[]]
-  : [
-      [null],
-      [candidate.component],
-      [null, null]
-    ];
-
-let lastError = null;
-
-for (const args of argSets) {
+async function invokeCloseMethodCandidate(candidate, componentName, settings) {
+  const fn = candidate.component?.[candidate.methodName];
+  if (typeof fn !== "function" || candidate.argCount !== 0) {
+    return { ok: false, reason: "nonzero-argument-or-missing-method" };
+  }
   try {
-    fn.apply(candidate.component, args);
+    fn.call(candidate.component);
   } catch (error) {
-    lastError = error;
-    continue;
+    return { ok: false, error: error?.message || String(error) };
   }
-
-  const closed = await waitForComponentInactive(
-    componentName,
-    Number(settings.commandCloseVerifyMs ?? 700)
-  );
-
-  if (closed.ok) {
-    return {
-      ok: true,
-      method: "component-command",
-      methodName: candidate.methodName,
-      componentClassName:
-        candidate.componentClassName,
-      argsUsed: args.length,
-      closed
-    };
-  }
+  const verified = await verifyTop100Close(componentName, Number(settings.commandCloseVerifyMs ?? 1500));
+  return { ok: verified.ok, method: "scoped-component-method", methodName: candidate.methodName, verified };
 }
 
-return {
-  ok: false,
-  methodName: candidate.methodName,
-  error: lastError?.message || null
-};
-
-}
-
-async function closePanelByCommand(componentName, options = {}) {const settings = getSettings(options);
-
-throwIfStopped();
-
-if (!componentIsActive(componentName)) {
-  return {
-    ok: true,
-    alreadyClosed: true,
-    method: "already-closed"
-  };
-}
-
-const commands = collectPanelCloseCommands(componentName);
-
-// 1. close(), onClickClose(), onBack() 같은 컴포넌트 메서드 직접 호출
-for (const candidate of commands.methods) {
+async function closePanelByCommand(componentName, options = {}) {
+  const settings = getSettings(options);
   throwIfStopped();
-
-  const result = await invokeCloseMethodCandidate(
-    candidate,
-    componentName,
-    settings
-  );
-
-  pushLog(`${componentName} 닫기 명령 시도`, {
-    component: candidate.componentClassName,
-    methodName: candidate.methodName,
-    score: candidate.score,
-    result
-  });
-
-  if (result.ok) {
-    return result;
+  if (!componentIsActive(componentName)) {
+    // 기존 팝업이 사라졌다는 사실만으로 뒤 화면이 정상이라는 의미는 아니다.
+    const verified = await verifyTop100Close(componentName, 500);
+    if (!verified.ok) {
+      diagnoseTop100Ui(`${componentName}-already-inactive-but-guard-missing`);
+      throw top100UiFatal(`${componentName} 비활성 상태이나 복귀 화면이 확인되지 않았습니다.`);
+    }
+    return { ok: true, alreadyClosed: true, verified };
   }
-}
-
-// 2. 닫기 버튼에 직렬화된 Cocos 핸들러 함수 직접 실행
-for (const candidate of commands.handlers) {
-  throwIfStopped();
-
-  const invoked = invokeCloseEventHandler(
-    candidate.handler
-  );
-
-  pushLog(`${componentName} 닫기 핸들러 시도`, {
-    buttonName: candidate.buttonName,
-    componentName:
-      candidate.resolved.componentName,
-    handlerName:
-      candidate.resolved.handlerName,
-    score: candidate.score,
-    invoked
+  const commands = collectPanelCloseCommands(componentName);
+  pushLog(`${componentName} 안전 닫기 후보`, {
+    modalFramePath: commands.modalFramePath,
+    methods: commands.methods.map(x => `${x.componentClassName}.${x.methodName}/${x.argCount}`),
+    handlers: commands.handlers.map(x => `${x.resolved.componentName}.${x.resolved.handlerName}`)
   });
-
-  if (!invoked.ok) continue;
-
-  const closed = await waitForComponentInactive(
-    componentName,
-    Number(settings.commandCloseVerifyMs ?? 700)
-  );
-
-  if (closed.ok) {
-    return {
-      ok: true,
-      method: invoked.method,
-      buttonName: candidate.buttonName,
-      componentName:
-        candidate.resolved.componentName,
-      handlerName:
-        candidate.resolved.handlerName,
-      closed
-    };
+  for (const candidate of commands.methods) {
+    throwIfStopped();
+    const result = await invokeCloseMethodCandidate(candidate, componentName, settings);
+    pushLog(`${componentName} 대상 메서드 닫기 시도`, {
+      component: candidate.componentClassName, method: candidate.methodName, result
+    });
+    if (result.ok) return result;
+    // 대상이 닫혔지만 보호 화면이 없어진 경우 절대 추가로 닫기 명령을 누르지 않는다.
+    if (!componentIsActive(componentName) ||
+        (componentName !== "WorldServerTheaterPanel" && !componentIsActive("WorldServerTheaterPanel"))) {
+      diagnoseTop100Ui(`${componentName}-unsafe-close-result`);
+      throw top100UiFatal(`${componentName} 종료 직후 보호할 화면이 사라졌습니다.`);
+    }
   }
-}
-
-inspectPanelCloseCommands(componentName);
-
-throw new Error(
-  `${componentName}에서 실행 가능한 close/back 명령을 찾지 못했습니다.`
-);
-
+  for (const candidate of commands.handlers) {
+    throwIfStopped();
+    const invoked = invokeCloseEventHandler(candidate.handler);
+    pushLog(`${componentName} 범위 내 닫기 핸들러 시도`, {
+      button: candidate.buttonName,
+      handler: `${candidate.resolved.componentName}.${candidate.resolved.handlerName}`,
+      invoked: invoked.ok
+    });
+    if (!invoked.ok) continue;
+    const verified = await verifyTop100Close(componentName, Number(settings.commandCloseVerifyMs ?? 1500));
+    if (verified.ok) return { ok: true, method: invoked.method, buttonName: candidate.buttonName, verified };
+    if (!componentIsActive(componentName) ||
+        (componentName !== "WorldServerTheaterPanel" && !componentIsActive("WorldServerTheaterPanel"))) {
+      diagnoseTop100Ui(`${componentName}-unsafe-handler-result`);
+      throw top100UiFatal(`${componentName} 종료 후 복귀 화면이 사라졌습니다.`);
+    }
+  }
+  diagnoseTop100Ui(`${componentName}-no-safe-close-command`);
+  throw top100UiFatal(`${componentName}를 안전하게 닫지 못했습니다. 상위 UIFrame 닫기 명령은 실행하지 않았습니다.`);
 }
 
 async function closePanelSemantic(componentName, options = {}) {
@@ -29944,7 +30339,7 @@ return openRankPanelSemantic(kind, options);
 
 async function clickRankButton(kind, options = {}) {return openRankPanelSemantic(kind, options);}
 
-function componentIsActive(componentName) {const comp = getComponentSafe(componentName);if (!comp?.node) return false;return comp.node.active !== false && comp.node.activeInHierarchy !== false;}
+function componentIsActive(componentName) {return !!getActiveComponent(componentName);}
 
 async function waitForComponentActive(componentName, timeoutMs = 2500) {const startedAt = Date.now();
 
@@ -30248,7 +30643,7 @@ return score;
 
 }
 
-function collectRankOpenCommands(kind) {const theater = getComponentSafe("WorldServerTheaterPanel");
+function collectRankOpenCommands(kind) {const theater = getActiveComponent("WorldServerTheaterPanel");
 
 if (!theater?.node) {
   return {
@@ -30259,10 +30654,10 @@ if (!theater?.node) {
   };
 }
 
-const componentRows = componentsFromNodeAndAncestors(
-  theater.node,
-  8
-);
+const componentRows = [{
+  component: theater, node: theater.node, depth: 0,
+  className: "WorldServerTheaterPanel"
+}];
 
 const methods = [];
 
@@ -30405,6 +30800,9 @@ for (const args of argSets) {
   const detected = await waitForEitherRankPanel(
     Number(settings.rankCommandVerifyMs ?? 1000)
   );
+  if (!componentIsActive("WorldServerTheaterPanel")) {
+    throw top100UiFatal(`랭킹 ${kind} 핸들러로 인해 Theater가 사라졌습니다.`);
+  }
 
   if (detected.componentName === expectedComponent) {
     return {
@@ -30461,6 +30859,9 @@ const commands = collectRankOpenCommands(kind);
 // 1. WorldServerTheaterPanel 및 부모 컴포넌트의 메서드 직접 호출
 for (const candidate of commands.methods) {
   throwIfStopped();
+  if (!componentIsActive("WorldServerTheaterPanel")) {
+    throw top100UiFatal(`랭킹 ${kind} 명령 시도 중 Theater 소실`);
+  }
 
   const result = await invokeRankOpenMethodCandidate(
     candidate,
@@ -30492,6 +30893,9 @@ for (const candidate of commands.methods) {
 // 2. 버튼에 직렬화된 Cocos EventHandler 직접 실행
 for (const candidate of commands.handlers) {
   throwIfStopped();
+  if (!componentIsActive("WorldServerTheaterPanel")) {
+    throw top100UiFatal(`랭킹 ${kind} 버튼 시도 중 Theater 소실`);
+  }
 
   const invoked = invokeCloseEventHandler(
     candidate.handler
@@ -30551,6 +30955,9 @@ return {
 }
 
 async function openRankPanelByJavaPoint(kind, options = {}) {const settings = getSettings(options);const personal = kind === "personal";const expectedComponent = personal? "WorldServerPowerRank": "WorldServerAlliancePowerRank";const wrongComponent = personal? "WorldServerAlliancePowerRank": "WorldServerPowerRank";
+if (!componentIsActive("WorldServerTheaterPanel")) {
+  throw top100UiFatal(`랭킹 ${kind} 열기 차단: Theater가 비활성화되었습니다.`);
+}
 
 // 길드 랭킹은 화면 크기 영향을 받지 않도록 명령 기반을 우선한다.
 if (!personal) {
@@ -30587,6 +30994,9 @@ if (componentIsActive("WorldServerAlliancePowerRank")) {
 
 for (let index = 0; index < attempts.length; index++) {
   throwIfStopped();
+  if (!componentIsActive("WorldServerTheaterPanel")) {
+    throw top100UiFatal(`랭킹 ${kind} 재시도 중 Theater가 사라졌습니다.`);
+  }
 
   const point = attempts[index];
   const click = clickJavaPointMouseOnly(
@@ -30719,118 +31129,86 @@ return {
 
 }
 
-async function collectByClick(serverId, options = {}) {const settings = getSettings(options);
-
-// 1. 서버 선택
-const moveResult = await moveToServer(serverId, settings);
-
-// 2. Canvas 정중앙의 서버 카드 진입
-const theaterOpen = await openSelectedServerByCanvasCenter(
-  serverId,
-  settings
-);
-
-pushLog(`${serverId} 중앙 서버 카드 클릭 완료`, {
-  theaterOpen
-});
-
-// 3. 개인 랭킹의 이전 캐시를 정리하고 새 데이터가 안정될 때까지 기다린다.
-const personalBaseline = prepareRankCapture(
-  "WorldServerPowerRank"
-);
-
-const personalOpen = await openRankPanelByJavaPoint(
-  "personal",
-  settings
-);
-
-const powerRank = await waitForRankList(
-  "WorldServerPowerRank",
-  settings,
-  personalBaseline
-);
-
-const players = powerRank.rows.map((row, index) =>
-  normalizePlayer(serverId, row, index)
-);
-
-if (
-  players.length <
-  Number(settings.requiredPlayerCount ?? 100)
-) {
-  throw new Error(
-    `${serverId} 개인 랭킹 부족: ` +
-    `${players.length}/${settings.requiredPlayerCount ?? 100}`
-  );
+async function recoverTop100UiAfterFailure() {
+  const actions = [];
+  if (loopRuntime.stopRequested || activeAbortSignal()?.aborted) {
+    return { ok: false, skipped: "stop-requested" };
+  }
+  try {
+    // 안전하게 복구 가능한, 현재 활성화된 팝업만 순서대로 종료한다.
+    for (const name of ["WorldServerPowerRank", "WorldServerAlliancePowerRank", "WorldServerTheaterPanel"]) {
+      if (componentIsActive(name)) {
+        const result = await closePanelByCommand(name, { commandCloseVerifyMs: 1400 });
+        actions.push({ name, method: result.method || "already-closed" });
+      }
+    }
+  } catch (error) {
+    return { ok: false, actions, error: error?.message || String(error) };
+  }
+  return { ok: isServerListPanelActive(), actions };
 }
 
-pushLog(`${serverId} 개인 랭킹 수집 확정: ${players.length}명`, {
-  moveElapsedMs: moveResult.elapsedMs,
-  theaterOpen,
-  personalOpen,
-  rankElapsedMs: powerRank.elapsedMs,
-  fingerprint: powerRank.fingerprint
-});
-
-// 4. 개인 랭킹 닫기
-const personalClose = await closeByJavaBackPoint(
-  "WorldServerPowerRank",
-  settings
-);
-
-// 5. 길드 랭킹도 이전 캐시를 정리하고 2개가 수신될 때까지 기다린다.
-const allianceBaseline = prepareRankCapture(
-  "WorldServerAlliancePowerRank"
-);
-
-const allianceOpen = await openRankPanelByJavaPoint(
-  "alliance",
-  settings
-);
-
-const allianceRank = await waitForRankList(
-  "WorldServerAlliancePowerRank",
-  settings,
-  allianceBaseline
-);
-
-const alliances = allianceRank.rows.map((row, index) =>
-  normalizeAlliance(serverId, row, index)
-);
-
-if (
-  alliances.length <
-  Number(settings.requiredAllianceCount ?? 2)
-) {
-  throw new Error(
-    `${serverId} 길드 랭킹 부족: ` +
-    `${alliances.length}/${settings.requiredAllianceCount ?? 2}`
-  );
-}
-
-pushLog(`${serverId} 길드 랭킹 수집 확정: ${alliances.length}개`, {
-  allianceOpen,
-  rankElapsedMs: allianceRank.elapsedMs,
-  fingerprint: allianceRank.fingerprint
-});
-
-// 6. 길드 랭킹 닫기
-const allianceClose = await closeByJavaBackPoint(
-  "WorldServerAlliancePowerRank",
-  settings
-);
-
-// 7. Java 원본처럼 한 번 더 뒤로가서 서버 목록으로 복귀
-const theaterClose = await exitTheaterByJavaBackPoint(settings);
-
-pushLog(`${serverId} 조사 화면 종료`, {
-  personalClose,
-  allianceClose,
-  theaterClose
-});
-
-return buildServerInfo(serverId, players, alliances);
-
+async function collectByClick(serverId, options = {}) {
+  const settings = getSettings(options);
+  let completed = false;
+  let caught = null;
+  try {
+    // 리스트 패널이 닫힌 경우 절대 중앙 클릭을 수행하지 않는다.
+    if (!isServerListPanelActive()) {
+      throw top100UiFatal(`서버 ${serverId} 조사 시작 전 WorldServerListPanel 미확인`);
+    }
+    const moveResult = await moveToServer(serverId, settings);
+    const theaterOpen = await openSelectedServerByCanvasCenter(serverId, settings);
+    pushLog(`${serverId} Theater 진입 검증`, { moveResult, theaterOpen });
+    if (!componentIsActive("WorldServerTheaterPanel")) {
+      throw top100UiFatal(`${serverId} Theater 활성 상태가 확인되지 않았습니다.`);
+    }
+    const personalBaseline = prepareRankCapture("WorldServerPowerRank");
+    const personalOpen = await openRankPanelByJavaPoint("personal", settings);
+    const powerRank = await waitForRankList("WorldServerPowerRank", settings, personalBaseline);
+    const players = powerRank.rows.map((row, index) => normalizePlayer(serverId, row, index));
+    if (players.length < Number(settings.requiredPlayerCount ?? 100)) {
+      throw new Error(`${serverId} 개인 랭킹 부족: ${players.length}/${settings.requiredPlayerCount ?? 100}`);
+    }
+    pushLog(`${serverId} 개인 랭킹 수집 확정: ${players.length}명`, {
+      personalOpen, rankElapsedMs: powerRank.elapsedMs, fingerprint: powerRank.fingerprint
+    });
+    const personalClose = await closeByJavaBackPoint("WorldServerPowerRank", settings);
+    if (!componentIsActive("WorldServerTheaterPanel")) {
+      throw top100UiFatal(`${serverId} 개인 랭킹 종료 후 Theater 소실`);
+    }
+    const allianceBaseline = prepareRankCapture("WorldServerAlliancePowerRank");
+    const allianceOpen = await openRankPanelByJavaPoint("alliance", settings);
+    const allianceRank = await waitForRankList("WorldServerAlliancePowerRank", settings, allianceBaseline);
+    const alliances = allianceRank.rows.map((row, index) => normalizeAlliance(serverId, row, index));
+    if (alliances.length < Number(settings.requiredAllianceCount ?? 2)) {
+      throw new Error(`${serverId} 길드 랭킹 부족: ${alliances.length}/${settings.requiredAllianceCount ?? 2}`);
+    }
+    pushLog(`${serverId} 길드 랭킹 수집 확정: ${alliances.length}개`, {
+      allianceOpen, rankElapsedMs: allianceRank.elapsedMs, fingerprint: allianceRank.fingerprint
+    });
+    const allianceClose = await closeByJavaBackPoint("WorldServerAlliancePowerRank", settings);
+    const theaterClose = await exitTheaterByJavaBackPoint(settings);
+    if (!isServerListPanelActive()) {
+      throw top100UiFatal(`${serverId} Theater 종료 후 서버 목록 화면 미복구`);
+    }
+    pushLog(`${serverId} 조사 화면 정상 복귀`, { personalClose, allianceClose, theaterClose });
+    completed = true;
+    return buildServerInfo(serverId, players, alliances);
+  } catch (error) {
+    caught = error;
+    diagnoseTop100Ui(`survey-${serverId}-error`);
+    throw error;
+  } finally {
+    if (!completed && caught && !isStopError(caught) && !loopRuntime.stopRequested && !activeAbortSignal()?.aborted) {
+      const recovery = await recoverTop100UiAfterFailure();
+      pushLog(`${serverId} 실패 후 제한적 UI 복구`, recovery);
+      if (!recovery.ok) {
+        caught.top100UiUnsafe = true;
+        diagnoseTop100Ui(`survey-${serverId}-unsafe-ui`);
+      }
+    }
+  }
 }
 
 async function testJavaClickFlow(serverId, options = {}) {const settings = getSettings(options);const steps = [];
@@ -33170,7 +33548,7 @@ try {
 
       pushLog(`${serverNumber} 서버 조사 오류 - 임시 큐 저장`, error?.message || String(error));
 
-      if (settings.continueOnError !== true) {
+      if (error?.top100UiUnsafe === true || settings.continueOnError !== true) {
         throw error;
       }
     }
@@ -33324,6 +33702,7 @@ try {
     ok: false,
     elapsedSec,
     error: error?.message || String(error),
+    uiFatal: error?.top100UiUnsafe === true,
     results
   };
 }
@@ -33517,6 +33896,9 @@ const promise = (async () => {
         });
 
         const cycleResult = await runOneCycle(cycleSettings);
+        if (cycleResult?.uiFatal) {
+          throw top100UiFatal(`Top100 UI 복구 실패: ${cycleResult.error || "unknown"}. 무한 재시도를 중단합니다.`);
+        }
 
         if (
           loopRuntime.stopRequested ||
@@ -34079,7 +34461,7 @@ applyPanelVisibility();
 }
 function renderPanelSafe() {try {renderPanel();} catch {}}
 
-const api = {version: "4.6.1-unified",independent: false,
+const api = {version: "4.6.2-top100-ui-guard",independent: false,
 
 configure,
 promptConfigure,
@@ -34136,6 +34518,8 @@ trySemanticPanelClose,
 collectPanelCloseCommands,
 inspectPanelCloseCommands,
 closePanelByCommand,
+diagnoseTop100Ui,
+top100UiStatus,
 collectRankOpenCommands,
 inspectRankOpenCommands,
 openRankPanelByCommand,
