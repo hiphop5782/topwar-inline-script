@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Topwar Helper V2.14.9.65 - Top100 UI Guard + Thief Sync
+// @name         Topwar Helper V2.14.9.70 - Scoped Rank Close + Thief Sync
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.65
-// @description  Topwar Helper - Top100 safe UI closing/verification and Thief DataHub Sync
+// @version      2.14.9.70
+// @description  Topwar Helper - calibrated Top100 server entry and diagnostic safety + Thief DataHub Sync
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -7337,6 +7337,7 @@ function inspectCurrentProfileItems() {
     try { localStorage.removeItem(RECOVERY_KEY); } catch {}
     try { sessionStorage.removeItem(ARMED_KEY); } catch {}
     try { sessionStorage.removeItem(PENDING_KEY); } catch {}
+    try { sessionStorage.removeItem(ATTEMPT_KEY); } catch {}
     console.log("[TopWar Recovery] 복구 마커 제거", { reason, previous });
     return previous;
   }
@@ -7541,7 +7542,13 @@ function inspectCurrentProfileItems() {
     });
 
     stopForReload();
-    setTimeout(() => location.reload(), Number(options.delayMs ?? 350));
+    // 사용자가 복구 예약을 해제했다면 예약된 reload 또한 취소한다.
+    setTimeout(() => {
+      let pending = null;
+      try { pending = sessionStorage.getItem(PENDING_KEY); } catch {}
+      if (pending && read()) location.reload();
+      else reloadScheduled = false;
+    }, Number(options.delayMs ?? 350));
     return true;
   }
 
@@ -7622,6 +7629,15 @@ function inspectCurrentProfileItems() {
 
       if (button.disabled) {
         throw new Error(`복구 실행 버튼이 아직 비활성 상태입니다: ${marker.mode}`);
+      }
+      // 자동 복구 대기 도중 사용자가 강제 중지한 경우에는 절대로 클릭하지 않는다.
+      let stillPending = null;
+      try { stillPending = sessionStorage.getItem(PENDING_KEY); } catch {}
+      const currentMarker = read();
+      if (!stillPending || !currentMarker || currentMarker.mode !== marker.mode) {
+        bootstrapDone = true;
+        console.warn("[TopWar Recovery] 사용자 복구 해제 감지 - 자동 재시작 취소");
+        return;
       }
 
       console.warn("[TopWar Recovery] 복구 버튼 실행", {
@@ -26576,7 +26592,16 @@ function saveSettings(settings = {}) {
   return getSettings();
 }
 
-function getState() {return readLocal(STATE_KEY, {version: 1,lastRunAt: null,lastServerId: null,running: false,logs: []});}
+function getState() {
+  const persisted = readLocal(STATE_KEY, {version: 1,lastRunAt: null,lastServerId: null,running: false,logs: []});
+  // localStorage의 running=true는 이전 페이지의 기록일 뿐이다.
+  // F5 이후 실행 중인 Promise/AbortController가 없다면 반드시 OFF로 판단해야
+  // TOPWAR_RECOVERY.bootstrapRecovery()가 시작 버튼을 중지 버튼으로 오인하지 않는다.
+  const actualRunning = !!loopRuntime.abortController || !!loopRuntime.runningPromise ||
+    loopRuntime.mode === "resetting";
+  return { ...persisted, running: actualRunning,
+    mode: actualRunning ? (persisted.mode || loopRuntime.mode) : "idle" };
+}
 
 function saveState(patch = {}) {const state = {...getState(),...patch,version: 1,updatedAt: nowIso()};writeLocal(STATE_KEY, state);return state;}
 
@@ -27837,7 +27862,21 @@ for (let attempt = 1; attempt <= retryCount + 1; attempt++) {
   });
 
   try {
-    comp.gotoServerById(target);
+    const navigation = comp.gotoServerById(target);
+    if (navigation && typeof navigation.then === "function") {
+      const timeout = Math.max(1000, Number(settings.serverSelectionCommandTimeoutMs ?? 12000));
+      let timer = null;
+      try {
+        await Promise.race([
+          navigation,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`gotoServerById 응답 ${timeout}ms 초과`)), timeout);
+          })
+        ]);
+      } finally {
+        if (timer != null) clearTimeout(timer);
+      }
+    }
   } catch (error) {
     lastResult = {
       ok: false,
@@ -28292,15 +28331,121 @@ return {
 
 }
 
-function clickCanvasCenter() {const point = getCanvasCenterPoint();
+// V2.14.9.68: 480x720 가정의 단순 중앙 클릭이 실제 서버 카드와
+// 일치한다는 보장이 없다. 사용자가 직접 캡처한 center 보정값이 있으면
+// 현재 Canvas 크기로 환산해 재사용한다. 입력 이벤트 순서는 유지한다.
+function clickCanvasCenter() {
+  const point = calibratedClientPoint("center") || getCanvasCenterPoint();
+  const rect = point.canvasRect || {};
+  if (!Number.isFinite(point.clientX) || !Number.isFinite(point.clientY) ||
+      !(rect.width > 0 && rect.height > 0) ||
+      point.clientX < rect.left || point.clientX > rect.left + rect.width ||
+      point.clientY < rect.top || point.clientY > rect.top + rect.height) {
+    throw top100UiFatal("서버 카드 클릭 좌표가 Canvas 밖이거나 Canvas 크기가 0입니다.");
+  }
+  dispatchDomClick(point);
+  pushLog(`Top100 서버 카드 입력 (${point.source === "calibration" ? "실제 보정 좌표" : "기본 중앙 좌표"})`, {
+    ...point, canvasCount: document.querySelectorAll("canvas").length,
+    domTarget: (() => { try {return document.elementFromPoint?.(point.clientX,point.clientY)?.tagName || null;} catch {return null;} })()
+  });
+  return point;
+}
 
-// 처음 실제 동작이 확인됐던 DOM Canvas 이벤트만 정확히 한 번 보낸다.
-// Cocos 메서드 호출, 버튼 후보 탐색, 재클릭은 하지 않는다.
-dispatchDomMousePress(point);
+// 진입 실패 분석용. 읽기만 수행하며 Cocos 버튼이나 화면은 조작하지 않는다.
+function inspectTop100ServerEntry(serverId) {
+  const target = Number(serverId || loopRuntime.progress.currentServerId || 0);
+  const panel = getActiveComponent("WorldServerListPanel");
+  const canvas = getCanvas();
+  const rect = canvas?.getBoundingClientRect?.();
+  const calibration = calibrationPoint("center");
+  const center = rect ? {
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2
+  } : null;
+  const candidates = panel && Number.isFinite(target) && target > 0
+    ? findServerNodeCandidates(target).slice(0, 15).map(row => ({
+        name: row.name, score: row.score, reasons: row.reasons,
+        button: row.button?.name || null,
+        buttonPath: row.button?.node ? nodePathText(row.button.node, 10) : null,
+        handlerNames: (row.button?.button?.clickEvents || []).map(h => String(h?.handler || "")),
+        path: row.path
+      }))
+    : [];
+  const info = {
+    serverId: target,
+    navigation: window.TOPWAR_NAV?.detect?.()?.state || null,
+    status: top100UiStatus(),
+    viewportServerId: getCurrentServerId(),
+    serverPanelHasGoto: typeof panel?.gotoServerById === "function",
+    serverPanelMethods: panel ? componentMethodNames(panel).filter(n =>
+      /server|theater|open|enter|select|click|goto/i.test(n)).slice(0, 30) : [],
+    canvas: rect ? {left:rect.left,top:rect.top,width:rect.width,height:rect.height} : null,
+    canvasCount: document.querySelectorAll("canvas").length,
+    center, calibration: calibration || null,
+    elementAtCenter: center ? (()=> { try {const n = document.elementFromPoint?.(center.x,center.y);return n ? {tag:n.tagName,id:n.id,className:String(n.className || "").slice(0,80)}:null;}catch{return null;} })() : null,
+    candidates
+  };
+  console.log("[REALPOWER] Top100 서버 카드 진입 진단", info);
+  if (candidates.length) console.table(candidates);
+  return info;
+}
 
-pushLog("Canvas 중앙 서버 카드 단일 입력 (mousedown/up)", point);
-return point;
+// 실제 대상 serverId가 연결된 Cocos Button만 단 한 번 실행한다.
+// 이름이 비슷한 일반 버튼을 무차별 시도하거나 UIFrame의 메서드를 호출하지 않는다.
+async function tryBoundTop100ServerButton(serverId, beforeSnapshot, options = {}) {
+  const target = Number(serverId);
+  const panel = getActiveComponent("WorldServerListPanel");
+  if (!panel?.node || !top100CanRetryServerCard().safe) {
+    return {ok:false,reason:"server-list-not-safe"};
+  }
+  const candidates = findServerNodeCandidates(target)
+    .filter(row => row.reasons?.some(reason => reason.startsWith("component:")))
+    .filter(row => row.button?.button && row.button?.node &&
+      top100NodeWithin(row.button.node, panel.node) &&
+      row.button.node.active !== false && row.button.node.activeInHierarchy !== false)
+    .map(row => {
+      const handlers = (row.button.button.clickEvents || []).filter(handler => {
+        const name = String(handler?.handler || "").toLowerCase();
+        if (/close|back|exit|return|rank|power|alliance|guild|sort|filter|refresh/.test(name)) return false;
+        if (!/server|enter|theater|item|select/.test(name)) return false;
+        const resolved = resolveEventHandlerTarget(handler);
+        return !!resolved?.targetNode && top100NodeWithin(resolved.targetNode,panel.node);
+      });
+      return {row,handlers};
+    }).filter(item => item.handlers.length > 0)
+    .sort((a,b) => b.row.score - a.row.score);
+  const uniqueButtons = new Set(candidates.map(c => c.row.button.node));
+  if (uniqueButtons.size !== 1) {
+    return {ok:false,reason:uniqueButtons.size ? "ambiguous-target-buttons" : "no-bound-target-button",
+      candidateCount:candidates.length,buttonCount:uniqueButtons.size};
+  }
+  const selected = candidates[0];
+  throwIfStopped();
+  try {
+    // 기존 invokeButtonDirectly()는 click + touchend 등 여러 이벤트를 연속 실행한다.
+    // 이 경로는 검증된 핸들러 한 개만 실행한다.
+    selected.handlers[0].emit([selected.row.button.button]);
+  } catch (error) {
+    return {ok:false,reason:"bound-handler-error",error:error?.message || String(error)};
+  }
+  const opened = await waitForFreshTheaterPanel(beforeSnapshot,
+    Math.max(3000, Number(options.theaterOpenAttemptTimeoutMs ?? 4500)));
+  return {ok:opened.ok,reason:opened.ok ? "bound-handler-opened" : "bound-handler-no-theater",
+    node:selected.row.button.node.name, handler:selected.handlers[0]?.handler || null,
+    opened};
+}
 
+// 서버 목록이 정상 유지되는 경우에만 카드 클릭 재시도를 허용한다.
+// 랭킹 창이나 Theater가 열린 상태에서는 중앙 클릭을 반복하면 잘못된 버튼을 누를 수 있다.
+function top100CanRetryServerCard() {
+  const status = top100UiStatus();
+  const safe =
+    status.WorldServerListPanel?.active === true &&
+    status.WorldServerTheaterPanel?.active !== true &&
+    status.WorldServerPowerRank?.active !== true &&
+    status.WorldServerAlliancePowerRank?.active !== true &&
+    (!status.navigation || status.navigation === "WORLD_MAP");
+  return { safe, status };
 }
 
 async function openSelectedServerByCanvasCenter(serverId, options = {}) {
@@ -28308,28 +28453,79 @@ async function openSelectedServerByCanvasCenter(serverId, options = {}) {
   const target = Number(serverId);
   throwIfStopped();
   if (!isServerListPanelActive()) {
-    throw new Error(`${target} 중앙 카드 클릭 차단: 서버 목록 화면이 활성화되어 있지 않습니다.`);
+    throw top100UiFatal(`${target} 카드 클릭 차단: 서버 목록이 비활성화되어 있습니다.`);
   }
   const beforeSnapshot = theaterPanelSnapshot();
-  const click = clickCanvasCenter();
-  // 클릭 후 고정 지연이 아니라 실제 Theater 컴포넌트의 신규 활성화/전환을 확인한다.
-  const entered = await waitForFreshTheaterPanel(
-    beforeSnapshot,
-    Number(settings.theaterOpenTimeoutMs ?? 7000)
-  );
+  let click = clickCanvasCenter();
+  let attempts = 1;
+  const reasons = [];
+  const waitMs = Math.max(3000, Number(settings.theaterOpenTimeoutMs ?? 10000));
+  let entered = await waitForFreshTheaterPanel(beforeSnapshot, waitMs);
   if (!entered.ok) {
-    const diag = diagnoseTop100Ui("theater-open-timeout");
-    throw top100UiFatal(`${target} 서버 Theater 진입을 확인하지 못했습니다. 추가 랭킹 클릭을 중단합니다. (${JSON.stringify(diag.status)})`);
+    // 재시도 전, 정확한 서버번호가 바인딩된 Cocos 버튼이 단 하나인 경우에만 실행한다.
+    // 3D 서버 카드가 DOM 좌표와 다른 경로로 입력을 받는 환경을 위한 안전한 대체 경로다.
+    const retry = top100CanRetryServerCard();
+    if (retry.safe) {
+      const bound = await tryBoundTop100ServerButton(target,beforeSnapshot,settings);
+      reasons.push({stage:"bound-cocos",result:bound.reason,
+        buttonCount:bound.buttonCount ?? null, candidateCount:bound.candidateCount ?? null});
+      if (bound.ok) entered = bound.opened;
+    } else {
+      reasons.push({stage:"bound-cocos",result:"unsafe-screen-state",status:retry.status});
+    }
+  }
+  if (!entered.ok) {
+    const retry = top100CanRetryServerCard();
+    if (retry.safe) {
+      const comp = getActiveComponent("WorldServerListPanel");
+      if (typeof comp?.gotoServerById === "function") {
+        try {
+          // 재선택은 기존의 검증된 경로를 통해 수행한다. 실패 시 절대 강행 클릭하지 않는다.
+          const move = await moveToServer(target,{...settings,moveRetryCount:0,
+            serverSelectionWaitMs:Math.max(1800,Number(settings.moveDelayMs ?? 2300))});
+          reasons.push({stage:"selection-retry",verification:move.verification,
+            viewportServerId:move.viewportServerId});
+          if (top100CanRetryServerCard().safe) {
+            const retrySnapshot = theaterPanelSnapshot();
+            click = clickCanvasCenter();
+            attempts++;
+            entered = await waitForFreshTheaterPanel(retrySnapshot,waitMs);
+          } else {
+            reasons.push({stage:"canvas-retry",result:"screen-changed"});
+            entered = await waitForFreshTheaterPanel(beforeSnapshot,1000);
+          }
+        } catch (error) {
+          if (isStopError(error)) throw error;
+          reasons.push({stage:"selection-retry",error:error?.message || String(error)});
+          entered = await waitForFreshTheaterPanel(beforeSnapshot,500);
+        }
+      } else {
+        reasons.push({stage:"selection-retry",result:"gotoServerById-missing"});
+      }
+    } else {
+      reasons.push({stage:"selection-retry",result:"unsafe-screen-state",status:retry.status});
+    }
+  }
+  if (!entered.ok) {
+    const snapshot = inspectTop100ServerEntry(target);
+    diagnoseTop100Ui(`server-${target}-theater-entry-failed`);
+    pushLog(`${target} Theater 진입 실패 상세 원인`,{reasons,snapshot});
+    const calibrated = !!calibrationPoint("center");
+    throw top100UiFatal(
+      `${target} 서버 Theater 진입 실패 (${attempts}회 Canvas 입력, ` +
+      `서버목록=${!!snapshot.status.WorldServerListPanel?.active}, ` +
+      `Theater=${!!snapshot.status.WorldServerTheaterPanel?.active}). ` +
+      `${reasons.map(r=>r.stage+":"+(r.error || r.result || r.verification)).join(" / ").slice(0,180)}. ` +
+      (calibrated ? "보정 좌표 사용 중. " : "center 위치 보정 필요 가능. ") +
+      "안전을 위해 중단했습니다. 콘솔의 Top100 서버 카드 진입 진단을 확인하세요."
+    );
   }
   throwIfStopped();
-  return {
-    ok: true,
-    method: "canvas-center-single-mouse-press-verified",
-    serverId: target,
-    click,
-    freshTheater: entered.fresh,
-    elapsedMs: entered.elapsedMs
-  };
+  pushLog(`${target} Theater 진입 확인`,{attempts,fresh:entered.fresh,
+    elapsedMs:entered.elapsedMs,reasons});
+  return {ok:true,method:"calibrated-canvas-or-bound-cocos",serverId:target,
+    click,attempts,freshTheater:entered.fresh,elapsedMs:entered.elapsedMs,
+    reasons};
 }
 
 function clickCanvasNormalized(normalizedX, normalizedY) {const canvas = getCanvas();if (!canvas) throw new Error("canvas 없음");
@@ -28933,7 +29129,7 @@ return rows;
 
 }
 
-async function waitForFreshTheaterPanel(beforeSnapshot = [], timeoutMs = 5000) {const beforeComponents = new Set(beforeSnapshot.map(row => row.component));const startedAt = Date.now();
+async function waitForFreshTheaterPanel(beforeSnapshot = [], timeoutMs = 5000) {const beforeComponents = new Set(beforeSnapshot.filter(row => row.active && row.activeInHierarchy).map(row => row.component));const startedAt = Date.now();
 
 while (Date.now() - startedAt < timeoutMs) {
   const current = theaterPanelSnapshot();
@@ -29863,7 +30059,10 @@ async function verifyTop100Close(componentName, timeoutMs = 1500) {
   while (Date.now() - started < timeoutMs) {
     throwIfStopped();
     if (!componentIsActive(componentName) && componentIsActive(guardName)) {
-      return { ok: true, guardName, elapsedMs: Date.now() - started };
+      const stable = await new Promise(resolve => setTimeout(() => resolve(
+        !componentIsActive(componentName) && componentIsActive(guardName)
+      ), 250));
+      if (stable) return { ok: true, guardName, elapsedMs: Date.now() - started };
     }
     await sleep(100);
   }
@@ -29876,47 +30075,101 @@ function top100UiFatal(message) {
   return error;
 }
 
-function collectPanelCloseCommands(componentName) {
-  // 활성 대상의 자체 close/back 명령만 허용한다. 상위 UIFrame.close()는 금지한다.
-  const target = getActiveComponent(componentName);
-  if (!target?.node) return { componentName, target: null, methods: [], handlers: [] };
-  const methods = [];
-  for (const methodName of componentMethodNames(target)) {
-    const score = closeCommandScore(methodName, componentName, "");
-    if (score <= 0 || !/^(on.*(close|back)|close|closepanel|closeview|closewindow|closeself|goback|back|onback|dismiss)$/i.test(normalizeCommandName(methodName))) continue;
-    methods.push({
-      component: target,
-      componentClassName: componentName,
-      node: target.node,
-      depth: 0,
-      methodName,
-      argCount: Number(target[methodName]?.length ?? 0),
-      score,
-      path: nodePathText(target.node, 12)
-    });
-  }
-  // 인자가 없는 명확한 메서드 우선. 임의의 값으로 UI API를 호출하지 않는다.
-  methods.sort((a, b) => a.argCount - b.argCount || b.score - a.score);
-  const modalFrame = top100ModalFrame(componentName, target.node);
-  const handlers = [];
-  for (const row of buttonsInsideNode(modalFrame)) {
-    const buttonScore = semanticCloseScore(row.descriptor);
-    for (const handler of row.button?.clickEvents || []) {
-      const resolved = resolveEventHandlerTarget(handler);
-      const score = Math.max(buttonScore, closeCommandScore(resolved.handlerName, resolved.componentName, ""));
-      if (score <= 0 || !resolved.component || !resolved.targetNode) continue;
-      // 프레임 외부/다른 팝업의 핸들러는 실행하지 않는다.
-      if (!top100NodeWithin(resolved.targetNode, modalFrame)) continue;
-      // 일반 버튼을 close로 착각하지 않도록 handler 자체도 close/back 의미여야 한다.
-      if (closeCommandScore(resolved.handlerName, resolved.componentName, "") <= 0) continue;
-      handlers.push({
-        handler, buttonNode: row.node, buttonName: row.name,
-        descriptor: row.descriptor, resolved, score, depth: row.depth
-      });
+// v2.14.9.70: 닫기 버튼이 랭킹 컴포넌트가 아닌 전용 UIFrame에 존재하는 경우도 탐색한다.
+// 다만 Theater/서버 목록을 포함한 공통 상위 프레임에는 절대로 접근하지 않는다.
+function top100ExclusiveCloseRoot(componentName, targetNode) {
+  const guardName = componentName === "WorldServerTheaterPanel"
+    ? "WorldServerListPanel" : "WorldServerTheaterPanel";
+  const guardNode = getActiveComponent(guardName)?.node || null;
+  let result = targetNode;
+  let frame = null;
+  let n = targetNode;
+  for (let depth = 0; n && depth <= 8; depth++, n = n.parent) {
+    if (n !== targetNode && guardNode && top100NodeWithin(guardNode, n)) break;
+    result = n;
+    if (/^UIFrame(Screen|None|Popup|Normal)?$/i.test(String(n.name || ""))) {
+      frame = n;
+      break;
     }
   }
-  handlers.sort((a, b) => b.score - a.score || b.depth - a.depth);
-  return { componentName, target, modalFramePath: nodePathText(modalFrame, 12), methods, handlers };
+  return { node: frame || result, guardName, dedicatedFrame: !!frame,
+    path: nodePathText(frame || result, 12) };
+}
+
+function top100CloseButtonIdentity(row) {
+  const name = normalizeCommandName(row.name);
+  const text = normalizeCommandName(row.text);
+  const childNames = (row.node?.children || [])
+    .map(child => normalizeCommandName(child?.name || "")).join(" ");
+  const explicitName = /^(btn)?(back|close|return|exit|goback)(btn|button)?$|^(iconcrossback|crossback|iconback|backicon|btnclose|closebtn|btnback|backbtn|iconcrossclose)$/i
+    .test(name) || /(?:cross.?back|icon.?back|close.?btn|back.?btn|btn.?close|btn.?back)/.test(name);
+  const descendantHint = /(?:cross.?back|icon.?back|close.?btn|back.?btn|btn.?close|btn.?back)/.test(childNames);
+  const textHint = /关闭|返回|닫기|뒤로|close|back/.test(text);
+  const genericBlocked = /mask|block|background|bgclick|blank|outside|worldmapbtn/.test(name);
+  return {
+    exact: !genericBlocked && explicitName,
+    visible: !genericBlocked && (explicitName || descendantHint || textHint),
+    name, childNames
+  };
+}
+
+function top100CloseMethodName(name) {
+  return /^(onclickclose|onbtnclose|oncloseclick|onclickbtnclose|onclosebtnclick|onclose|onclickback|onbtnback|onbackclick|onclickbtnback|onback|close|closepanel|closeview|closewindow|closeself|goback|back)$/
+    .test(normalizeCommandName(name));
+}
+
+function collectPanelCloseCommands(componentName) {
+  const target = getActiveComponent(componentName);
+  if (!target?.node) return {componentName, target:null, methods:[], handlers:[], buttons:[]};
+  const scope = top100ExclusiveCloseRoot(componentName, target.node);
+  const methods = componentMethodNames(target)
+    .filter(name => top100CloseMethodName(name) && Number(target[name]?.length ?? 999) === 0)
+    .map(methodName => ({
+      component: target, componentClassName: componentName, node: target.node,
+      depth: 0, methodName, argCount:0,
+      score: closeCommandScore(methodName, componentName, ""),
+      path:nodePathText(target.node,12)
+    }))
+    .sort((a,b) => b.score - a.score);
+
+  const handlers = [];
+  const buttons = [];
+  for (const row of buttonsInsideNode(scope.node)) {
+    const identity = top100CloseButtonIdentity(row);
+    const allEvents = row.button?.clickEvents || [];
+    const matchedHandlers = [];
+    for (const handler of allEvents) {
+      const resolved = resolveEventHandlerTarget(handler);
+      // 대상 팝업 전용 프레임 내부에 연결된 핸들러만 허용한다.
+      if (!resolved.component || !resolved.targetNode ||
+          !top100NodeWithin(resolved.targetNode, scope.node)) continue;
+      const byHandler = top100CloseMethodName(resolved.handlerName);
+      if (!identity.visible && !byHandler) continue;
+      matchedHandlers.push({handler, resolved});
+    }
+    // 명시적인 닫기 버튼이라도 다른 UI를 가리키는 클릭 핸들러가 있다면 배제한다.
+    if (!matchedHandlers.length && allEvents.length) continue;
+    if (!matchedHandlers.length && !identity.visible) continue;
+    const score = (identity.exact ? 30000 : identity.visible ? 20000 : 10000) +
+      (matchedHandlers.some(h => top100CloseMethodName(h.resolved.handlerName)) ? 4000 : 0) -
+      Math.min(row.depth, 20);
+    const candidate = {
+      node:row.node, button:row.button, buttonName:row.name,
+      descriptor:row.descriptor, score, depth:row.depth,
+      resolvedHandlers:matchedHandlers, identity,
+      path:nodePathText(row.node,12)
+    };
+    buttons.push(candidate);
+    for (const pair of matchedHandlers) handlers.push({
+      handler:pair.handler, resolved:pair.resolved,
+      buttonNode:row.node, buttonName:row.name,
+      descriptor:row.descriptor, score, depth:row.depth
+    });
+  }
+  buttons.sort((a,b) => b.score - a.score || b.depth - a.depth);
+  handlers.sort((a,b) => b.score - a.score || b.depth - a.depth);
+  return {componentName, target, scope, methods, handlers, buttons,
+    modalFramePath:scope.path};
 }
 
 function inspectPanelCloseCommands(componentName) {const result = collectPanelCloseCommands(componentName);
@@ -29944,6 +30197,11 @@ console.table(
   }))
 );
 
+console.table((result.buttons || []).slice(0, 30).map((row, index) => ({
+  index, score:row.score, name:row.buttonName,
+  handlers:row.resolvedHandlers.map(h=>h.resolved.handlerName).join(", "),
+  path:row.path
+})));
 return result;
 
 }
@@ -29962,57 +30220,100 @@ async function invokeCloseMethodCandidate(candidate, componentName, settings) {
   return { ok: verified.ok, method: "scoped-component-method", methodName: candidate.methodName, verified };
 }
 
+// 상위 프레임의 범용 close()를 호출하지 않으며, 하나의 팝업에 한 번만 닫기 동작을 수행한다.
 async function closePanelByCommand(componentName, options = {}) {
   const settings = getSettings(options);
   throwIfStopped();
+  const guardName = componentName === "WorldServerTheaterPanel"
+    ? "WorldServerListPanel" : "WorldServerTheaterPanel";
+  if (!componentIsActive(guardName)) {
+    diagnoseTop100Ui(`${componentName}-guard-missing-before-close`);
+    throw top100UiFatal(`${componentName}: ${guardName}가 활성화되지 않아 닫지 않습니다.`);
+  }
   if (!componentIsActive(componentName)) {
-    // 기존 팝업이 사라졌다는 사실만으로 뒤 화면이 정상이라는 의미는 아니다.
-    const verified = await verifyTop100Close(componentName, 500);
-    if (!verified.ok) {
-      diagnoseTop100Ui(`${componentName}-already-inactive-but-guard-missing`);
-      throw top100UiFatal(`${componentName} 비활성 상태이나 복귀 화면이 확인되지 않았습니다.`);
-    }
-    return { ok: true, alreadyClosed: true, verified };
+    const verified = await verifyTop100Close(componentName, 700);
+    if (verified.ok) return {ok:true, alreadyClosed:true, verified};
+    throw top100UiFatal(`${componentName}: 닫혀 있지만 ${guardName} 복귀 실패`);
   }
+
   const commands = collectPanelCloseCommands(componentName);
-  pushLog(`${componentName} 안전 닫기 후보`, {
-    modalFramePath: commands.modalFramePath,
-    methods: commands.methods.map(x => `${x.componentClassName}.${x.methodName}/${x.argCount}`),
-    handlers: commands.handlers.map(x => `${x.resolved.componentName}.${x.resolved.handlerName}`)
+  const buttons = commands.buttons;
+  const methods = commands.methods;
+  const targetMethods = methods.filter(x => top100CloseMethodName(x.methodName));
+  // 이벤트가 명확히 연결된 버튼 > 이벤트 이름이 명확한 대상 메서드 > 대상 자체 close()
+  // 모든 후보는 대상의 전용 범위에서만 수집된다.
+  let choice = null;
+  if (buttons.length) {
+    const first = buttons[0];
+    // 두 버튼의 의미가 구별되지 않으면 위험한 임의 선택을 금지한다.
+    const ambiguous = buttons.length > 1 &&
+      Math.abs(first.score - buttons[1].score) < 2 &&
+      first.identity.exact === buttons[1].identity.exact;
+    if (!ambiguous) choice = {type:"button", candidate:first};
+  }
+  if (!choice) {
+    const named = targetMethods.find(x => !/^(close|back|closepanel|closeview|closewindow|closeself)$/.test(normalizeCommandName(x.methodName)));
+    const direct = targetMethods.find(x => /^(close|closepanel|closeview|closewindow|closeself|back)$/.test(normalizeCommandName(x.methodName)));
+    if (named || direct) choice = {type:"target-method", candidate:named || direct};
+  }
+  pushLog(`${componentName} 범위 한정 닫기 선정`, {
+    scope:commands.scope?.path, dedicatedFrame:commands.scope?.dedicatedFrame,
+    buttons:buttons.slice(0,8).map(b=>({name:b.buttonName, score:b.score, path:b.path,
+      handlers:b.resolvedHandlers.map(h=>h.resolved.handlerName)})),
+    methods:targetMethods.map(x=>x.methodName),
+    selected:choice?.type === "button" ? choice.candidate.buttonName : choice?.candidate.methodName || null,
+    before:top100UiStatus()
   });
-  for (const candidate of commands.methods) {
-    throwIfStopped();
-    const result = await invokeCloseMethodCandidate(candidate, componentName, settings);
-    pushLog(`${componentName} 대상 메서드 닫기 시도`, {
-      component: candidate.componentClassName, method: candidate.methodName, result
-    });
-    if (result.ok) return result;
-    // 대상이 닫혔지만 보호 화면이 없어진 경우 절대 추가로 닫기 명령을 누르지 않는다.
-    if (!componentIsActive(componentName) ||
-        (componentName !== "WorldServerTheaterPanel" && !componentIsActive("WorldServerTheaterPanel"))) {
-      diagnoseTop100Ui(`${componentName}-unsafe-close-result`);
-      throw top100UiFatal(`${componentName} 종료 직후 보호할 화면이 사라졌습니다.`);
+  if (!choice) {
+    diagnoseTop100Ui(`${componentName}-no-scoped-close-action`);
+    throw top100UiFatal(`${componentName}: 팝업 전용 닫기 버튼/메서드를 찾지 못했습니다. 진단 로그를 확인해주세요.`);
+  }
+
+  let invocation;
+  if (choice.type === "button") {
+    const b = choice.candidate;
+    try {
+      // 실제 Cocos 버튼의 등록된 핸들러를 원래 순서대로 한 번 실행한다.
+      if (b.resolvedHandlers.length) {
+        const events = b.resolvedHandlers.map(h=>h.handler);
+        if (typeof window.cc?.Component?.EventHandler?.emitEvents === "function") {
+          window.cc.Component.EventHandler.emitEvents(events, b.button);
+          invocation = {ok:true, method:"cocos-button-click-events"};
+        } else {
+          for (const h of b.resolvedHandlers) {
+            const result = invokeCloseEventHandler(h.handler);
+            if (!result.ok) throw new Error(result.reason || "닫기 버튼 핸들러 실행 실패");
+          }
+          invocation = {ok:true,method:"cocos-button-handler"};
+        }
+      } else {
+        // clickEvents가 없고 닫기 전용 버튼으로 식별된 경우 노드 클릭 이벤트만 전달한다.
+        b.node.emit("click", b.button);
+        invocation = {ok:true,method:"cocos-button-node-click"};
+      }
+    } catch(error) {
+      invocation = {ok:false,error:error?.message || String(error)};
+    }
+  } else {
+    const m = choice.candidate;
+    try {
+      // UIFrameScreen.close()가 아닌 WorldServerPowerRank.close() 등을 호출한다.
+      m.component[m.methodName].call(m.component);
+      invocation = {ok:true,method:`${componentName}.${m.methodName}`};
+    } catch(error) {
+      invocation = {ok:false,error:error?.message || String(error)};
     }
   }
-  for (const candidate of commands.handlers) {
-    throwIfStopped();
-    const invoked = invokeCloseEventHandler(candidate.handler);
-    pushLog(`${componentName} 범위 내 닫기 핸들러 시도`, {
-      button: candidate.buttonName,
-      handler: `${candidate.resolved.componentName}.${candidate.resolved.handlerName}`,
-      invoked: invoked.ok
-    });
-    if (!invoked.ok) continue;
-    const verified = await verifyTop100Close(componentName, Number(settings.commandCloseVerifyMs ?? 1500));
-    if (verified.ok) return { ok: true, method: invoked.method, buttonName: candidate.buttonName, verified };
-    if (!componentIsActive(componentName) ||
-        (componentName !== "WorldServerTheaterPanel" && !componentIsActive("WorldServerTheaterPanel"))) {
-      diagnoseTop100Ui(`${componentName}-unsafe-handler-result`);
-      throw top100UiFatal(`${componentName} 종료 후 복귀 화면이 사라졌습니다.`);
-    }
+  if (!invocation.ok) {
+    diagnoseTop100Ui(`${componentName}-close-call-failed`);
+    throw top100UiFatal(`${componentName}: ${invocation.error}. 추가 닫기는 수행하지 않습니다.`);
   }
-  diagnoseTop100Ui(`${componentName}-no-safe-close-command`);
-  throw top100UiFatal(`${componentName}를 안전하게 닫지 못했습니다. 상위 UIFrame 닫기 명령은 실행하지 않았습니다.`);
+  const verified = await verifyTop100Close(componentName, Math.max(2000,Number(settings.commandCloseVerifyMs ?? 2500)));
+  if (!verified.ok) {
+    diagnoseTop100Ui(`${componentName}-close-verification-failed`);
+    throw top100UiFatal(`${componentName}: 닫기 이후 ${guardName} 복귀가 확인되지 않아 중지했습니다.`);
+  }
+  return {ok:true, method:invocation.method, guardName, verified};
 }
 
 async function closePanelSemantic(componentName, options = {}) {
@@ -30643,6 +30944,18 @@ return score;
 
 }
 
+// Top100: 이름만 click인 범용 핸들러(onMaskNodeClick 등)는 랭킹 열기 명령이 아니다.
+function top100IsSpecificRankOpenCommand(kind, methodName, descriptor = "") {
+  const method = normalizeCommandName(methodName);
+  const context = normalizeCommandName(`${methodName} ${descriptor}`);
+  if (!method || /mask|back|close|hide|exit|quit|cancel|destroy|remove|refresh|update|reset|init|start|drag|touch/.test(method)) return false;
+  const targetWords = kind === "alliance"
+    ? /alliance|guild|league|clan|union|동맹|길드|연맹/
+    : /personal|player|user|role|individual|person|개인|유저/;
+  if (!targetWords.test(context)) return false;
+  return /open|show|enter|click|select|rank|power|list|view/.test(method);
+}
+
 function collectRankOpenCommands(kind) {const theater = getActiveComponent("WorldServerTheaterPanel");
 
 if (!theater?.node) {
@@ -30674,7 +30987,10 @@ for (const row of componentRows) {
       context
     );
 
-    if (score <= 0) continue;
+    // 힌트가 없는 click 메서드 및 인자가 필요한 메서드의 추측 호출을 금지한다.
+    if (score <= 0 ||
+        Number(row.component?.[methodName]?.length ?? 0) !== 0 ||
+        !top100IsSpecificRankOpenCommand(kind, methodName)) continue;
 
     methods.push({
       component: row.component,
@@ -30715,7 +31031,9 @@ for (const buttonRow of buttonsInsideNode(theater.node)) {
       context
     );
 
-    if (score <= 0) continue;
+    if (score <= 0 ||
+        !top100IsSpecificRankOpenCommand(kind, resolved.handlerName, buttonRow.descriptor) ||
+        !top100NodeWithin(resolved.targetNode, theater.node)) continue;
 
     handlers.push({
       handler,
@@ -30780,15 +31098,11 @@ if (typeof fn !== "function") {
   };
 }
 
-const argSets = candidate.argCount <= 0
-  ? [[]]
-  : [
-      [null],
-      [candidate.component],
-      [0],
-      [1],
-      [null, null]
-    ];
+// 임의의 인수(null, 0, 1 등)로 게임 핸들러를 추측 호출하지 않는다.
+if (candidate.argCount !== 0) {
+  return { ok: false, reason: "rank-open-requires-arguments" };
+}
+const argSets = [[]];
 
 for (const args of argSets) {
   try {
@@ -30801,7 +31115,7 @@ for (const args of argSets) {
     Number(settings.rankCommandVerifyMs ?? 1000)
   );
   if (!componentIsActive("WorldServerTheaterPanel")) {
-    throw top100UiFatal(`랭킹 ${kind} 핸들러로 인해 Theater가 사라졌습니다.`);
+    throw top100UiFatal(`랭킹 열기(${expectedComponent}) 후 Theater가 사라졌습니다.`);
   }
 
   if (detected.componentName === expectedComponent) {
@@ -30817,13 +31131,8 @@ for (const args of argSets) {
   }
 
   if (detected.componentName === wrongComponent) {
-    await closePanelByCommand(
-      wrongComponent,
-      settings
-    );
-    await sleep(
-      Number(settings.wrongRankRetryDelayMs ?? 250)
-    );
+    diagnoseTop100Ui(`wrong-rank-opened-${wrongComponent}`);
+    throw top100UiFatal(`원하지 않은 랭킹(${wrongComponent})이 열렸습니다. 자동 추가 닫기를 중지합니다.`);
   }
 }
 
@@ -30848,10 +31157,8 @@ if (componentIsActive(expectedComponent)) {
 }
 
 if (componentIsActive(wrongComponent)) {
-  await closePanelByCommand(
-    wrongComponent,
-    settings
-  );
+  diagnoseTop100Ui(`unexpected-rank-before-open-${wrongComponent}`);
+  throw top100UiFatal(`랭킹 열기 전에 ${wrongComponent}가 남아 있습니다. 자동 닫기를 금지합니다.`);
 }
 
 const commands = collectRankOpenCommands(kind);
@@ -30934,13 +31241,8 @@ for (const candidate of commands.handlers) {
   }
 
   if (detected.componentName === wrongComponent) {
-    await closePanelByCommand(
-      wrongComponent,
-      settings
-    );
-    await sleep(
-      Number(settings.wrongRankRetryDelayMs ?? 250)
-    );
+    diagnoseTop100Ui(`wrong-rank-handler-${wrongComponent}`);
+    throw top100UiFatal(`랭킹 버튼이 ${wrongComponent}를 열었습니다. 자동 추가 닫기 중단.`);
   }
 }
 
@@ -30978,18 +31280,10 @@ if (!personal) {
 
 const attempts = rankPointAttempts(kind);
 
-if (componentIsActive("WorldServerPowerRank")) {
-  await closePanelByCommand(
-    "WorldServerPowerRank",
-    settings
-  );
-}
-
-if (componentIsActive("WorldServerAlliancePowerRank")) {
-  await closePanelByCommand(
-    "WorldServerAlliancePowerRank",
-    settings
-  );
+if (componentIsActive("WorldServerPowerRank") ||
+    componentIsActive("WorldServerAlliancePowerRank")) {
+  diagnoseTop100Ui(`rank-still-open-before-${kind}`);
+  throw top100UiFatal(`랭킹(${kind}) 진입 전 다른 랭킹이 남아 있습니다. 중복 닫기 없이 중단합니다.`);
 }
 
 for (let index = 0; index < attempts.length; index++) {
@@ -31034,14 +31328,8 @@ for (let index = 0; index < attempts.length; index++) {
   }
 
   if (detected.componentName === wrongComponent) {
-    await closePanelByCommand(
-      wrongComponent,
-      settings
-    );
-    await sleep(
-      Number(settings.wrongRankRetryDelayMs ?? 350)
-    );
-    continue;
+    diagnoseTop100Ui(`wrong-rank-coordinate-${wrongComponent}`);
+    throw top100UiFatal(`좌표 클릭이 ${wrongComponent}를 열었습니다. 추가 닫기·재클릭을 차단합니다.`);
   }
 
   await sleep(
@@ -31130,22 +31418,10 @@ return {
 }
 
 async function recoverTop100UiAfterFailure() {
-  const actions = [];
-  if (loopRuntime.stopRequested || activeAbortSignal()?.aborted) {
-    return { ok: false, skipped: "stop-requested" };
-  }
-  try {
-    // 안전하게 복구 가능한, 현재 활성화된 팝업만 순서대로 종료한다.
-    for (const name of ["WorldServerPowerRank", "WorldServerAlliancePowerRank", "WorldServerTheaterPanel"]) {
-      if (componentIsActive(name)) {
-        const result = await closePanelByCommand(name, { commandCloseVerifyMs: 1400 });
-        actions.push({ name, method: result.method || "already-closed" });
-      }
-    }
-  } catch (error) {
-    return { ok: false, actions, error: error?.message || String(error) };
-  }
-  return { ok: isServerListPanelActive(), actions };
+  // 조사 실패 후 기존 finally에서 랭킹+Theater를 연쇄적으로 닫으면 상위 프레임까지
+  // 소멸하거나 게임의 입력 방어막만 남는 경우가 있다. 자동 닫기를 절대 하지 않는다.
+  const snapshot = diagnoseTop100Ui("survey-failed-no-automatic-close");
+  return { ok: false, skipped: "automatic-close-disabled", snapshot };
 }
 
 async function collectByClick(serverId, options = {}) {
@@ -31202,11 +31478,8 @@ async function collectByClick(serverId, options = {}) {
   } finally {
     if (!completed && caught && !isStopError(caught) && !loopRuntime.stopRequested && !activeAbortSignal()?.aborted) {
       const recovery = await recoverTop100UiAfterFailure();
-      pushLog(`${serverId} 실패 후 제한적 UI 복구`, recovery);
-      if (!recovery.ok) {
-        caught.top100UiUnsafe = true;
-        diagnoseTop100Ui(`survey-${serverId}-unsafe-ui`);
-      }
+      pushLog(`${serverId} 조사 실패 - UI 추가 닫기 없이 중단`, recovery);
+      caught.top100UiUnsafe = true;
     }
   }
 }
@@ -33744,6 +34017,8 @@ const promise = (async () => {
   let cycleNumber = 0;
 
   async function ensureTop100WorldMapReady(phase, cycleNo) {
+    let failedAttempts = 0;
+    const maxFailures = Math.max(1, Number(settings.top100NavigationMaxFailures ?? 3));
     while (!loopRuntime.stopRequested && !controller.signal.aborted) {
       throwIfStopped();
       try {
@@ -33758,6 +34033,11 @@ const promise = (async () => {
           error?.message || String(error)
         );
         updateProgress({ phase: `${phase}-retry-waiting` });
+        failedAttempts++;
+        if (failedAttempts >= maxFailures) {
+          diagnoseTop100Ui(`world-map-restore-failed-${cycleNo}`);
+          throw top100UiFatal(`Top100 WORLD_MAP 준비 ${failedAttempts}회 실패: ${error?.message || error}. 자동 복구를 중단합니다.`);
+        }
         await sleep(Number(settings.loopDelayMs ?? 3000));
       }
     }
@@ -34461,7 +34741,7 @@ applyPanelVisibility();
 }
 function renderPanelSafe() {try {renderPanel();} catch {}}
 
-const api = {version: "4.6.2-top100-ui-guard",independent: false,
+const api = {version: "4.6.4-top100-server-entry-diagnostic",independent: false,
 
 configure,
 promptConfigure,
@@ -34519,6 +34799,7 @@ collectPanelCloseCommands,
 inspectPanelCloseCommands,
 closePanelByCommand,
 diagnoseTop100Ui,
+inspectTop100ServerEntry,
 top100UiStatus,
 collectRankOpenCommands,
 inspectRankOpenCommands,
@@ -34599,6 +34880,18 @@ togglePanelVisibility
 };
 
 window[API_NAME] = api;
+try {
+  const last = readLocal(STATE_KEY, {});
+  if (last.running === true) {
+    writeLocal(STATE_KEY, {
+      ...last, running: false, mode: "idle", updatedAt: nowIso(),
+      progress: { ...last.progress, phase: "reload-interrupted" }
+    });
+    console.warn("[REALPOWER] 새 페이지에서 이전 Top100 running 상태를 정리했습니다. 조사 데이터는 보존합니다.");
+  }
+} catch (error) {
+  console.warn("[REALPOWER] reload 상태 복구 실패", error);
+}
 migrateLegacyRealPowerToken();
 
 function bootRealPowerUi() {
@@ -35192,6 +35485,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
   const STATUS_ID = "tw26-realpower-status";
   const RESET_BUTTON_ID = "tw26-realpower-reset";
   const UPLOAD_BUTTON_ID = "tw26-realpower-upload";
+  const RECOVERY_STOP_BUTTON_ID = "tw26-realpower-recovery-stop";
 
   function rp() { return window.REALPOWER || null; }
   function topwar() { return window.TOPWAR || null; }
@@ -35236,6 +35530,28 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     const normalized = ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
     // 실제 서버 목록은 각 Top100 사이클 시작 시 WORLD_MAP으로 이동해 시즌 목록과 함께 새로 읽는다.
     return { mode: normalized, serverIds: [] };
+  }
+
+  function stopTop100AndClearRecovery() {
+    try { rp()?.stopInfiniteLoop?.(); } catch (error) {
+      console.warn("[REALPOWER] Top100 중지 실패", error);
+    }
+    try { window.TOPWAR_RECOVERY?.clear?.("top100-user-recovery-stop"); } catch (error) {
+      console.warn("[REALPOWER] 자동복구 초기화 실패", error);
+    }
+    try {
+      const current = JSON.parse(localStorage.getItem("REALPOWER_STANDALONE_STATE") || "{}");
+      localStorage.setItem("REALPOWER_STANDALONE_STATE", JSON.stringify({
+        ...current,
+        running: false,
+        mode: "idle",
+        progress: { ...current.progress, phase: "manual-recovery-stop" }
+      }));
+    } catch (error) {
+      console.warn("[REALPOWER] 저장된 실행 상태 초기화 실패", error);
+    }
+    console.warn("[REALPOWER] Top100 실행 및 자동 재개 예약 해제 (조사 큐·IndexedDB 보존)");
+    update();
   }
 
   async function startOrStop() {
@@ -35311,6 +35627,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     api.resetAndStartAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
       if (!api.isStopError?.(error)) {
+        window.TOPWAR_RECOVERY?.clear?.("top100-reset-start-error");
         console.error("[REALPOWER Unified UI] 초기화 후 시작 실패:", error);
         alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
       }
@@ -35432,6 +35749,20 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
           void uploadNow();
         });
         advancedGrid.appendChild(upload);
+      }
+      if (!document.getElementById(RECOVERY_STOP_BUTTON_ID)) {
+        const stop = document.createElement("button");
+        stop.id = RECOVERY_STOP_BUTTON_ID;
+        stop.type = "button";
+        stop.textContent = "Top100 강제 중지·복구 해제";
+        stop.title = "Top100만 중지하고 자동 재개 예약을 제거합니다. 조사 큐·수집 데이터는 유지됩니다.";
+        stop.style.cssText = "height:29px;border:0;border-radius:6px;background:#5a3030;color:#fff;font-size:11px;cursor:pointer;";
+        stop.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          stopTop100AndClearRecovery();
+        });
+        advancedGrid.appendChild(stop);
       }
     }
 
