@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TopWar Cross PVP TOP100 Standalone UI
 // @namespace    topwar-cross100-standalone
-// @version      1.2.1
-// @description  독립 UI에서 크로스 PVP TOP100 조사 실행 및 진행상태 표시
+// @version      1.3.0
+// @description  접이식 미니 UI + 종료 시 로컬 조사 결과 메모리 정리
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -24,8 +24,76 @@
     // 같은 코드를 다시 붙여넣어도 패널과 갱신 타이머가 중복되지 않는다.
     window[APP_ID]?.destroy?.();
 
+    // 이전 인스턴스의 비동기 작업이 새 인스턴스 데이터를 지우지 않도록 구분한다.
+    const OWNER_KEY = "__CROSS100_UI_OWNER";
+    const RUN_OWNER_KEY = "__CROSS100_RUN_OWNER";
+    const owner = Symbol("cross100-ui-owner");
+    window[OWNER_KEY] = owner;
+
     let renderTimer = null;
     let runPromise = null;
+    let activeState = null;
+    let activeUploadController = null;
+    let minimized = true;   // 기본: 화면을 가리지 않는 미니 상태 바
+    let exitRequested = false;
+
+    function ownsSession() {
+        return window[OWNER_KEY] === owner;
+    }
+
+    function clearCollectedData() {
+        // 수집 결과만 제거. DataHub 접속 설정(localStorage)은 유지한다.
+        if (activeState) {
+            if (Array.isArray(activeState.results)) activeState.results.length = 0;
+            if (Array.isArray(activeState.errors)) activeState.errors.length = 0;
+            activeState.githubUpload = null;
+            activeState.completed = 0;
+            activeState.attempted = 0;
+            activeState.currentRank = null;
+            activeState.finishedAt = null;
+            activeState.startedAt = null;
+            activeState.reason = "";
+            activeState.phase = "종료";
+        }
+
+        // 이미 재주입된 새 인스턴스의 전역 변수는 건드리지 않는다.
+        if (!ownsSession()) return;
+        for (const key of [
+            "CROSS100_STATE", "CROSS100_MAPPED",
+            "CROSS100_LIST", "CROSS100_SHOW", "CROSS100_STOP",
+            "CROSS100_DOWNLOAD_JSON", "CROSS100_DOWNLOAD_SHEET"
+        ]) {
+            delete window[key];
+        }
+    }
+
+    function destroyApp() {
+        if (exitRequested) return;
+        exitRequested = true;
+
+        if (window.__CROSS100_RUNNING && ownsSession()) {
+            // 현재 조사를 멈춘 뒤 종료 후에도 다시 데이터가 생기지 않도록 처리한다.
+            window.CROSS100_STOP?.();
+            activeUploadController?.abort();
+        }
+
+        if (renderTimer !== null) {
+            clearInterval(renderTimer);
+            renderTimer = null;
+        }
+        document.getElementById(PANEL_ID)?.remove();
+        document.getElementById(STYLE_ID)?.remove();
+        clearCollectedData();
+
+        if (ownsSession()) {
+            delete window[APP_ID];
+            if (!window.__CROSS100_RUNNING) {
+                delete window.__CROSS100_RUNNING;
+                delete window[OWNER_KEY];
+            }
+        }
+        // 조사 중 종료했다면 runCross100()의 finally에서 다시 정리한다.
+    }
 
     function requireDataHubSettings() {
         let saved = {};
@@ -71,93 +139,104 @@
         const style = document.createElement("style");
         style.id = STYLE_ID;
         style.textContent = `
-            #${PANEL_ID}{position:fixed;right:18px;top:50%;transform:translateY(-50%);z-index:2147483600;width:300px;box-sizing:border-box;padding:16px;border:1px solid rgba(148,163,184,.34);border-radius:14px;background:rgba(15,23,42,.96);box-shadow:0 18px 55px rgba(0,0,0,.48);color:#e2e8f0;font-family:Arial,sans-serif;user-select:none}
-            #${PANEL_ID} .c100-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:13px}
-            #${PANEL_ID} .c100-title{font-size:15px;font-weight:800;color:#f8fafc}
-            #${PANEL_ID} .c100-badge{padding:4px 8px;border-radius:999px;background:#334155;color:#cbd5e1;font-size:11px;font-weight:700}
-            #${PANEL_ID} .c100-phase{min-height:34px;margin-bottom:10px;font-size:13px;line-height:1.45;color:#cbd5e1;overflow-wrap:anywhere}
-            #${PANEL_ID} .c100-track{height:9px;overflow:hidden;border-radius:999px;background:#334155}
+            #${PANEL_ID}{position:fixed;right:10px;top:12px;z-index:2147483600;width:232px;max-width:calc(100vw - 20px);box-sizing:border-box;padding:9px;border:1px solid rgba(148,163,184,.4);border-radius:10px;background:rgba(15,23,42,.94);box-shadow:0 6px 20px rgba(0,0,0,.34);color:#e2e8f0;font-family:Arial,sans-serif;user-select:none;font-size:12px}
+            #${PANEL_ID}.c100-min{width:181px;padding:6px 8px;border-radius:9px}
+            #${PANEL_ID} .c100-head{display:flex;align-items:center;gap:5px;min-height:24px}
+            #${PANEL_ID} .c100-title{flex:1;min-width:0;white-space:nowrap;font-size:12px;font-weight:700;color:#f8fafc}
+            #${PANEL_ID} .c100-count-mini{font-size:11px;color:#93c5fd;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+            #${PANEL_ID} .c100-tools{display:flex;align-items:center;gap:3px}
+            #${PANEL_ID} .c100-tools button{width:22px;height:22px;padding:0;font-size:14px;background:rgba(71,85,105,.65);border-radius:5px}
+            #${PANEL_ID} .c100-tools .c100-close{background:rgba(153,27,27,.8)}
+            #${PANEL_ID} .c100-content{margin-top:7px}
+            #${PANEL_ID}.c100-min .c100-content{display:none}
+            #${PANEL_ID} .c100-phase{font-size:11px;line-height:1.4;color:#cbd5e1;overflow-wrap:anywhere;margin-bottom:7px}
+            #${PANEL_ID} .c100-track{height:5px;overflow:hidden;border-radius:999px;background:#334155}
             #${PANEL_ID} .c100-fill{height:100%;width:0;background:linear-gradient(90deg,#2563eb,#38bdf8);transition:width .2s ease}
-            #${PANEL_ID} .c100-count{display:flex;justify-content:space-between;margin:8px 0 12px;font-size:12px;color:#94a3b8}
-            #${PANEL_ID} .c100-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:12px}
-            #${PANEL_ID} .c100-stat{padding:8px;border-radius:8px;background:rgba(51,65,85,.55)}
-            #${PANEL_ID} .c100-stat small{display:block;margin-bottom:3px;color:#94a3b8;font-size:10px}
-            #${PANEL_ID} .c100-stat strong{font-size:13px;color:#f1f5f9}
-            #${PANEL_ID} .c100-error{display:none;max-height:76px;overflow:auto;margin-bottom:10px;padding:8px;border-radius:8px;background:rgba(127,29,29,.34);color:#fecaca;font-size:11px;line-height:1.4;white-space:pre-wrap;overflow-wrap:anywhere}
-            #${PANEL_ID} .c100-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-            #${PANEL_ID} .c100-done-actions{display:none;grid-template-columns:1fr;gap:8px}
-            #${PANEL_ID} button{height:36px;border:0;border-radius:9px;color:#fff;font-size:12px;font-weight:800;cursor:pointer}
+            #${PANEL_ID} .c100-count{display:flex;justify-content:space-between;margin:5px 0 9px;color:#94a3b8;font-size:11px}
+            #${PANEL_ID} .c100-stats{display:flex;justify-content:space-between;gap:4px;margin-bottom:9px;color:#94a3b8;font-size:10px}
+            #${PANEL_ID} .c100-stats strong{font-size:11px;color:#f1f5f9}
+            #${PANEL_ID} .c100-error{display:none;max-height:60px;overflow:auto;margin-bottom:8px;padding:5px;border-radius:5px;background:rgba(127,29,29,.34);color:#fecaca;font-size:10px;white-space:pre-wrap;overflow-wrap:anywhere}
+            #${PANEL_ID} .c100-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+            #${PANEL_ID} .c100-done-actions{display:none;grid-template-columns:1fr 1fr;gap:6px}
+            #${PANEL_ID} button{height:29px;border:0;border-radius:6px;color:#fff;font-size:11px;font-weight:700;cursor:pointer}
             #${PANEL_ID} button:disabled{cursor:not-allowed;opacity:.5}
             #${PANEL_ID} .c100-start{background:#2563eb}
             #${PANEL_ID} .c100-stop{background:#b91c1c}
             #${PANEL_ID} .c100-sheet{background:#15803d}
             #${PANEL_ID} .c100-json{background:#2563eb}
-            #${PANEL_ID} .c100-exit{background:#475569}
         `;
         document.head.appendChild(style);
     }
 
     function installPanel() {
+        if (exitRequested || !ownsSession()) return;
         installStyle();
         document.getElementById(PANEL_ID)?.remove();
 
         const panel = document.createElement("section");
         panel.id = PANEL_ID;
+        panel.classList.toggle("c100-min", minimized);
         panel.innerHTML = `
-            <div class="c100-head"><div class="c100-title">크로스 TOP100 조사</div><div class="c100-badge">대기</div></div>
-            <div class="c100-phase">게임이 준비되면 시작을 누르세요.</div>
-            <div class="c100-track"><div class="c100-fill"></div></div>
-            <div class="c100-count"><span class="c100-percent">0%</span><span class="c100-completed">0 / 100</span></div>
-            <div class="c100-grid">
-                <div class="c100-stat"><small>현재 순위</small><strong class="c100-rank">-</strong></div>
-                <div class="c100-stat"><small>경과 시간</small><strong class="c100-time">00:00</strong></div>
-                <div class="c100-stat"><small>시도</small><strong class="c100-attempted">0</strong></div>
-                <div class="c100-stat"><small>오류</small><strong class="c100-errors">0</strong></div>
+            <div class="c100-head">
+                <span class="c100-title">Cross TOP100</span>
+                <span class="c100-count-mini">0/100</span>
+                <span class="c100-tools">
+                    <button type="button" class="c100-toggle" title="상세 보기" aria-label="상세 보기" aria-expanded="false">▾</button>
+                    <button type="button" class="c100-close" title="종료 및 수집 데이터 삭제" aria-label="종료 및 수집 데이터 삭제">×</button>
+                </span>
             </div>
-            <div class="c100-error"></div>
-            <div class="c100-actions"><button type="button" class="c100-start">조사 시작</button><button type="button" class="c100-stop" disabled>중지</button></div>
-            <div class="c100-done-actions">
-                <button type="button" class="c100-sheet">구글 스프레드시트용 다운받기</button>
-                <button type="button" class="c100-json">JSON 다운받기</button>
-                <button type="button" class="c100-exit">종료하기</button>
+            <div class="c100-content">
+                <div class="c100-phase">게임이 준비되면 조사를 시작하세요.</div>
+                <div class="c100-track"><div class="c100-fill"></div></div>
+                <div class="c100-count"><span class="c100-percent">0%</span><span class="c100-completed">0 / 100</span></div>
+                <div class="c100-stats">
+                    <span>순위 <strong class="c100-rank">-</strong></span>
+                    <span>시간 <strong class="c100-time">00:00</strong></span>
+                    <span>오류 <strong class="c100-errors">0</strong></span>
+                </div>
+                <div class="c100-error"></div>
+                <div class="c100-actions"><button type="button" class="c100-start">조사 시작</button><button type="button" class="c100-stop" disabled>중지</button></div>
+                <div class="c100-done-actions">
+                    <button type="button" class="c100-sheet">CSV 저장</button>
+                    <button type="button" class="c100-json">JSON 저장</button>
+                </div>
             </div>
         `;
         document.body.appendChild(panel);
 
-        panel.querySelector(".c100-start").addEventListener("click", () => {
-            if (!runPromise && !window.__CROSS100_RUNNING) {
-                runPromise = runCross100()
-                    .catch(error => console.error("[CROSS100 UI] 실행 실패", error))
-                    .finally(() => {
-                        runPromise = null;
-                        renderPanel();
-                    });
-                renderPanel();
-            }
+        panel.querySelector(".c100-toggle").addEventListener("click", () => {
+            minimized = !minimized;
+            renderPanel();
         });
-
+        panel.querySelector(".c100-close").addEventListener("click", destroyApp);
+        panel.querySelector(".c100-start").addEventListener("click", () => {
+            if (exitRequested || runPromise || window.__CROSS100_RUNNING) return;
+            runPromise = runCross100()
+                .catch(error => console.error("[CROSS100 UI] 실행 실패", error))
+                .finally(() => {
+                    runPromise = null;
+                    if (exitRequested) clearCollectedData();
+                    else renderPanel();
+                });
+            renderPanel();
+        });
         panel.querySelector(".c100-stop").addEventListener("click", () => {
             window.CROSS100_STOP?.();
             renderPanel();
         });
-
         panel.querySelector(".c100-sheet").addEventListener("click", () => {
             window.CROSS100_DOWNLOAD_SHEET?.();
         });
-
         panel.querySelector(".c100-json").addEventListener("click", () => {
             window.CROSS100_DOWNLOAD_JSON?.();
         });
 
-        panel.querySelector(".c100-exit").addEventListener("click", () => {
-            window[APP_ID]?.destroy?.();
-        });
-
-        renderTimer = setInterval(renderPanel, 200);
+        renderTimer = setInterval(renderPanel, 250);
         renderPanel();
     }
 
     function renderPanel() {
+        if (exitRequested || !ownsSession()) return;
         const panel = document.getElementById(PANEL_ID);
         if (!panel) return;
 
@@ -168,34 +247,37 @@
         const percent = Math.min(100, Math.max(0, completed / total * 100));
         const error = state.reason || state.errors?.at?.(-1)?.error || "";
 
-        panel.querySelector(".c100-badge").textContent = running ? "실행 중" : state.phase === "완료" ? "완료" : state.phase === "중단" ? "중단" : "대기";
-        panel.querySelector(".c100-badge").style.background = running ? "#166534" : state.phase === "중단" ? "#7f1d1d" : "#334155";
+        panel.classList.toggle("c100-min", minimized);
+        const toggle = panel.querySelector(".c100-toggle");
+        toggle.textContent = minimized ? "▾" : "▴";
+        toggle.title = minimized ? "상세 보기" : "최소화";
+        toggle.setAttribute("aria-label", toggle.title);
+        toggle.setAttribute("aria-expanded", String(!minimized));
+        panel.querySelector(".c100-count-mini").textContent = `${completed}/100`;
+
         panel.querySelector(".c100-phase").textContent =
             !running && state.phase === "완료"
                 ? state.githubUpload?.published
-                    ? "조사 결과가 GitHub에 업로드되었습니다. 원하는 형식으로 결과를 내려받으세요."
-                    : "조사 결과 전송과 GitHub 업로드 예약이 완료되었습니다. 원하는 형식으로 결과를 내려받으세요."
-                : state.phase || "게임이 준비되면 시작을 누르세요.";
+                    ? "업로드 완료 · CSV/JSON 저장 가능"
+                    : "서버 접수 완료 · GitHub 게시 대기"
+                : state.phase || "게임이 준비되면 조사를 시작하세요.";
         panel.querySelector(".c100-fill").style.width = `${percent}%`;
         panel.querySelector(".c100-percent").textContent = `${percent.toFixed(0)}%`;
         panel.querySelector(".c100-completed").textContent = `${completed} / ${total}`;
         panel.querySelector(".c100-rank").textContent = state.currentRank ? `${state.currentRank}위` : "-";
         panel.querySelector(".c100-time").textContent = elapsedText(state.startedAt, state.finishedAt);
-        panel.querySelector(".c100-attempted").textContent = String(state.attempted || 0);
         panel.querySelector(".c100-errors").textContent = String(state.errors?.length || 0);
 
         const errorBox = panel.querySelector(".c100-error");
         errorBox.textContent = error;
-        errorBox.style.display = error ? "block" : "none";
+        errorBox.style.display = error && state.phase === "중단" ? "block" : "none";
 
         panel.querySelector(".c100-start").disabled = running;
-        panel.querySelector(".c100-start").textContent = state.phase === "완료" || state.phase === "중단" ? "다시 조사" : "조사 시작";
+        panel.querySelector(".c100-start").textContent = ["완료", "중단"].includes(state.phase) ? "다시 조사" : "조사 시작";
         panel.querySelector(".c100-stop").disabled = !running || state.stopped === true;
 
-        const completedSuccessfully = !running &&
-            state.phase === "완료" &&
-            completed === total &&
-            state.githubUpload?.accepted === true;
+        const completedSuccessfully = !running && state.phase === "완료" &&
+            completed === total && state.githubUpload?.accepted === true;
         panel.querySelector(".c100-actions").style.display = completedSuccessfully ? "none" : "grid";
         panel.querySelector(".c100-done-actions").style.display = completedSuccessfully ? "grid" : "none";
     }
@@ -218,12 +300,14 @@
         POLL_DELAY: 100
     };
 
+    if (exitRequested || !ownsSession()) return;
     if (window.__CROSS100_RUNNING) {
         console.warn("[CROSS100] 이미 실행 중입니다.");
         return;
     }
 
     window.__CROSS100_RUNNING = true;
+    window[RUN_OWNER_KEY] = owner;
 
     // =========================================================
     // ID MAPPING
@@ -328,7 +412,8 @@
         startedAt: new Date().toISOString()
     };
 
-    window.CROSS100_STATE = state;
+    activeState = state;
+    if (!exitRequested && ownsSession()) window.CROSS100_STATE = state;
 
     // =========================================================
     // CONTROL
@@ -532,6 +617,9 @@
     // =========================================================
 
     function checkState() {
+        if (exitRequested || !ownsSession()) {
+            throw new Error("프로그램 종료로 조사를 중단했습니다.");
+        }
         if (state.stopped) {
             throw new Error(
                 state.reason || "조사 중단"
@@ -1150,6 +1238,7 @@
     }
 
     function buildMappedResults() {
+        if (exitRequested) return [];
         return state.results
             .map(mapResult)
             .sort((a, b) => a.rank - b.rank);
@@ -1266,11 +1355,15 @@
     }
 
     async function uploadRequired(settings) {
+        checkState();
         state.phase = "GitHub 업로드 중";
         renderPanel();
 
         const requestId = crypto.randomUUID?.() ||
             `cross100-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        const controller = new AbortController();
+        activeUploadController = controller;
+        try {
         const response = await fetch(
             `${DATAHUB_BASE_URL}${DATAHUB_ENDPOINT}`,
             {
@@ -1278,6 +1371,7 @@
                 mode: "cors",
                 cache: "no-store",
                 credentials: "omit",
+                signal: controller.signal,
                 headers: {
                     "Accept": "application/json",
                     "Content-Type": "application/json",
@@ -1290,6 +1384,7 @@
         );
 
         const text = await response.text();
+        checkState();
         let body = null;
         try { body = text ? JSON.parse(text) : null; }
         catch { body = { raw: text }; }
@@ -1337,6 +1432,9 @@
             : "GitHub 업로드 예약 완료";
         renderPanel();
         return body;
+        } finally {
+            if (activeUploadController === controller) activeUploadController = null;
+        }
     }
 
     function downloadBlob(content, type, filename) {
@@ -1352,6 +1450,7 @@
     }
 
     function downloadJSON() {
+        if (exitRequested) return;
         const payload = buildDownloadPayload();
 
         const json = JSON.stringify(
@@ -1375,6 +1474,7 @@
     }
 
     function downloadSheet() {
+        if (exitRequested) return;
         const rows = buildMappedResults();
         if (!rows.length) {
             throw new Error("다운로드할 조사 결과가 없습니다.");
@@ -1762,14 +1862,13 @@
                     rank
                 );
 
+                checkState();
                 state.results.push(result);
                 state.completed++;
 
                 log(
                     `[${state.completed}/100]`,
-                    result.username,
-                    formatTP(result.rankingPower),
-                    `병력 ${result.totalArmy}`
+                    `TP ${formatTP(result.rankingPower)}`
                 );
 
             } catch (e) {
@@ -1800,7 +1899,8 @@
             );
         }
 
-        // GitHub 반영이 확인되어야만 전체 조사를 성공으로 처리한다.
+        // 종료/중단 요청이 있으면 서버로 보내지 않는다.
+        checkState();
         await uploadRequired(uploadSettings);
 
         // 자동 조사 창 정리
@@ -1833,39 +1933,48 @@
         state.finishedAt =
             new Date().toISOString();
 
-        window.__CROSS100_RUNNING = false;
-        window.CROSS100_MAPPED =
-            buildMappedResults();
-
-        log("최종 상태:", state);
-
-        if (state.results.length > 0) {
-            console.table(buildTable());
+        uploadSettings = null;
+        // 새 스크립트가 주입된 경우에도 이전 실행의 running 플래그만 정리한다.
+        if (window[RUN_OWNER_KEY] === owner) {
+            window.__CROSS100_RUNNING = false;
+            delete window[RUN_OWNER_KEY];
         }
-
-        // 완료/중단 상태는 별도 모달 없이 고정 UI 패널에 표시한다.
-        renderPanel();
+        if (exitRequested || !ownsSession()) {
+            // 종료 도중 비동기 처리가 마무리돼도 데이터가 다시 남지 않도록 재정리.
+            clearCollectedData();
+            activeState = null;
+            if (ownsSession()) {
+                delete window.__CROSS100_RUNNING;
+                delete window[OWNER_KEY];
+            }
+        } else {
+            window.CROSS100_MAPPED = buildMappedResults();
+            log("조사 종료:", {completed: state.completed, failed: state.errors.length, phase: state.phase});
+            renderPanel();
+        }
     }
     }
 
     window[APP_ID] = Object.freeze({
         start() {
+            if (minimized) { minimized = false; renderPanel(); }
             document.querySelector(`#${PANEL_ID} .c100-start`)?.click();
         },
         stop() {
             window.CROSS100_STOP?.();
         },
         state() {
-            return window.CROSS100_STATE || null;
+            return exitRequested ? null : window.CROSS100_STATE || null;
         },
-        destroy() {
-            if (window.__CROSS100_RUNNING) {
-                window.CROSS100_STOP?.();
-            }
-            if (renderTimer) clearInterval(renderTimer);
-            document.getElementById(PANEL_ID)?.remove();
-            document.getElementById(STYLE_ID)?.remove();
-        }
+        minimize() {
+            minimized = true;
+            renderPanel();
+        },
+        expand() {
+            minimized = false;
+            renderPanel();
+        },
+        destroy: destroyApp
     });
 
     if (document.readyState === "loading") {
