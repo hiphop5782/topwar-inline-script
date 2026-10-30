@@ -8,3 +8,10 @@
 ```js
 fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/energy-defense.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
+
+
+끝나고 copy 명령 사용
+
+```js
+copy(window.CQ26_ARK_TSV)
+```
