@@ -1,17 +1,24 @@
 # 봉인석 시즌2
 
-에너지 방어 정보 추출기
-목록 열어두고 개발자 도구에서 사용
+원하는 정보가 담긴 목록 열어두고 개발자 도구에서 사용
 
-# 사용할 스크립트
+## 에너지 방어 인원 목록
 
+열어야 하는 화면 
+<img width="503" height="875" alt="image" src="https://github.com/user-attachments/assets/49cd8de8-3882-46df-b939-d84ba427ffc7" />
+
+실행시켜야 할 코드
 ```js
 fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/energy-defense.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
 
+## 설원 열차 인원 목록
 
-끝나고 copy 명령 사용
+열어야 하는 화면 
+<img width="494" height="867" alt="image" src="https://github.com/user-attachments/assets/ced8ad85-52b2-4058-a76c-96bf1d2199a2" />
 
+실행시켜야 할 코드
 ```js
-copy(window.CQ26_ARK_TSV)
+fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/train-members.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
+
