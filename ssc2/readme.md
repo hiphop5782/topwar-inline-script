@@ -26,3 +26,14 @@ fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/he
 fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/train-members.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
 
+## 매머드 전투 주둔목록
+
+열어야 하는 화면
+
+<img width="500" height="871" alt="image" src="https://github.com/user-attachments/assets/244c219c-7a3f-4e13-8953-8fdada571adf" />
+
+실행시켜야 할 코드
+
+```js
+fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/mammoth_defense.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
+```
