@@ -264,12 +264,11 @@ function integrate(panel) {
   const tools = createToolsPage();
 
   for (const child of originalChildren) {
-    if (!["tw26-advanced", "tw26-scanner-role", "tw26-reward-tracker-actions"].includes(child.id)) {
+    if (!["tw26-advanced", "tw26-reward-tracker-actions"].includes(child.id)) {
       survey.append(child);
     }
   }
   const serverOrder = originalChildren.find(node => node.id === "tw26-server-order");
-  const scannerRole = originalChildren.find(node => node.id === "tw26-scanner-role");
   const serverOrderLabels = {
     sequential: "번호순",
     popular: "인기순",
@@ -280,8 +279,6 @@ function integrate(panel) {
     const textNode = [...(label?.childNodes || [])].find(node => node.nodeType === Node.TEXT_NODE);
     if (textNode) textNode.nodeValue = serverOrderLabels[input.value] || input.value;
   });
-  settings.append(settingsGroup("조사기 분배", [scannerRole]));
-
   const fullScan = document.getElementById("tw26-full-scan");
   const rewardTracker = originalChildren.find(node => node.id === "tw26-reward-tracker-actions");
   settings.append(settingsGroup("보조 작업", [fullScan, rewardTracker], true));

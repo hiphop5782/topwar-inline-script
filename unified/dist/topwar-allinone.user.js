@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar All-in-One UI
 // @namespace    https://github.com/hiphop5782/topwar-inline-script
-// @version      0.2.0
+// @version      0.2.2
 // @description  Existing TopWar tools connected through one component-based UI
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -18226,17 +18226,6 @@ TOPWAR.clearThiefQueue()
           <label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="radio" name="tw26-server-order" value="random">랜덤으로</label>
         </div>
 
-        <div id="tw26-scanner-role" style="
-          display:grid;grid-template-columns:1.2fr .8fr 1fr;gap:5px;
-          margin-top:7px;padding:6px;border-radius:7px;background:rgba(255,255,255,0.04);
-          color:#bbb;font-size:10px;
-        ">
-          <select id="tw26-scanner-role-select" title="이 조사기의 담당 역할" style="height:29px;border:1px solid rgba(255,255,255,.15);border-radius:6px;background:#292929;color:#eee;font-size:10px;padding:0 5px;"></select>
-          <input id="tw26-unpopular-threshold" type="number" min="1" max="100" value="80" title="최근 7일 활성 인원이 이 값보다 적으면 비인기" style="min-width:0;height:29px;box-sizing:border-box;border:1px solid rgba(255,255,255,.15);border-radius:6px;background:#292929;color:#eee;font-size:10px;padding:0 5px;" />
-          <input id="tw26-popular-scanner-count" type="number" min="1" max="32" value="6" title="인기 서버를 나눠 맡을 조사기 수" style="min-width:0;height:29px;box-sizing:border-box;border:1px solid rgba(255,255,255,.15);border-radius:6px;background:#292929;color:#eee;font-size:10px;padding:0 5px;" />
-          <span style="grid-column:1 / -1;color:#888;">역할 · 비인기 기준(명) · 인기 조사기 수</span>
-        </div>
-
         <div id="tw26-scan-actions" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px;">
           <button id="tw26-thief" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">빠른보상</button>
           <button id="tw26-thief-watch" style="height:38px;border:0;border-radius:7px;background:#3b3b3b;color:#eee;font-size:12px;font-weight:700;cursor:pointer;">도둑찾기</button>
@@ -18391,9 +18380,6 @@ TOPWAR.clearThiefQueue()
     const fold = panel.querySelector("#tw26-fold");
     const serverInput = panel.querySelector("#tw26-server");
     const serverOrderInputs = [...panel.querySelectorAll('input[name="tw26-server-order"]')];
-    const scannerRoleSelect = panel.querySelector("#tw26-scanner-role-select");
-    const unpopularThresholdInput = panel.querySelector("#tw26-unpopular-threshold");
-    const popularScannerCountInput = panel.querySelector("#tw26-popular-scanner-count");
     const dataHubScannerIdInput = panel.querySelector("#tw26-datahub-scanner-id");
     const githubTokenInput = panel.querySelector("#tw26-github-token");
     const thiefButton = panel.querySelector("#tw26-thief");
@@ -18423,111 +18409,6 @@ TOPWAR.clearThiefQueue()
     let lastThiefUploadTest = null;
 
     const SERVER_ORDER_STORAGE_KEY = "TOPWAR_AUTOMATION_SERVER_ORDER";
-    const SCANNER_ROLE_STORAGE_KEY = "TOPWAR_AUTOMATION_SCANNER_ROLE_V1";
-    const UNPOPULAR_THRESHOLD_STORAGE_KEY = "TOPWAR_AUTOMATION_UNPOPULAR_THRESHOLD_V1";
-    const POPULAR_SCANNER_COUNT_STORAGE_KEY = "TOPWAR_AUTOMATION_POPULAR_SCANNER_COUNT_V1";
-    let activityServerRowsCache = null;
-    let activityServerRowsFetchedAt = 0;
-    let lastRoleFilteredIds = [];
-
-    function clampInteger(value, min, max, fallback) {
-      const number = Math.floor(Number(value));
-      return Number.isFinite(number) ? Math.max(min, Math.min(max, number)) : fallback;
-    }
-
-    function getUnpopularThreshold() {
-      return clampInteger(unpopularThresholdInput?.value, 1, 100, 80);
-    }
-
-    function getPopularScannerCount() {
-      return clampInteger(popularScannerCountInput?.value, 1, 32, 6);
-    }
-
-    function rebuildScannerRoleOptions(preferredRole = null) {
-      const count = getPopularScannerCount();
-      const saved = preferredRole || scannerRoleSelect?.value || (() => {
-        try { return localStorage.getItem(SCANNER_ROLE_STORAGE_KEY); } catch { return null; }
-      })() || "unpopular";
-      scannerRoleSelect.innerHTML = [
-        `<option value="all">전체 (필터 없음)</option>`,
-        `<option value="unpopular">비인기 서버</option>`,
-        ...Array.from({ length: count }, (_, index) =>
-          `<option value="popular-${index + 1}">인기 서버 ${index + 1}</option>`
-        )
-      ].join("");
-      scannerRoleSelect.value = [...scannerRoleSelect.options].some(option => option.value === saved)
-        ? saved
-        : "unpopular";
-      try { localStorage.setItem(SCANNER_ROLE_STORAGE_KEY, scannerRoleSelect.value); } catch {}
-    }
-
-    function stableServerHash(serverId) {
-      let hash = 2166136261;
-      for (const char of String(serverId)) {
-        hash ^= char.charCodeAt(0);
-        hash = Math.imul(hash, 16777619);
-      }
-      return hash >>> 0;
-    }
-
-    async function loadActivityServerRows(options = {}) {
-      if (!options.force && activityServerRowsCache && Date.now() - activityServerRowsFetchedAt < 60 * 60 * 1000) {
-        return activityServerRowsCache;
-      }
-      const urls = [
-        "https://raw.githubusercontent.com/hiphop5782/topwar-json/main/power/serverData.json",
-        "https://cdn.jsdelivr.net/gh/hiphop5782/topwar-json@main/power/serverData.json"
-      ];
-      const errors = [];
-      for (const url of urls) {
-        try {
-          const data = await fetchRemoteServerJson(url, options);
-          if (!Array.isArray(data)) throw new Error("serverData.json root is not an array");
-          activityServerRowsCache = data;
-          activityServerRowsFetchedAt = Date.now();
-          return data;
-        } catch (error) {
-          errors.push(`${url}: ${error?.message || String(error)}`);
-        }
-      }
-      throw new Error(errors.join(" / ") || "power/serverData.json 로드 실패");
-    }
-
-    function active7dPlayerCount(serverData, referenceMs = Date.now()) {
-      const cutoff = Math.floor(referenceMs / 1000) - 7 * 24 * 60 * 60;
-      return (Array.isArray(serverData?.playerList) ? serverData.playerList : []).filter(player => {
-        const raw = Math.max(Number(player?.lastRequest || 0), Number(player?.lastLogin || 0));
-        const activeAt = raw >= 1000000000000 ? Math.floor(raw / 1000) : raw;
-        return player?.online === true || player?.isOnline === true || activeAt >= cutoff;
-      }).length;
-    }
-
-    async function filterServerIdsByScannerRole(serverIds) {
-      const requested = parseServerIdsStrict(serverIds);
-      if (scannerRoleSelect.value === "all") {
-        lastRoleFilteredIds = requested.slice();
-        return lastRoleFilteredIds.slice();
-      }
-      const rows = await loadActivityServerRows();
-      const activityByServer = new Map(rows.map(row => [
-        Number(row?.serverNumber ?? row?.serverId ?? row?.server),
-        active7dPlayerCount(row)
-      ]));
-      const threshold = getUnpopularThreshold();
-      const role = scannerRoleSelect.value || "unpopular";
-      const unpopular = requested.filter(id => activityByServer.has(id) && activityByServer.get(id) < threshold);
-      const popular = requested.filter(id => !activityByServer.has(id) || activityByServer.get(id) >= threshold);
-      if (role === "unpopular") {
-        lastRoleFilteredIds = unpopular.slice();
-        return unpopular;
-      }
-
-      const roleIndex = clampInteger(String(role).split("-")[1], 1, getPopularScannerCount(), 1) - 1;
-      const scannerCount = getPopularScannerCount();
-      lastRoleFilteredIds = popular.filter(id => stableServerHash(id) % scannerCount === roleIndex);
-      return lastRoleFilteredIds.slice();
-    }
-
     function normalizeServerOrderMode(value) {
       const mode = String(value || "").trim().toLowerCase();
       return ["sequential", "popular", "random"].includes(mode) ? mode : "popular";
@@ -18609,7 +18490,6 @@ TOPWAR.clearThiefQueue()
 
     function displayServerIds() {
       const explicit = explicitInputServerIds();
-      if (!explicit.length && lastRoleFilteredIds.length) return lastRoleFilteredIds.slice();
       const base = explicit.length
         ? explicit
         : (TOPWAR.getCachedRemoteServerList?.()?.serverIds ?? []);
@@ -18679,15 +18559,7 @@ TOPWAR.clearThiefQueue()
       await ensureRemoteServerListLoaded();
       const ids = await resolveSurveyServerIds();
       const mapIds = TOPWAR.mapSurveyServerIds?.(ids) ?? ids;
-      const filtered = await filterServerIdsByScannerRole(mapIds);
-      console.log("[TopWar Scanner Role] 담당 서버 필터링:", {
-        role: scannerRoleSelect.value,
-        unpopularThreshold: getUnpopularThreshold(),
-        popularScannerCount: getPopularScannerCount(),
-        before: mapIds.length,
-        after: filtered.length
-      });
-      return filtered;
+      return parseServerIdsStrict(mapIds);
     }
 
     async function resolveTop100ServerIds() {
@@ -18748,19 +18620,6 @@ TOPWAR.clearThiefQueue()
     })();
     setServerOrderMode(initialServerOrderMode);
 
-    try {
-      unpopularThresholdInput.value = String(clampInteger(
-        localStorage.getItem(UNPOPULAR_THRESHOLD_STORAGE_KEY), 1, 100, 80
-      ));
-      popularScannerCountInput.value = String(clampInteger(
-        localStorage.getItem(POPULAR_SCANNER_COUNT_STORAGE_KEY), 1, 32, 6
-      ));
-    } catch {
-      unpopularThresholdInput.value = "80";
-      popularScannerCountInput.value = "6";
-    }
-    rebuildScannerRoleOptions();
-
     serverOrderInputs.forEach(input => {
       input.addEventListener("change", event => {
         event.stopPropagation();
@@ -18769,31 +18628,6 @@ TOPWAR.clearThiefQueue()
           render();
         }
       });
-    });
-
-    scannerRoleSelect.addEventListener("change", event => {
-      event.stopPropagation();
-      lastRoleFilteredIds = [];
-      try { localStorage.setItem(SCANNER_ROLE_STORAGE_KEY, scannerRoleSelect.value); } catch {}
-      render();
-    });
-
-    unpopularThresholdInput.addEventListener("change", event => {
-      event.stopPropagation();
-      lastRoleFilteredIds = [];
-      unpopularThresholdInput.value = String(getUnpopularThreshold());
-      try { localStorage.setItem(UNPOPULAR_THRESHOLD_STORAGE_KEY, unpopularThresholdInput.value); } catch {}
-      render();
-    });
-
-    popularScannerCountInput.addEventListener("change", event => {
-      event.stopPropagation();
-      lastRoleFilteredIds = [];
-      const previousRole = scannerRoleSelect.value;
-      popularScannerCountInput.value = String(getPopularScannerCount());
-      try { localStorage.setItem(POPULAR_SCANNER_COUNT_STORAGE_KEY, popularScannerCountInput.value); } catch {}
-      rebuildScannerRoleOptions(previousRole);
-      render();
     });
 
     // UI/후속 add-on/RealPower에서 동일한 서버 선택 규칙을 재사용한다.
@@ -19950,12 +19784,6 @@ TOPWAR.clearThiefQueue()
         input.disabled = anyAutomationRunning;
         input.parentElement.style.opacity = input.disabled ? "0.55" : "1";
       });
-      for (const input of [scannerRoleSelect, unpopularThresholdInput, popularScannerCountInput]) {
-        if (!input) continue;
-        input.disabled = anyAutomationRunning;
-        input.style.opacity = input.disabled ? "0.55" : "1";
-      }
-
       const runningLabel = thiefOnlyRunning
         ? `도둑찾기${watchStopping ? " 중지 중" : ` ${thiefMulti.serverIndex ?? 0}/${thiefMulti.totalServers ?? "-"} · ${thiefMulti.cycle ?? 1}회차`}`
         : quickRewardRunning
@@ -19974,7 +19802,7 @@ TOPWAR.clearThiefQueue()
           <span style="white-space:nowrap;color:${disconnected ? "#ff7777" : "#8fd6a8"}">${disconnected ? "연결 오류" : "정상"}</span>
         </div>
         <div style="margin-top:2px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-          서버 ${shownServerIds.length ? `${shownServerIds.length}개` : "-"} · ${scannerRoleSelect.value === "unpopular" ? `비인기(<${getUnpopularThreshold()}명)` : `${scannerRoleSelect.options[scannerRoleSelect.selectedIndex]?.text || scannerRoleSelect.value}`} · ${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤" : "인기순"} · GitHub ${tokenStatus.configured ? "✓" : "미설정"} · 플레이어 ${state.playerMap?.size ?? 0}
+          서버 ${shownServerIds.length ? `${shownServerIds.length}개` : "-"} · ${getServerOrderMode() === "sequential" ? "순서대로" : getServerOrderMode() === "random" ? "랜덤" : "인기순"} · GitHub ${tokenStatus.configured ? "✓" : "미설정"} · 플레이어 ${state.playerMap?.size ?? 0}
         </div>
       `;
 
@@ -26273,7 +26101,11 @@ coordinateBaseHeight: 720,
 clickDelayMs: 1700,
 moveDelayMs: 2300,
 serverCardOpenDelayMs: 2600,
-afterRankCloseDelayMs: 1000,
+// 닫기 함수가 대상 패널 비활성 + 상위 패널 활성 상태를 250ms 동안 이미 검증한다.
+// 정상 흐름에 고정 대기를 다시 더하지 않고, 필요한 환경에서만 명시적으로 늘린다.
+postRankCloseSettleMs: 0,
+postTheaterCloseSettleMs: 0,
+postServerSettleMs: 0,
 moveTimeoutMs: 15000,
 movePollIntervalMs: 200,
 moveRetryCount: 2,
@@ -26285,7 +26117,7 @@ rankDataTimeoutMs: 20000,
 rankPollIntervalMs: 100,
 rankRetryDelayMs: 400,
 wrongRankRetryDelayMs: 500,
-betweenServerDelayMs: 2600,
+betweenServerDelayMs: 0,
 loopDelayMs: 3000,
 requiredPlayerCount: 100,
 requiredAllianceCount: 2,
@@ -27776,20 +27608,57 @@ function hasBattleAreaRankButtons() {try {return !!findRankButton("personal")?.m
 
 async function waitForServerSelection(serverId, options = {}) {
   const target = Number(serverId);
+  // gotoServerById 뒤 무조건 수 초를 자던 기존 흐름 대신, 대상 서버 카드가 실제
+  // 활성 노드에 나타나고 잠깐 안정화되면 즉시 다음 단계로 넘어간다. 게임 버전상
+  // 카드 구조를 식별하지 못하는 경우에는 기존 최대 대기까지 기다려 안전성을 유지한다.
   const waitMs = Math.max(150, Number(options.serverSelectionWaitMs ?? options.moveDelayMs ?? 1800));
+  const pollMs = Math.max(40, Number(options.serverSelectionPollMs ?? 80));
+  const stableMs = Math.max(0, Number(options.serverSelectionStableMs ?? 160));
   const startedAt = Date.now();
+  let readySince = null;
+  let evidence = null;
   if (!isServerListPanelActive()) {
     throw new Error(`서버 ${target} 선택 전 WorldServerListPanel이 비활성 상태입니다.`);
   }
-  await sleep(waitMs);
+
+  while (Date.now() - startedAt < waitMs) {
+    throwIfStopped();
+    if (!isServerListPanelActive()) {
+      throw new Error(`서버 ${target} 선택 중 서버 목록 화면이 사라졌습니다.`);
+    }
+
+    const candidates = findServerNodeCandidates(target);
+    const matched = candidates.find(row =>
+      row.reasons?.some(reason => reason === "node-name" || reason.startsWith("component:"))
+    );
+
+    if (matched) {
+      evidence = {
+        path: matched.path,
+        score: matched.score,
+        reasons: matched.reasons
+      };
+      if (readySince == null) readySince = Date.now();
+      if (Date.now() - readySince >= stableMs) break;
+    } else {
+      readySince = null;
+      evidence = null;
+    }
+
+    await sleep(Math.min(pollMs, Math.max(1, waitMs - (Date.now() - startedAt))));
+  }
+
   if (!isServerListPanelActive()) {
-    throw new Error(`서버 ${target} 선택 중 서버 목록 화면이 사라졌습니다.`);
+    throw new Error(`서버 ${target} 선택 완료 확인 전 서버 목록 화면이 사라졌습니다.`);
   }
   // gotoServerById는 선택 요청이다. 실제 이동 성공은 Theater 진입으로만 확정한다.
   return {
     ok: true,
-    verification: "server-list-still-active;selection-unverified",
-    selectionVerified: false,
+    verification: evidence
+      ? "target-server-card-stable;selection-unverified"
+      : "server-list-still-active;selection-unverified",
+    selectionVerified: !!evidence,
+    selectionEvidence: evidence,
     targetServerId: target,
     viewportServerId: getCurrentServerId(),
     elapsedMs: Date.now() - startedAt,
@@ -28484,7 +28353,7 @@ async function openSelectedServerByCanvasCenter(serverId, options = {}) {
         try {
           // 재선택은 기존의 검증된 경로를 통해 수행한다. 실패 시 절대 강행 클릭하지 않는다.
           const move = await moveToServer(target,{...settings,moveRetryCount:0,
-            serverSelectionWaitMs:Math.max(1800,Number(settings.moveDelayMs ?? 2300))});
+            serverSelectionWaitMs:Math.max(300,Number(settings.moveDelayMs ?? 2300))});
           reasons.push({stage:"selection-retry",verification:move.verification,
             viewportServerId:move.viewportServerId});
           if (top100CanRetryServerCard().safe) {
@@ -31388,12 +31257,8 @@ return {
 async function closeByJavaBackPoint(componentName, options = {}) {
 // 기존 함수명은 호환을 위해 유지하지만 좌표 클릭은 사용하지 않는다.
 const result = await closePanelByCommand(componentName,options);
-
-await sleep(
-  Number(
-    getSettings(options).afterRankCloseDelayMs ?? 1000
-  )
-);
+const settleMs = Math.max(0, Number(getSettings(options).postRankCloseSettleMs ?? 0));
+if (settleMs > 0) await sleep(settleMs);
 
 return {
   ...result,
@@ -31406,10 +31271,8 @@ return {
 async function exitTheaterByJavaBackPoint(options = {}) {
 // WorldServerTheaterPanel 역시 close/back 명령만 사용한다.
 const result = await closePanelByCommand("WorldServerTheaterPanel",options);
-
-await sleep(
-  Number(getSettings(options).clickDelayMs ?? 1200)
-);
+const settleMs = Math.max(0, Number(getSettings(options).postTheaterCloseSettleMs ?? 0));
+if (settleMs > 0) await sleep(settleMs);
 
 return {
   ...result,
@@ -33387,7 +33250,8 @@ try {
       pushLog(`${serverId} 조사 실패`, error?.message || String(error));
     }
 
-    await sleep(settings.betweenServerDelayMs);
+    const settleMs = Math.max(0, Number(settings.postServerSettleMs ?? 0));
+    if (settleMs > 0) await sleep(settleMs);
   }
 } finally {
   saveState({ running: false });
@@ -33954,7 +33818,8 @@ try {
       );
     }
 
-    await sleep(settings.betweenServerDelayMs);
+    const settleMs = Math.max(0, Number(settings.postServerSettleMs ?? 0));
+    if (settleMs > 0) await sleep(settleMs);
   }
 
   const completed = servers.filter(server => isServerComplete(server, settings)).length;
@@ -66611,12 +66476,11 @@ window.CQ26_SEAL_RANK_PROMISE = (async () => {
     settings.dataset.page = "settings";
     const tools = createToolsPage();
     for (const child of originalChildren) {
-      if (!["tw26-advanced", "tw26-scanner-role", "tw26-reward-tracker-actions"].includes(child.id)) {
+      if (!["tw26-advanced", "tw26-reward-tracker-actions"].includes(child.id)) {
         survey.append(child);
       }
     }
     const serverOrder = originalChildren.find((node) => node.id === "tw26-server-order");
-    const scannerRole = originalChildren.find((node) => node.id === "tw26-scanner-role");
     const serverOrderLabels = {
       sequential: "번호순",
       popular: "인기순",
@@ -66627,7 +66491,6 @@ window.CQ26_SEAL_RANK_PROMISE = (async () => {
       const textNode = [...label?.childNodes || []].find((node) => node.nodeType === Node.TEXT_NODE);
       if (textNode) textNode.nodeValue = serverOrderLabels[input.value] || input.value;
     });
-    settings.append(settingsGroup("조사기 분배", [scannerRole]));
     const fullScan = document.getElementById("tw26-full-scan");
     const rewardTracker = originalChildren.find((node) => node.id === "tw26-reward-tracker-actions");
     settings.append(settingsGroup("보조 작업", [fullScan, rewardTracker], true));
