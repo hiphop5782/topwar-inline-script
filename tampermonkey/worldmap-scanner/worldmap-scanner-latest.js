@@ -31417,11 +31417,115 @@ return {
 
 }
 
-async function recoverTop100UiAfterFailure() {
-  // 조사 실패 후 기존 finally에서 랭킹+Theater를 연쇄적으로 닫으면 상위 프레임까지
-  // 소멸하거나 게임의 입력 방어막만 남는 경우가 있다. 자동 닫기를 절대 하지 않는다.
-  const snapshot = diagnoseTop100Ui("survey-failed-no-automatic-close");
-  return { ok: false, skipped: "automatic-close-disabled", snapshot };
+async function recoverTop100UiAfterFailure(options = {}) {
+  const settings = getSettings(options);
+  const attempts = [];
+  const initialSnapshot = diagnoseTop100Ui("survey-failed-recovery-start");
+  const localAttemptCount = Math.max(1, Number(settings.top100LocalRecoveryAttempts ?? 3));
+
+  for (let attempt = 1; attempt <= localAttemptCount; attempt++) {
+    throwIfStopped();
+
+    if (isServerListPanelActive()) {
+      return { ok: true, attempt, route: "already-on-server-list", attempts, initialSnapshot };
+    }
+
+    const detail = { attempt, rankClose: [], theaterClose: null, navigation: null };
+
+    // 자식 랭킹 패널부터 닫고, Theater가 실제로 남아 있을 때만 Theater를 닫는다.
+    // closePanelByCommand는 대상 컴포넌트 전용 프레임만 사용하므로 상위 프레임 오조작을 피한다.
+    try {
+      detail.rankClose = await closeAnyRankPanel(settings);
+    } catch (error) {
+      detail.rankCloseError = error?.message || String(error);
+    }
+
+    if (
+      !componentIsActive("WorldServerPowerRank") &&
+      !componentIsActive("WorldServerAlliancePowerRank") &&
+      componentIsActive("WorldServerTheaterPanel")
+    ) {
+      try {
+        detail.theaterClose = await exitTheaterByJavaBackPoint(settings);
+      } catch (error) {
+        detail.theaterCloseError = error?.message || String(error);
+      }
+    }
+
+    if (isServerListPanelActive()) {
+      attempts.push(detail);
+      return { ok: true, attempt, route: "semantic-close", attempts, initialSnapshot };
+    }
+
+    // 패널 닫기가 실패했거나 게임 UI가 중간 상태라면 공용 네비게이션 복구기로
+    // WORLD_MAP을 다시 구성한다. 이 단계 역시 실패해도 상위 복구 루프가 계속 재시도한다.
+    try {
+      await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP", {
+        navReadyTimeout: Number(settings.top100RecoveryNavReadyTimeoutMs ?? 20000),
+        retryTimeout: Number(settings.top100RecoveryRetryTimeoutMs ?? 30000),
+        transitionTimeout: Number(settings.top100RecoveryTransitionTimeoutMs ?? 12000),
+        retryDelay: Number(settings.top100RecoveryRetryDelayMs ?? 1000)
+      });
+      detail.navigation = "WORLD_MAP";
+    } catch (error) {
+      detail.navigationError = error?.message || String(error);
+    }
+
+    attempts.push(detail);
+    if (isServerListPanelActive()) {
+      return { ok: true, attempt, route: "world-map-navigation", attempts, initialSnapshot };
+    }
+
+    if (attempt < localAttemptCount) {
+      await sleep(Math.min(1000 * attempt, 3000));
+    }
+  }
+
+  return {
+    ok: false,
+    attempts,
+    initialSnapshot,
+    snapshot: diagnoseTop100Ui("survey-failed-recovery-local-exhausted")
+  };
+}
+
+async function recoverTop100UiUntilReady(context, options = {}) {
+  const settings = getSettings(options);
+  let recoveryRound = 0;
+
+  while (!loopRuntime.stopRequested && !activeAbortSignal()?.aborted) {
+    throwIfStopped();
+    recoveryRound++;
+    updateProgress({ phase: "recovering-top100-ui" });
+
+    const recovery = await recoverTop100UiAfterFailure(settings);
+    if (recovery.ok && isServerListPanelActive()) {
+      pushLog(`Top100 UI 자동 복구 완료: ${context}`, {
+        recoveryRound,
+        route: recovery.route,
+        attempt: recovery.attempt
+      });
+      return recovery;
+    }
+
+    pushLog(`Top100 UI 자동 복구 대기: ${context} (${recoveryRound}회)`, {
+      recoveryRound,
+      lastRecovery: recovery
+    });
+
+    if (recoveryRound % 3 === 0) {
+      diagnoseTop100Ui(`continuous-recovery-${context}-${recoveryRound}`);
+    }
+
+    updateProgress({ phase: "recovering-top100-ui-waiting" });
+    await sleep(Math.min(
+      Number(settings.loopDelayMs ?? 3000) * Math.max(1, recoveryRound),
+      15000
+    ));
+  }
+
+  throwIfStopped();
+  return { ok: false, stopped: true };
 }
 
 async function collectByClick(serverId, options = {}) {
@@ -31477,9 +31581,10 @@ async function collectByClick(serverId, options = {}) {
     throw error;
   } finally {
     if (!completed && caught && !isStopError(caught) && !loopRuntime.stopRequested && !activeAbortSignal()?.aborted) {
-      const recovery = await recoverTop100UiAfterFailure();
-      pushLog(`${serverId} 조사 실패 - UI 추가 닫기 없이 중단`, recovery);
-      caught.top100UiUnsafe = true;
+      const recovery = await recoverTop100UiAfterFailure(settings);
+      pushLog(`${serverId} 조사 실패 - UI 자동 복구 시도`, recovery);
+      caught.top100Recovery = recovery;
+      caught.top100UiUnsafe = recovery.ok !== true;
     }
   }
 }
@@ -33821,7 +33926,17 @@ try {
 
       pushLog(`${serverNumber} 서버 조사 오류 - 임시 큐 저장`, error?.message || String(error));
 
-      if (error?.top100UiUnsafe === true || settings.continueOnError !== true) {
+      // UI가 불안정하다는 표시는 전체 조사를 종료할 이유가 아니라 복구 루프 진입 신호다.
+      // 서버 목록 화면을 되찾은 뒤 다음 서버를 진행하고, 실패 서버는 런타임 큐에 남겨
+      // 같은 시즌 사이클의 다음 본 조사 시도에서 다시 조사한다.
+      if (error?.top100UiUnsafe === true || !isServerListPanelActive()) {
+        await recoverTop100UiUntilReady(`server-${serverNumber}`, settings);
+        if (error && typeof error === "object") {
+          error.top100UiUnsafe = false;
+        }
+      }
+
+      if (settings.continueOnError !== true) {
         throw error;
       }
     }
@@ -34018,7 +34133,7 @@ const promise = (async () => {
 
   async function ensureTop100WorldMapReady(phase, cycleNo) {
     let failedAttempts = 0;
-    const maxFailures = Math.max(1, Number(settings.top100NavigationMaxFailures ?? 3));
+    const diagnosticEvery = Math.max(1, Number(settings.top100NavigationDiagnosticEvery ?? 3));
     while (!loopRuntime.stopRequested && !controller.signal.aborted) {
       throwIfStopped();
       try {
@@ -34034,11 +34149,13 @@ const promise = (async () => {
         );
         updateProgress({ phase: `${phase}-retry-waiting` });
         failedAttempts++;
-        if (failedAttempts >= maxFailures) {
+        if (failedAttempts % diagnosticEvery === 0) {
           diagnoseTop100Ui(`world-map-restore-failed-${cycleNo}`);
-          throw top100UiFatal(`Top100 WORLD_MAP 준비 ${failedAttempts}회 실패: ${error?.message || error}. 자동 복구를 중단합니다.`);
         }
-        await sleep(Number(settings.loopDelayMs ?? 3000));
+        await sleep(Math.min(
+          Number(settings.loopDelayMs ?? 3000) * Math.max(1, failedAttempts),
+          30000
+        ));
       }
     }
     throwIfStopped();
@@ -34115,6 +34232,7 @@ const promise = (async () => {
   try {
     while (!loopRuntime.stopRequested && !controller.signal.aborted) {
       throwIfStopped();
+      try {
 
       const nextCycleNumber = cycleNumber + 1;
 
@@ -34177,7 +34295,13 @@ const promise = (async () => {
 
         const cycleResult = await runOneCycle(cycleSettings);
         if (cycleResult?.uiFatal) {
-          throw top100UiFatal(`Top100 UI 복구 실패: ${cycleResult.error || "unknown"}. 무한 재시도를 중단합니다.`);
+          pushLog("Top100 UI 복구 필요 - 종료하지 않고 WORLD_MAP 복구 계속", {
+            cycleNumber,
+            mainAttempt,
+            error: cycleResult.error || "unknown"
+          });
+          await ensureTop100WorldMapReady("recovering-top100-ui", cycleNumber);
+          continue;
         }
 
         if (
@@ -34221,6 +34345,23 @@ const promise = (async () => {
 
       updateProgress({ phase: "waiting" });
       await sleep(Number(settings.loopDelayMs ?? 3000));
+      } catch (error) {
+        if (isStopError(error) || loopRuntime.stopRequested || controller.signal.aborted) {
+          throw error;
+        }
+
+        // 준비/목록/업로드 단계의 예외도 실행 Promise를 끝내지 않는다.
+        // 진단 정보를 남긴 뒤 WORLD_MAP을 복구하고 같은 감독 루프에서 다시 시작한다.
+        pushLog("Top100 감독 루프 오류 - 자동 복구 후 계속", {
+          cycleNumber,
+          message: error?.message || String(error),
+          stack: error?.stack || null
+        });
+        diagnoseTop100Ui(`supervisor-error-${cycleNumber + 1}`);
+        updateProgress({ phase: "recovering-after-top100-error" });
+        await ensureTop100WorldMapReady("recovering-after-top100-error", cycleNumber + 1);
+        await sleep(Number(settings.loopDelayMs ?? 3000));
+      }
     }
   } catch (error) {
     if (!isStopError(error)) throw error;
@@ -35581,9 +35722,9 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     try {
       await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP");
     } catch (error) {
-      window.TOPWAR_RECOVERY?.clear?.("top100-navigation-failed");
-      alert(`Top100 시작 전 서버목록 화면 이동 실패\n\n${error?.message || String(error)}`);
-      return;
+      // 시작 전 1회 이동 실패는 종료 사유가 아니다. 본 실행의 감독 루프가
+      // WORLD_MAP 복귀를 계속 시도하므로 복구 마커를 유지한 채 시작한다.
+      console.warn("[REALPOWER Unified UI] 시작 전 WORLD_MAP 이동 실패 - 자동 복구로 계속:", error);
     }
 
     const { mode: serverOrderMode } = await resolveSharedServerOrderMode();
@@ -35593,9 +35734,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     api.startAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
       if (!api.isStopError?.(error)) {
-        window.TOPWAR_RECOVERY?.clear?.("top100-start-error");
         console.error("[REALPOWER Unified UI] 조사 실패:", error);
-        alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
       }
       update();
     });
@@ -35617,9 +35756,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
     try {
       await window.TOPWAR_RECOVERY?.ensureNavigation?.("WORLD_MAP");
     } catch (error) {
-      window.TOPWAR_RECOVERY?.clear?.("top100-reset-navigation-failed");
-      alert(`Top100 시작 전 서버목록 화면 이동 실패\n\n${error?.message || String(error)}`);
-      return;
+      console.warn("[REALPOWER Unified UI] 초기화 시작 전 WORLD_MAP 이동 실패 - 자동 복구로 계속:", error);
     }
 
     const { mode: serverOrderMode } = await resolveSharedServerOrderMode();
@@ -35627,9 +35764,7 @@ console.log("%c[REALPOWER Unified Backend] installed", "color:#90ee90;font-weigh
 
     api.resetAndStartAllServersInfiniteLoop?.({ serverOrderMode }).catch(error => {
       if (!api.isStopError?.(error)) {
-        window.TOPWAR_RECOVERY?.clear?.("top100-reset-start-error");
         console.error("[REALPOWER Unified UI] 초기화 후 시작 실패:", error);
-        alert(`Top100조사 오류\n\n${error?.message || String(error)}`);
       }
       update();
     });

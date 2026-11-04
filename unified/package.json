@@ -1,0 +1,16 @@
+{
+  "name": "topwar-unified-userscript",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Modular TopWar automation runtime, initially focused on safe TOP100 collection.",
+  "scripts": {
+    "build": "node scripts/build-allinone.mjs",
+    "build:prototype": "node scripts/build.mjs",
+    "check": "node --check src/main.js && node --test",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.11"
+  }
+}

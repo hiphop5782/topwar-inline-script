@@ -1,0 +1,12 @@
+// ==UserScript==
+// @name         TopWar Unified Alpha
+// @namespace    https://github.com/hiphop5782/topwar-inline-script
+// @version      0.1.0
+// @description  Modular TopWar UI inspector and validated TOP100 collector
+// @match        https://h5.topwargame.com/*
+// @match        https://h5v2.topwargame.com/*
+// @match        https://*.topwargame.com/*
+// @match        https://*.topwarapp.com/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==

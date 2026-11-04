@@ -1,5 +1,5 @@
 
-(async () => {
+window.CQ26_ENERGY_DEFENSE_PROMISE = (async () => {
   const scene = cc.director.getScene();
   const stack = [scene];
   let popup = null;
@@ -90,7 +90,7 @@
     ...players.map(p => [
       p.rank,
       p.serverId,
-      p.uid,
+      p.uid ? `'${p.uid}` : "",
       p.username,
       p.score
     ].map(v => String(v ?? "")
@@ -124,24 +124,6 @@
     }
   }
 
-  // JSON 저장
-  const blob = new Blob(
-    [JSON.stringify(players, null, 2)],
-    { type: "application/json;charset=utf-8" }
-  );
-
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-
-  a.href = url;
-  a.download = `CQ26-Ark-Ranking-${Date.now()}.json`;
-
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-
-  setTimeout(() => URL.revokeObjectURL(url), 15000);
-
   console.table(players);
   console.log(`총 ${players.length}명 추출 완료`);
 
@@ -152,4 +134,7 @@
       "자동 복사 실패: copy(window.CQ26_ARK_TSV) 실행"
     );
   }
+  const result = { count: players.length, copied, players };
+  window.CQ26_ENERGY_DEFENSE_RESULT = result;
+  return result;
 })();
