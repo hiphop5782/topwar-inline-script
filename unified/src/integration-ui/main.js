@@ -17,13 +17,23 @@ const MODULES = [
   },
   {
     id: "mammothDefense",
-    label: "SSC2 맘모스 방어",
+    label: "SSC2 맘모스 실시간 주둔대열조사",
     oneShot: true,
     embedded: true,
-    help: "게임에서 맘모스 방어 수위병 랭킹 화면과 원하는 하위 탭을 연 뒤 조사하세요.",
-    actionLabel: "랭킹 조사",
-    progressText: "수위병 랭킹 데이터를 찾는 중…",
-    promiseKey: "CQ26_MAMMOTH_DEFENSE_PROMISE"
+    help: "게임에서 맘모스 방어 실시간 주둔 대열 화면을 연 뒤 조사하세요.",
+    actionLabel: "주둔 대열 조사·복사",
+    progressText: "실시간 주둔 대열을 읽는 중…",
+    promiseKey: "CQ26_MAMMOTH_GARRISON_PROMISE"
+  },
+  {
+    id: "mammothScore",
+    label: "SSC2 맘모스 누적점수조사",
+    oneShot: true,
+    embedded: true,
+    help: "게임에서 수위병 랭킹의 개인 포인트 랭킹과 조사할 하위 탭을 연 뒤 실행하세요.",
+    actionLabel: "누적점수 조사·복사",
+    progressText: "현재 선택된 누적점수 랭킹을 읽는 중…",
+    promiseKey: "CQ26_MAMMOTH_SCORE_PROMISE"
   },
   {
     id: "trainMembers",
@@ -40,6 +50,31 @@ const MODULES = [
     help: "게임에서 봉인석 총 랭킹 또는 라운드 랭킹 탭을 연 뒤 읽으세요.",
     actionLabel: "현재 랭킹 읽기",
     promiseKey: "CQ26_SEAL_RANK_PROMISE"
+  },
+  {
+    id: "wlbRanks",
+    label: "SSC2 서리결정쟁탈전 랭킹조사",
+    oneShot: true,
+    embedded: true,
+    help: "게임에서 서리결정쟁탈전 서버 랭킹 또는 개인 랭킹의 조사할 탭과 라운드를 연 뒤 실행하세요. 결과는 Google Sheets용으로 복사됩니다.",
+    actionLabel: "랭킹 조사·복사",
+    progressText: "활성 서리결정쟁탈전 랭킹을 읽는 중…",
+    promiseKey: "CQ26_WLB_RANK_PROMISE"
+  },
+  {
+    id: "meritHistory",
+    label: "SSC2 개인랭킹",
+    panelIds: ["cq26-merit-exporter-ui"]
+  },
+  {
+    id: "neutralCityRanks",
+    label: "SSC2 중립도시 랭킹",
+    oneShot: true,
+    embedded: true,
+    help: "중립도시 포인트 랭킹에서 읽을 날짜 탭을 연 뒤 실행하세요. 현재 열린 탭만 Google Sheets용으로 복사됩니다.",
+    actionLabel: "열린 탭 읽기·복사",
+    progressText: "현재 날짜 탭의 중립도시 랭킹을 읽는 중…",
+    promiseKey: "CQ25_NEUTRAL_CITY_RANK_PROMISE"
   },
   { id: "guildAudit", label: "길드 공헌도", oneShot: true }
 ];

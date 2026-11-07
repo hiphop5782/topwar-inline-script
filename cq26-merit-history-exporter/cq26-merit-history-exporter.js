@@ -1161,7 +1161,7 @@
     panel.id = UI_ID;
     panel.innerHTML = `
       <div class="cq26-export-head">
-        <span>CQ26 공훈 내보내기</span>
+        <span>SSC2 개인랭킹</span>
         <button class="cq26-export-close" type="button" title="닫기">×</button>
       </div>
       <div class="cq26-export-body">

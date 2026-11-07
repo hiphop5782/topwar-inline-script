@@ -10,7 +10,7 @@ const dist = path.join(unifiedRoot, "dist");
 const metadata = `// ==UserScript==
 // @name         TopWar All-in-One UI
 // @namespace    https://github.com/hiphop5782/topwar-inline-script
-// @version      0.2.2
+// @version      0.2.6
 // @description  Existing TopWar tools connected through one component-based UI
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -37,9 +37,13 @@ const modules = [
   ["htChip", "ht-chip-collector/ht-chil-collector-latest.js"],
   ["heroImages", "hero/image-scraper.js"],
   ["energyDefense", "ssc2/energy-defense.js"],
-  ["mammothDefense", "ssc2/mammoth_defense.js"],
+  ["mammothDefense", "ssc2/mammoth-live-garrison.js"],
+  ["mammothScore", "ssc2/mammoth-cumulative-score.js"],
   ["trainMembers", "ssc2/train-members.js"],
   ["sealRanks", "ssc2/seal-rank-reader.js"],
+  ["wlbRanks", "ssc2/wlb-rank-inspector.js"],
+  ["neutralCityRanks", "ssc2/neutral-city-rank-reader.js"],
+  ["meritHistory", "cq26-merit-history-exporter/cq26-merit-history-exporter.js"],
   ["guildAudit", "el-contribution-checker/el-contribution-checker-ui.min.js"]
 ];
 

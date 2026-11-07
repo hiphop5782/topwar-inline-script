@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar All-in-One UI
 // @namespace    https://github.com/hiphop5782/topwar-inline-script
-// @version      0.2.2
+// @version      0.2.6
 // @description  Existing TopWar tools connected through one component-based UI
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -65431,279 +65431,356 @@ window.CQ26_ENERGY_DEFENSE_PROMISE = (async () => {
 
 },
 "mammothDefense": function install_mammothDefense() {
+window.CQ26_MAMMOTH_GARRISON_PROMISE = (async () => {
+  "use strict";
 
-window.CQ26_MAMMOTH_DEFENSE_PROMISE = (async () => {
-  const TARGET = "CQ26DBRankView";
-  const stack = [cc.director.getScene()];
-  let popup = null;
-  let scanned = 0;
+  const cc = window.cc;
+  const TARGET = "CQ26DBTroopsInfoPanel";
 
-  // 팝업 검색
-  while (stack.length && scanned++ < 14000) {
-    const n = stack.pop();
-    if (!n || !cc.isValid(n) || !n.activeInHierarchy)
-      continue;
+  function className(component) {
+    try {
+      const name = cc?.js?.getClassName?.(component) || component?.__classname__ || component?.constructor?.name || "";
+      return String(name);
+    } catch { return ""; }
+  }
 
-    if (
-      n.name === TARGET
-      || /(?:CQ26|DB|Mammoth|Boss).*Rank(?:View|Panel)/i.test(String(n.name || ""))
-    ) {
-      popup = n;
-      break;
+  function valid(node) {
+    try { return !!node && cc?.isValid?.(node); } catch { return !!node; }
+  }
+
+  function walk(root, callback, limit = 12000) {
+    const stack = root ? [root] : [];
+    const seen = new Set();
+    let count = 0;
+    while (stack.length && count++ < limit) {
+      const node = stack.pop();
+      if (!valid(node) || seen.has(node) || node.activeInHierarchy === false) continue;
+      seen.add(node);
+      callback(node);
+      const children = node.children || [];
+      for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]);
     }
-
-    stack.push(...(n.children || []));
   }
 
-  if (!popup) {
-    throw new Error("맘모스 방어 수위병 랭킹 창을 열어주세요.");
-  }
-
-  function cname(c) {
-    return c.__classname__ ||
-      cc.js?.getClassName?.(c) ||
-      c.constructor?.name || "";
-  }
-
-  // 현재 선택된 랭킹 배열과 하단의 본인 순위 데이터를 탐색한다.
-  const candidates = [];
-  const selfCandidates = [];
-  const queue = [{node: popup, path: TARGET}];
-
-  function addCandidate(value, path, component, field) {
-    if (!Array.isArray(value) || !value.length) return;
-
-    const sampleEntry = value.find(
-      x => x && typeof x === "object"
-    );
-    const sample = sampleEntry?._data ?? sampleEntry;
-    if (!sample) return;
-
-    const keys = Object.keys(sample);
-    let score = 0;
-
-    if (/rankList/i.test(field)) score += 20;
-    else if (/rank|player|data|info/i.test(field)) score += 8;
-    if (keys.includes("rank")) score += 10;
-    if (keys.includes("score") || keys.includes("point") || keys.includes("points")) score += 8;
-    if (keys.includes("playerInfo")) score += 6;
-    if (keys.includes("uid")) score += 5;
-    if (keys.includes("serverId")) score += 3;
-    if (keys.includes("sid")) score += 2;
-    if (keys.includes("aTag")) score += 1;
-
-    if (score < 4) return;
-
-    candidates.push({
-      path, component, field,
-      length: value.length,
-      keys: keys.join(", "),
-      score,
-      raw: value
+  function findPanel() {
+    let panel = null;
+    walk(cc?.director?.getScene?.(), node => {
+      if (!panel && node.name === TARGET) panel = node;
     });
+    if (!panel) throw new Error("맘모스 방어 실시간 주둔 대열 화면을 먼저 열어주세요.");
+    return panel;
   }
 
-  let inspected = 0;
+  function candidateScore(field, value) {
+    const entry = value.find(item => item && typeof item === "object");
+    const row = entry?._data ?? entry;
+    if (!row || typeof row !== "object") return 0;
+    const keys = Object.keys(row);
+    let score = /infoList|memberList|playerList/i.test(field) ? 20 : 0;
+    if (!score && /member|player|troop|data|info|list/i.test(field)) score += 8;
+    if (keys.some(key => /playerInfo|userInfo/i.test(key))) score += 10;
+    if (keys.some(key => /uid|userId|playerId/i.test(key))) score += 6;
+    if (keys.some(key => /sid|serverId/i.test(key))) score += 4;
+    if (keys.some(key => /aTag|alliance/i.test(key))) score += 3;
+    return score;
+  }
 
-  while (queue.length && inspected++ < 4000) {
-    const {node, path} = queue.pop();
-    if (!cc.isValid(node)) continue;
-
-    for (const c of node._components || []) {
-      const name = cname(c);
-
-      for (const key of Object.keys(c)) {
-        let value;
-        try { value = c[key]; }
-        catch { continue; }
-
-        addCandidate(value, path, name, key);
-
-        if (value && !Array.isArray(value) && typeof value === "object") {
-          const row = value._data ?? value;
-          const rowKeys = Object.keys(row || {});
-          if (
-            rowKeys.includes("rank")
-            && (rowKeys.includes("playerInfo") || rowKeys.includes("uid"))
-            && (rowKeys.includes("score") || rowKeys.includes("point") || rowKeys.includes("points"))
-          ) {
-            selfCandidates.push({ path, component: name, field: key, raw: row });
-          }
-        }
-
-        if (
-          value && !Array.isArray(value) &&
-          typeof value === "object" &&
-          /data|list|info|member|player/i.test(key)
-        ) {
-          for (const subKey of Object.keys(value).slice(0, 40)) {
-            try {
-              addCandidate(
-                value[subKey], path, name,
-                key + "." + subKey
-              );
-            } catch {}
-          }
+  function findCandidate(panelNode) {
+    const candidates = [];
+    walk(panelNode, node => {
+      for (const component of node._components || []) {
+        for (const field of Object.keys(component || {})) {
+          let value;
+          try { value = component[field]; } catch { continue; }
+          if (!Array.isArray(value) || !value.length) continue;
+          const score = candidateScore(field, value);
+          if (score < 8) continue;
+          candidates.push({ component: className(component), field, length: value.length, score, raw: value });
         }
       }
-    }
-
-    for (const n of node.children || []) {
-      queue.push({
-        node: n,
-        path: path + "/" + n.name
-      });
-    }
+    }, 5000);
+    candidates.sort((left, right) => right.score - left.score || right.length - left.length);
+    return candidates[0] || null;
   }
 
-  candidates.sort(
-    (a, b) => b.score - a.score || b.length - a.length
-  );
-
-  console.log("=== 수위병 랭킹 배열 후보 ===");
-  console.table(candidates.map(
-    ({raw, ...rest}) => rest
-  ));
-
-  window.CQ26_DB_CANDIDATES = candidates;
-
-  const selected = candidates[0];
-
-  if (!selected || selected.score < 6) {
-    throw new Error("맘모스 방어 랭킹 배열을 찾지 못했습니다. 수위병 랭킹 창이 완전히 열린 뒤 다시 실행하세요.");
+  function parseObject(value) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return {};
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch { return {}; }
   }
 
-  console.log("선택된 배열:", selected.field);
-  console.log("원본 첫 항목:", selected.raw[0]);
-
-  // 데이터 변환
-  function parse(value) {
-    if (typeof value === "string") {
-      try { return JSON.parse(value); }
-      catch { return {}; }
-    }
-    return value && typeof value === "object"
-      ? value : {};
+  function firstValue(...values) {
+    return values.find(value => value !== undefined && value !== null && value !== "") ?? null;
   }
 
-  function toId(v) {
-    if (v == null) return "";
-
-    const low = v.low ?? v._low;
-    const high = v.high ?? v._high;
-
-    if (typeof low === "number" &&
-        typeof high === "number") {
-      let n = (BigInt(high >>> 0) << 32n) |
-              BigInt(low >>> 0);
-
-      if (!(v.unsigned ?? v._unsigned) && high < 0)
-        n -= 1n << 64n;
-
-      return String(n);
-    }
-
-    return String(v);
+  function toId(value) {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value === "string") return value;
+    const low = value?.low ?? value?._low;
+    const high = value?.high ?? value?._high;
+    if (typeof low !== "number" || typeof high !== "number") return String(value);
+    let number = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0);
+    if (!(value.unsigned ?? value._unsigned) && high < 0) number -= 1n << 64n;
+    return String(number);
   }
 
-  const rawRows = [...selected.raw];
-  for (const candidate of selfCandidates) {
-    const row = candidate.raw;
-    const duplicate = rawRows.some(entry => {
-      const current = entry?._data ?? entry;
-      return (row.uid != null && current?.uid != null && toId(row.uid) === toId(current.uid))
-        || (row.rank != null && current?.rank === row.rank && row.playerInfo === current?.playerInfo);
-    });
-    if (!duplicate) rawRows.push(row);
+  function safeCell(value) {
+    return String(value ?? "").replace(/[\t\r\n]/g, " ");
   }
 
-  const players = rawRows
-    .filter(p => p && typeof p === "object")
-    .map((entry, i) => {
-      const p = entry._data ?? entry;
-      const user = parse(p.userInfo);
-      const info = parse(
-        p.playerInfo ?? user.playerInfo
-      );
-      return {
-        rank: Number(p.rank ?? p.ranking ?? p.no ?? i + 1) || i + 1,
-        serverId: p.serverId ?? p.sid ??
-          info.serverId ?? info.sid ?? user.serverId ?? user.sid ?? "",
-        uid: toId(p.uid ?? info.uid ?? user.uid),
-        username: info.username ?? info.name ??
-          info.nickName ?? user.username ??
-          p.username ?? p.name ?? "",
-        points: Number(p.score ?? p.point ?? p.points ?? p.value ?? 0) || 0
-      };
-    })
-    .filter((player, index, rows) => rows.findIndex(other =>
-      (player.uid && other.uid === player.uid)
-      || (!player.uid && other.rank === player.rank && other.username === player.username)
-    ) === index)
-    .sort((a, b) => a.rank - b.rank);
-
-  window.CQ26_DB_PLAYERS = players;
-  window.CQ26_DB_RANKINGS = players;
-
-  console.log("수위병 랭킹:", players.length, "명");
-  console.table(players);
-
-  const missing = players.filter(
-    p => !p.uid || !p.username
-  );
-
-  if (missing.length) {
-    console.warn(
-      `UID 또는 닉네임 누락 ${missing.length}명:`,
-      missing
-    );
-    console.warn(
-      "원본 구조를 확인해야 하므로 복사는 보류합니다."
-    );
-    throw new Error(`랭킹 ${players.length}명 중 ${missing.length}명의 UID 또는 닉네임이 없습니다.`);
-  }
-
-  const safe = v => String(v ?? "")
-    .replace(/[\t\r\n]/g, " ");
-
-  const tsv = [
-    "순위\t서버\tUID\t닉네임\t개인 포인트",
-    ...players.map(p => [
-      p.rank, p.serverId, p.uid ? `'${p.uid}` : "",
-      p.username, p.points
-    ].map(safe).join("\t"))
-  ].join("\n");
-
-  window.CQ26_DB_TSV = tsv;
-
-  let copied = false;
-  try {
-    await navigator.clipboard.writeText(tsv);
-    copied = true;
-  } catch {}
-  if (!copied) {
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
     const textarea = document.createElement("textarea");
-    textarea.value = tsv;
+    textarea.value = text;
     textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
     document.body.appendChild(textarea);
     textarea.focus();
     textarea.select();
+    let copied = false;
     try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (!copied && typeof window.copy === "function") {
+      try { window.copy(text); copied = true; } catch {}
+    }
+    return copied;
   }
-  if (!copied && typeof window.copy === "function") {
-    window.copy(tsv);
-    copied = true;
-  }
-  if (!copied) throw new Error(`${players.length}명은 조사했지만 클립보드 복사에 실패했습니다.`);
 
-  const result = {
-    count: players.length,
-    copied,
-    source: { path: selected.path, component: selected.component, field: selected.field },
-    players
-  };
-  window.CQ26_MAMMOTH_DEFENSE_RESULT = result;
-  console.log(`${players.length}명 클립보드 복사 완료 → Ctrl+V`, result.source);
+  const panelNode = findPanel();
+  const selected = findCandidate(panelNode);
+  if (!selected) throw new Error("실시간 주둔 대열의 참여자 배열을 찾지 못했습니다.");
+  const players = [];
+  for (let index = 0; index < selected.raw.length; index++) {
+    const row = selected.raw[index]?._data ?? selected.raw[index] ?? {};
+    const user = parseObject(row.userInfo);
+    const info = parseObject(firstValue(row.playerInfo, user.playerInfo));
+    const tagValue = firstValue(row.aTag, info.aTag, row.alliance, info.alliance) ?? "";
+    const alliance = typeof tagValue === "object" ? String(firstValue(tagValue.tag, tagValue.name) || "") : String(tagValue);
+    const serverId = firstValue(row.serverId, row.sid, info.serverId, info.sid, user.serverId, user.sid) ?? "";
+    const uid = toId(firstValue(row.uid, row.userId, row.playerId, info.uid, info.userId, user.uid));
+    const nickname = String(firstValue(info.username, info.nickname, info.name, user.username, row.username, row.name) || "");
+    players.push({ order: index + 1, serverId, uid, alliance, nickname });
+  }
+  if (!players.length) throw new Error("실시간 주둔 대열에서 복사할 참여자가 없습니다.");
+
+  const lines = ["번호\t서버\tUID\t동맹\t닉네임"];
+  for (const player of players) {
+    const cells = [player.order, player.serverId, player.uid ? `'${player.uid}` : "", player.alliance, player.nickname];
+    for (let index = 0; index < cells.length; index++) cells[index] = safeCell(cells[index]);
+    lines.push(cells.join("\t"));
+  }
+  const tsv = lines.join("\n");
+  const copied = await copyText(tsv);
+  if (!copied) throw new Error(`${players.length}명은 조사했지만 Google Sheets용 복사에 실패했습니다.`);
+
+  const result = { dataset: "cq26-mammoth-live-garrison", capturedAt: new Date().toISOString(), count: players.length, copied: true, source: { component: selected.component, field: selected.field, length: selected.length }, players };
+  window.CQ26_MAMMOTH_GARRISON_RESULT = result;
+  window.CQ26_MAMMOTH_GARRISON_TSV = tsv;
+  console.table(players);
+  console.log(`[SSC2 맘모스 실시간 주둔대열조사] ${players.length}명 복사 완료`, result.source);
+  return result;
+})();
+
+},
+"mammothScore": function install_mammothScore() {
+window.CQ26_MAMMOTH_SCORE_PROMISE = (async () => {
+  "use strict";
+
+  const cc = window.cc;
+  const TARGET = "CQ26DBRankView";
+
+  function className(component) {
+    try {
+      const name = cc?.js?.getClassName?.(component) || component?.__classname__ || component?.constructor?.name || "";
+      return String(name);
+    } catch { return ""; }
+  }
+
+  function valid(node) {
+    try { return !!node && cc?.isValid?.(node); } catch { return !!node; }
+  }
+
+  function walk(root, callback, limit = 12000) {
+    const stack = root ? [root] : [];
+    const seen = new Set();
+    let count = 0;
+    while (stack.length && count++ < limit) {
+      const node = stack.pop();
+      if (!valid(node) || seen.has(node) || node.activeInHierarchy === false) continue;
+      seen.add(node);
+      callback(node);
+      const children = node.children || [];
+      for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]);
+    }
+  }
+
+  function findPanel() {
+    let panel = null;
+    walk(cc?.director?.getScene?.(), node => {
+      if (!panel && node.name === TARGET) panel = node;
+    });
+    if (!panel) throw new Error("맘모스 수위병 랭킹 화면을 먼저 열어주세요.");
+    return panel;
+  }
+
+  function candidateScore(field, value) {
+    const entry = value.find(item => item && typeof item === "object");
+    const row = entry?._data ?? entry;
+    if (!row || typeof row !== "object") return 0;
+    const keys = Object.keys(row);
+    let score = /rankList/i.test(field) ? 30 : 0;
+    if (!score && /rank|player|user|data|info|list/i.test(field)) score += 8;
+    if (keys.some(key => /^(rank|ranking|no|order)$/i.test(key))) score += 12;
+    if (keys.some(key => /score|point|value|val/i.test(key))) score += 12;
+    if (keys.some(key => /playerInfo|userInfo|roleInfo/i.test(key))) score += 6;
+    if (keys.some(key => /uid|userId|playerId/i.test(key))) score += 5;
+    return score;
+  }
+
+  function rankCandidates(panelNode) {
+    const candidates = [];
+    walk(panelNode, node => {
+      for (const component of node._components || []) {
+        for (const field of Object.keys(component || {})) {
+          let value;
+          try { value = component[field]; } catch { continue; }
+          if (!Array.isArray(value) || !value.length) continue;
+          const score = candidateScore(field, value);
+          if (score < 12) continue;
+          candidates.push({ component: className(component), field, length: value.length, score, raw: value });
+        }
+      }
+    }, 5000);
+    candidates.sort((left, right) => right.score - left.score || right.length - left.length);
+    return candidates;
+  }
+
+  function selfRows(panelNode) {
+    const rows = [];
+    walk(panelNode, node => {
+      for (const component of node._components || []) {
+        for (const field of Object.keys(component || {})) {
+          let value;
+          try { value = component[field]; } catch { continue; }
+          if (!value || Array.isArray(value) || typeof value !== "object") continue;
+          const row = value._data ?? value;
+          if (!row || row.node || row.children || row._components) continue;
+          const keys = Object.keys(row);
+          if (!keys.some(key => /^(rank|ranking|no|order)$/i.test(key))) continue;
+          if (!keys.some(key => /score|point|value|val/i.test(key))) continue;
+          rows.push(row);
+        }
+      }
+    }, 5000);
+    return rows;
+  }
+
+  function parseObject(value) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return {};
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch { return {}; }
+  }
+
+  function firstValue(...values) {
+    return values.find(value => value !== undefined && value !== null && value !== "") ?? null;
+  }
+
+  function toId(value) {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value === "string") return value;
+    const low = value?.low ?? value?._low;
+    const high = value?.high ?? value?._high;
+    if (typeof low !== "number" || typeof high !== "number") return String(value);
+    let number = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0);
+    if (!(value.unsigned ?? value._unsigned) && high < 0) number -= 1n << 64n;
+    return String(number);
+  }
+
+  function normalize(entry, index) {
+    const row = entry?._data ?? entry ?? {};
+    const user = parseObject(row.userInfo);
+    const info = parseObject(firstValue(row.playerInfo, user.playerInfo, row.roleInfo));
+    const rank = Number(firstValue(row.rank, row.ranking, row.no, row.order)) || index + 1;
+    const serverId = firstValue(row.serverId, row.sid, row.server, row.worldId, info.serverId, info.sid, user.serverId, user.sid) ?? "";
+    const uid = toId(firstValue(row.uid, row.pid, row.playerId, row.userId, row.roleId, info.uid, info.userId, user.uid));
+    const nickname = String(firstValue(info.username, info.nickname, info.name, user.username, row.username, row.nickname, row.name) || "");
+    const points = Number(firstValue(row.score, row.point, row.points, row.value, row.val)) || 0;
+    return { rank, serverId, uid, nickname, points };
+  }
+
+  function sameRow(left, right) {
+    if (left.uid && right.uid) return left.uid === right.uid;
+    return left.rank === right.rank && left.nickname === right.nickname && String(left.serverId) === String(right.serverId);
+  }
+
+  function safeCell(value) {
+    return String(value ?? "").replace(/[\t\r\n]/g, " ");
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (!copied && typeof window.copy === "function") {
+      try { window.copy(text); copied = true; } catch {}
+    }
+    return copied;
+  }
+
+  const panelNode = findPanel();
+  const candidates = rankCandidates(panelNode);
+  if (!candidates.length) throw new Error("현재 선택된 수위병 랭킹 데이터를 찾지 못했습니다.");
+  const selected = candidates[0];
+  const rawRows = [...selected.raw];
+  for (const selfRow of selfRows(panelNode)) {
+    const row = normalize(selfRow, rawRows.length);
+    let duplicate = false;
+    for (let index = 0; index < rawRows.length; index++) {
+      if (sameRow(normalize(rawRows[index], index), row)) duplicate = true;
+    }
+    if (!duplicate) rawRows.push(selfRow);
+  }
+
+  const rows = [];
+  for (let index = 0; index < rawRows.length; index++) {
+    if (!rawRows[index] || typeof rawRows[index] !== "object") continue;
+    const row = normalize(rawRows[index], index);
+    if (!rows.some(existing => sameRow(existing, row))) rows.push(row);
+  }
+  rows.sort((left, right) => left.rank - right.rank);
+  if (!rows.length) throw new Error("현재 수위병 랭킹에서 복사할 행이 없습니다.");
+
+  const lines = ["순위\t서버\tUID\t닉네임\t누적 포인트"];
+  for (const row of rows) {
+    const cells = [row.rank, row.serverId, row.uid ? `'${row.uid}` : "", row.nickname, row.points];
+    for (let index = 0; index < cells.length; index++) cells[index] = safeCell(cells[index]);
+    lines.push(cells.join("\t"));
+  }
+  const tsv = lines.join("\n");
+  const copied = await copyText(tsv);
+  if (!copied) throw new Error(`${rows.length}행은 조사했지만 Google Sheets용 복사에 실패했습니다.`);
+
+  const result = { dataset: "cq26-mammoth-cumulative-score", capturedAt: new Date().toISOString(), count: rows.length, copied: true, source: { component: selected.component, field: selected.field, length: selected.length }, rows };
+  window.CQ26_MAMMOTH_SCORE_RESULT = result;
+  window.CQ26_MAMMOTH_SCORE_TSV = tsv;
+  console.table(rows);
+  console.log(`[SSC2 맘모스 누적점수조사] ${rows.length}행 복사 완료`, result.source);
   return result;
 })();
 
@@ -66211,6 +66288,1809 @@ window.CQ26_SEAL_RANK_PROMISE = (async () => {
 })();
 
 },
+"wlbRanks": function install_wlbRanks() {
+window.CQ26_WLB_RANK_PROMISE = (async () => {
+  "use strict";
+
+  const cc = window.cc;
+  const TARGET = "CQ26WLBRankPanel";
+
+  function valid(node) {
+    try { return !!node && cc?.isValid?.(node); }
+    catch { return !!node; }
+  }
+
+  function className(component) {
+    try {
+      const name = cc?.js?.getClassName?.(component) || component?.__classname__ || component?.constructor?.name || "";
+      return String(name);
+    } catch {
+      return "";
+    }
+  }
+
+  function nodePath(node, maxDepth = 24) {
+    const parts = [];
+    let current = node;
+    for (let depth = 0; current && depth < maxDepth; depth++, current = current.parent) {
+      parts.unshift(String(current.name || "<unnamed>"));
+    }
+    return parts.join("/");
+  }
+
+  function walk(root, callback, limit = 12000) {
+    const stack = root ? [root] : [];
+    const seen = new Set();
+    let count = 0;
+    while (stack.length && count++ < limit) {
+      const node = stack.pop();
+      if (!valid(node) || seen.has(node) || node.activeInHierarchy === false) continue;
+      seen.add(node);
+      callback(node);
+      for (let index = (node.children || []).length - 1; index >= 0; index--) {
+        stack.push(node.children[index]);
+      }
+    }
+  }
+
+  function findPanel() {
+    let panel = null;
+    walk(cc?.director?.getScene?.(), node => {
+      if (!panel && node.name === TARGET) panel = node;
+    });
+    if (!panel) throw new Error("월드랜드 랭킹(CQ26WLBRankPanel) 화면을 먼저 열어주세요.");
+    return panel;
+  }
+
+  function cloneSafe(value, options = {}) {
+    const seen = new WeakSet();
+    const state = {
+      remaining: Math.max(80, Number(options.maxNodes ?? 900)),
+      maxDepth: Math.max(1, Number(options.maxDepth ?? 4)),
+      maxArray: Math.max(1, Number(options.maxArray ?? 20)),
+      maxKeys: Math.max(5, Number(options.maxKeys ?? 48))
+    };
+    const blockedKey = /(?:sprite|frame|texture|material|prefab|asset|atlas|skeleton|animation|button|label|layout|widget|icon|node)/i;
+    const blockedExact = new Set([
+      "parent", "children", "_components", "_eventTargets", "__eventTargets",
+      "_delegate", "_super", "_materials", "_renderData", "_assembler"
+    ]);
+
+    function visit(current, depth) {
+      if (current === null || current === undefined) return current ?? null;
+      if (typeof current === "string") return current.length > 800 ? `${current.slice(0, 800)}…` : current;
+      if (["number", "boolean"].includes(typeof current)) return current;
+      if (typeof current === "bigint") return String(current);
+      if (typeof current !== "object" || depth > state.maxDepth || state.remaining-- <= 0) return undefined;
+      if (seen.has(current)) return undefined;
+      if (current._components || current.children || current.node || current._objFlags !== undefined) return undefined;
+      seen.add(current);
+
+      if (Array.isArray(current)) {
+        const output = [];
+        for (const item of current.slice(0, state.maxArray)) {
+          const cloned = visit(item, depth + 1);
+          if (cloned !== undefined) output.push(cloned);
+        }
+        return output;
+      }
+
+      const output = {};
+      for (const key of Object.keys(current).slice(0, state.maxKeys)) {
+        if (blockedExact.has(key) || blockedKey.test(key)) continue;
+        let child;
+        try { child = visit(current[key], depth + 1); }
+        catch { continue; }
+        if (child !== undefined) output[key] = child;
+      }
+      return output;
+    }
+
+    return visit(value, 0);
+  }
+
+  function sampleRows(array) {
+    const selected = [];
+    for (const item of array.slice(0, 3)) selected.push(item?._data ?? item);
+    if (array.length > 3) selected.push(array[array.length - 1]?._data ?? array[array.length - 1]);
+    return cloneSafe(selected, { maxNodes: 1200, maxArray: 4, maxDepth: 5, maxKeys: 64 }) || [];
+  }
+
+  function arrayScore(field, array) {
+    const entry = array.find(item => item && typeof item === "object");
+    const row = entry?._data ?? entry;
+    if (!row || typeof row !== "object") return 0;
+    const keys = Object.keys(row);
+    let score = 0;
+    if (/rankList/i.test(field)) score += 30;
+    else if (/rank|player|user|member|data|info|list/i.test(field)) score += 8;
+    if (keys.some(key => /rank|ranking|order|no/i.test(key))) score += 12;
+    if (keys.some(key => /score|point|honor|fame|merit|contribution/i.test(key))) score += 12;
+    if (keys.some(key => /uid|userId|playerId/i.test(key))) score += 6;
+    if (keys.some(key => /sid|serverId|server/i.test(key))) score += 4;
+    if (keys.some(key => /playerInfo|userInfo|roleInfo/i.test(key))) score += 6;
+    return score;
+  }
+
+  function inspectArrays(panelNode) {
+    const candidates = [];
+    walk(panelNode, node => {
+      for (const component of node._components || []) {
+        const componentName = className(component);
+        for (const field of Object.keys(component || {})) {
+          let value;
+          try { value = component[field]; }
+          catch { continue; }
+          if (!Array.isArray(value) || !value.length) continue;
+          const score = arrayScore(field, value);
+          if (score < 8) continue;
+          const first = value.find(item => item && typeof item === "object");
+          const row = first?._data ?? first;
+          candidates.push({
+            path: nodePath(node),
+            component: componentName,
+            field,
+            length: value.length,
+            score,
+            keys: row && typeof row === "object" ? Object.keys(row).slice(0, 80) : [],
+            samples: sampleRows(value),
+            raw: value
+          });
+        }
+      }
+    }, 5000);
+    candidates.sort((a, b) => b.score - a.score || b.length - a.length);
+    return candidates.slice(0, 8);
+  }
+
+  function inspectSelfRows(panelNode) {
+    const rows = [];
+    walk(panelNode, node => {
+      for (const component of node._components || []) {
+        for (const field of Object.keys(component || {})) {
+          let value;
+          try { value = component[field]; }
+          catch { continue; }
+          if (!value || Array.isArray(value) || typeof value !== "object") continue;
+          const row = value._data ?? value;
+          if (!row || typeof row !== "object" || row.node || row.children || row._components) continue;
+          const keys = Object.keys(row);
+          if (!keys.some(key => /^(?:rank|ranking|no)$/i.test(key))) continue;
+          if (!keys.some(key => /score|point|honor|fame|merit|contribution/i.test(key))) continue;
+          rows.push({ path: nodePath(node), component: className(component), field, raw: row });
+        }
+      }
+    }, 5000);
+    return rows;
+  }
+
+  function parseObject(value) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return {};
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function firstValue(...values) {
+    return values.find(value => value !== undefined && value !== null && value !== "") ?? null;
+  }
+
+  function toId(value) {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value === "string") return value;
+    const low = value?.low ?? value?._low;
+    const high = value?.high ?? value?._high;
+    if (typeof low === "number" && typeof high === "number") {
+      let number = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0);
+      if (!(value.unsigned ?? value._unsigned) && high < 0) number -= 1n << 64n;
+      return String(number);
+    }
+    return String(value);
+  }
+
+  function normalizeRow(entry, index) {
+    const row = entry?._data ?? entry ?? {};
+    const playerInfo = parseObject(firstValue(row.playerInfo, row.player?.playerInfo, row.userInfo, row.roleInfo));
+    const rank = Number(firstValue(row.rank, row.ranking, row.no, row.order)) || index + 1;
+    const serverId = firstValue(row.sid, row.serverId, row.server, row.worldId, playerInfo.sid, playerInfo.serverId) ?? "";
+    const uid = toId(firstValue(row.uid, row.pid, row.playerId, row.userId, row.roleId, playerInfo.uid, playerInfo.userId));
+    const nickname = String(firstValue(playerInfo.username, playerInfo.nickname, playerInfo.userName, playerInfo.name, row.username, row.nickname, row.playerName, row.name, row.serverName) || "");
+    const personalPoints = Number(firstValue(row.score, row.point, row.points, row.personalPoint, row.personalPoints, row.value, row.val)) || 0;
+    const honor = Number(firstValue(row.score2, row.honor, row.fame, row.merit, row.contribution, row.contributionPoint)) || 0;
+    return {
+      rank,
+      serverId,
+      uid,
+      nickname,
+      personalPoints,
+      honor
+    };
+  }
+
+  function sameRow(left, right) {
+    if (left.uid && right.uid) return left.uid === right.uid;
+    return left.rank === right.rank && String(left.serverId) === String(right.serverId) && left.nickname === right.nickname;
+  }
+
+  function safeCell(value) {
+    return String(value ?? "").replace(/[\t\r\n]/g, " ");
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); }
+    finally { textarea.remove(); }
+    if (!copied && typeof window.copy === "function") {
+      try { window.copy(text); copied = true; } catch {}
+    }
+    return copied;
+  }
+
+  const panelNode = findPanel();
+  const candidates = inspectArrays(panelNode);
+  if (!candidates.length) {
+    throw new Error("활성 탭에서 랭킹 배열 후보를 찾지 못했습니다. 목록이 표시된 뒤 다시 조사하세요.");
+  }
+
+  const selected = candidates[0];
+  const rawRows = [...selected.raw];
+  for (const candidate of inspectSelfRows(panelNode)) {
+    const normalized = normalizeRow(candidate.raw, rawRows.length);
+    const duplicate = rawRows.some((entry, index) => sameRow(normalizeRow(entry, index), normalized));
+    if (!duplicate) rawRows.push(candidate.raw);
+  }
+
+  const rows = [];
+  for (let index = 0; index < rawRows.length; index++) {
+    if (!rawRows[index] || typeof rawRows[index] !== "object") continue;
+    const row = normalizeRow(rawRows[index], index);
+    if (!rows.some(existing => sameRow(row, existing))) rows.push(row);
+  }
+  rows.sort((left, right) => left.rank - right.rank);
+  if (!rows.length) throw new Error("랭킹 배열은 찾았지만 복사할 행이 없습니다.");
+
+  const lines = ["순위\t서버\tUID\t닉네임\t개인 포인트\t공훈"];
+  for (const row of rows) {
+    const cells = [row.rank, row.serverId, row.uid ? `'${row.uid}` : "", row.nickname, row.personalPoints, row.honor];
+    for (let index = 0; index < cells.length; index++) cells[index] = safeCell(cells[index]);
+    lines.push(cells.join("\t"));
+  }
+  const tsv = lines.join("\n");
+  const copied = await copyText(tsv);
+  if (!copied) throw new Error(`${rows.length}행은 조사했지만 스프레드시트용 복사에 실패했습니다.`);
+
+  const result = {
+    dataset: "cq26-wlb-ranking",
+    capturedAt: new Date().toISOString(),
+    target: TARGET,
+    count: rows.length,
+    copied: true,
+    source: {
+      path: selected.path,
+      component: selected.component,
+      field: selected.field,
+      length: selected.length,
+      keys: selected.keys
+    },
+    rows
+  };
+  window.CQ26_WLB_RANK_RESULT = result;
+  window.CQ26_WLB_RANK_TSV = tsv;
+  const candidateSummaries = [];
+  for (const { raw, ...candidate } of candidates) candidateSummaries.push(candidate);
+  window.CQ26_WLB_RANK_CANDIDATES = candidateSummaries;
+  console.table(rows);
+  console.log(`[SSC2 서리결정쟁탈전 랭킹조사] ${rows.length}행 Google Sheets용 복사 완료`, result.source);
+  return result;
+})();
+
+},
+"neutralCityRanks": function install_neutralCityRanks() {
+window.CQ25_NEUTRAL_CITY_RANK_PROMISE = (async () => {
+  "use strict";
+
+  const cc = window.cc;
+  const TARGET = "CQ25NeutralScorePanel";
+
+  function valid(node) {
+    try { return !!node && cc?.isValid?.(node); } catch { return !!node; }
+  }
+
+  function className(component) {
+    try {
+      const name = cc?.js?.getClassName?.(component) || component?.__classname__ || component?.constructor?.name || "";
+      return String(name);
+    } catch { return ""; }
+  }
+
+  function walk(root, callback, limit = 12000) {
+    const stack = root ? [root] : [];
+    const seen = new Set();
+    let count = 0;
+    while (stack.length && count++ < limit) {
+      const node = stack.pop();
+      if (!valid(node) || seen.has(node) || node.activeInHierarchy === false) continue;
+      seen.add(node);
+      callback(node);
+      const children = node.children || [];
+      for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]);
+    }
+  }
+
+  function findPanel() {
+    let panel = null;
+    walk(cc?.director?.getScene?.(), node => {
+      if (!panel && node.name === TARGET) panel = node;
+    });
+    if (!panel) throw new Error("중립도시 포인트 랭킹 화면을 먼저 열어주세요.");
+    return panel;
+  }
+
+  function labelText(root) {
+    let text = "";
+    walk(root, node => {
+      if (text) return;
+      for (const component of node._components || []) {
+        if (className(component) !== "cc.Label") continue;
+        const value = String(component.string ?? component._string ?? "").trim();
+        if (value) text = value;
+      }
+    }, 120);
+    return text;
+  }
+
+  function selectedTab(panelNode) {
+    let selected = "";
+    walk(panelNode, node => {
+      if (selected) return;
+      for (const component of node._components || []) {
+        if (!/Toggle$/i.test(className(component))) continue;
+        if (!(component.isChecked ?? component._isChecked)) continue;
+        const text = labelText(node);
+        if (/^\d{1,2}-\d{1,2}$/.test(text)) selected = text;
+      }
+    }, 3000);
+    return selected;
+  }
+
+  function arrayScore(field, value) {
+    const entry = value.find(item => item && typeof item === "object");
+    const row = entry?._data ?? entry;
+    if (!row || typeof row !== "object") return 0;
+    const keys = Object.keys(row);
+    let score = /rankList/i.test(field) ? 30 : 0;
+    if (!score && /rank|player|user|data|info|list/i.test(field)) score += 8;
+    if (keys.some(key => /^(rank|ranking|no|order)$/i.test(key))) score += 12;
+    if (keys.some(key => /score|point|value|val/i.test(key))) score += 12;
+    if (keys.some(key => /playerInfo|userInfo|roleInfo/i.test(key))) score += 6;
+    if (keys.some(key => /uid|userId|playerId/i.test(key))) score += 5;
+    return score;
+  }
+
+  function rankCandidates(panelNode) {
+    const candidates = [];
+    walk(panelNode, node => {
+      for (const component of node._components || []) {
+        for (const field of Object.keys(component || {})) {
+          let value;
+          try { value = component[field]; } catch { continue; }
+          if (!Array.isArray(value) || !value.length) continue;
+          const score = arrayScore(field, value);
+          if (score < 12) continue;
+          candidates.push({ component: className(component), field, length: value.length, score, raw: value });
+        }
+      }
+    }, 5000);
+    candidates.sort((left, right) => right.score - left.score || right.length - left.length);
+    return candidates;
+  }
+
+  function selfRows(panelNode) {
+    const rows = [];
+    walk(panelNode, node => {
+      for (const component of node._components || []) {
+        for (const field of Object.keys(component || {})) {
+          let value;
+          try { value = component[field]; } catch { continue; }
+          if (!value || Array.isArray(value) || typeof value !== "object") continue;
+          const row = value._data ?? value;
+          if (!row || row.node || row.children || row._components) continue;
+          const keys = Object.keys(row);
+          if (!keys.some(key => /^(rank|ranking|no|order)$/i.test(key))) continue;
+          if (!keys.some(key => /score|point|value|val/i.test(key))) continue;
+          rows.push(row);
+        }
+      }
+    }, 5000);
+    return rows;
+  }
+
+  function parseObject(value) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return {};
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch { return {}; }
+  }
+
+  function firstValue(...values) {
+    return values.find(value => value !== undefined && value !== null && value !== "") ?? null;
+  }
+
+  function toId(value) {
+    if (value === undefined || value === null || value === "") return "";
+    if (typeof value === "string") return value;
+    const low = value?.low ?? value?._low;
+    const high = value?.high ?? value?._high;
+    if (typeof low !== "number" || typeof high !== "number") return String(value);
+    let number = (BigInt(high >>> 0) << 32n) | BigInt(low >>> 0);
+    if (!(value.unsigned ?? value._unsigned) && high < 0) number -= 1n << 64n;
+    return String(number);
+  }
+
+  function normalize(entry, index, date) {
+    const row = entry?._data ?? entry ?? {};
+    const info = parseObject(firstValue(row.playerInfo, row.userInfo, row.roleInfo, row.player?.playerInfo));
+    const rank = Number(firstValue(row.rank, row.ranking, row.no, row.order)) || index + 1;
+    const serverId = firstValue(row.sid, row.serverId, row.server, row.worldId, info.sid, info.serverId) ?? "";
+    const uid = toId(firstValue(row.uid, row.pid, row.playerId, row.userId, row.roleId, info.uid, info.userId));
+    const nickname = String(firstValue(info.username, info.nickname, info.userName, info.name, row.username, row.nickname, row.playerName, row.name) || "");
+    const points = Number(firstValue(row.score, row.point, row.points, row.value, row.val)) || 0;
+    return { date, rank, serverId, uid, nickname, points };
+  }
+
+  function sameRow(left, right) {
+    if (left.uid && right.uid) return left.uid === right.uid;
+    return left.rank === right.rank && left.nickname === right.nickname && String(left.serverId) === String(right.serverId);
+  }
+
+  function safeCell(value) {
+    return String(value ?? "").replace(/[\t\r\n]/g, " ");
+  }
+
+  async function copyText(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (!copied && typeof window.copy === "function") {
+      try { window.copy(text); copied = true; } catch {}
+    }
+    return copied;
+  }
+
+  const panelNode = findPanel();
+  const date = selectedTab(panelNode);
+  const candidates = rankCandidates(panelNode);
+  if (!candidates.length) throw new Error("현재 날짜 탭의 랭킹 데이터를 찾지 못했습니다.");
+  const selected = candidates[0];
+  const rawRows = [...selected.raw];
+  for (const selfRow of selfRows(panelNode)) {
+    const row = normalize(selfRow, rawRows.length, date);
+    let duplicate = false;
+    for (let index = 0; index < rawRows.length; index++) {
+      if (sameRow(normalize(rawRows[index], index, date), row)) duplicate = true;
+    }
+    if (!duplicate) rawRows.push(selfRow);
+  }
+
+  const rows = [];
+  for (let index = 0; index < rawRows.length; index++) {
+    if (!rawRows[index] || typeof rawRows[index] !== "object") continue;
+    const row = normalize(rawRows[index], index, date);
+    if (!rows.some(existing => sameRow(existing, row))) rows.push(row);
+  }
+  rows.sort((left, right) => left.rank - right.rank);
+  if (!rows.length) throw new Error("현재 날짜 탭에서 복사할 랭킹 행이 없습니다.");
+
+  const lines = ["날짜\t순위\t서버\tUID\t닉네임\t포인트"];
+  for (const row of rows) {
+    const cells = [row.date, row.rank, row.serverId, row.uid ? `'${row.uid}` : "", row.nickname, row.points];
+    for (let index = 0; index < cells.length; index++) cells[index] = safeCell(cells[index]);
+    lines.push(cells.join("\t"));
+  }
+  const tsv = lines.join("\n");
+  const copied = await copyText(tsv);
+  if (!copied) throw new Error(`${rows.length}행은 읽었지만 Google Sheets용 복사에 실패했습니다.`);
+
+  const result = { dataset: "cq25-neutral-city-ranking", capturedAt: new Date().toISOString(), date, count: rows.length, copied: true, source: { component: selected.component, field: selected.field, length: selected.length }, rows };
+  window.CQ25_NEUTRAL_CITY_RANK_RESULT = result;
+  window.CQ25_NEUTRAL_CITY_RANK_TSV = tsv;
+  console.table(rows);
+  console.log(`[SSC2 중립도시 랭킹] ${date || "현재 탭"} · ${rows.length}행 복사 완료`, result.source);
+  return result;
+})();
+
+},
+"meritHistory": function install_meritHistory() {
+/**
+ * TopWar CQ26 Merit History Exporter v2.0.0
+ *
+ * Tampermonkey 없이 브라우저 DevTools Console 또는 Snippet에서 실행한다.
+ * 작고 이동 가능한 내보내기 UI를 만든다.
+ *
+ * 사용:
+ *   await CQ26MeritHistoryExporter.exportCurrent()
+ *
+ * 현재 하위 탭이 본 서버 공훈(type 3)이면 Google Sheets용 TSV를 복사하고,
+ * 전체 서버 총 공훈(type 1)이면 날짜별 누적 히스토리 JSON을 다운로드한다.
+ */
+
+(() => {
+  "use strict";
+
+  const API_NAME = "CQ26MeritHistoryExporter";
+  const OLD_API_NAME = "CQ26RankPanelInspector";
+  const TARGET_PANEL = "CQ26MainRankPanel";
+  const RANK_COMPONENT = "EniConquerorRankListComponent";
+  const PERSON_NODE = "CQ26PresonRankNode";
+  const TIME_ZONE = "Asia/Seoul";
+  const HISTORY_KEY = "CQ26_ALL_SERVER_MERIT_HISTORY_V1";
+  const HISTORY_DB_NAME = "CQ26_MERIT_HISTORY_DB";
+  const HISTORY_DB_VERSION = 1;
+  const HISTORY_STORE = "dailySnapshots";
+  const UI_POSITION_KEY = "CQ26_MERIT_EXPORTER_UI_POSITION_V1";
+  const UI_ID = "cq26-merit-exporter-ui";
+  const STYLE_ID = `${UI_ID}-style`;
+  const DATASET = "cq26-all-server-merit-history";
+  const VIEW_TYPE = Object.freeze({
+    ALL_SERVERS: 1,
+    SECTOR_ROUND: 2,
+    CURRENT_SERVER: 3
+  });
+  const runtime = {
+    loading: false,
+    stopRequested: false
+  };
+
+  try { window[API_NAME]?.destroy?.(); } catch {}
+  try { window[OLD_API_NAME]?.destroy?.(); } catch {}
+  document.getElementById("cq26-main-rank-panel-inspector")?.remove();
+  document.getElementById("cq26-main-rank-panel-inspector-style")?.remove();
+
+  function scene() {
+    try { return window.cc?.director?.getScene?.() || null; } catch { return null; }
+  }
+
+  function componentName(component) {
+    if (!component) return "";
+    try {
+      const name = window.cc?.js?.getClassName?.(component);
+      if (name) return String(name);
+    } catch {}
+    return String(component.__classname__ || component.constructor?.name || component.name || "");
+  }
+
+  function isActive(node) {
+    return !!node && node.active !== false && node.activeInHierarchy !== false;
+  }
+
+  function nodePath(node, maxDepth = 18) {
+    const parts = [];
+    let current = node;
+    for (let depth = 0; current && depth < maxDepth; depth++) {
+      parts.unshift(String(current.name || "<unnamed>"));
+      current = current.parent;
+    }
+    return parts.join("/");
+  }
+
+  function walk(root, callback, limit = 5000) {
+    const stack = root ? [root] : [];
+    const visited = new Set();
+    let count = 0;
+    while (stack.length && count < limit) {
+      const node = stack.pop();
+      if (!node || visited.has(node)) continue;
+      visited.add(node);
+      count++;
+      callback(node);
+      const children = node.children || [];
+      for (let index = children.length - 1; index >= 0; index--) stack.push(children[index]);
+    }
+  }
+
+  function componentsByName(root, wanted, activeOnly = false) {
+    const rows = [];
+    try {
+      for (const component of root?.getComponentsInChildren?.(wanted) || []) {
+        if (component && (!activeOnly || isActive(component.node))) rows.push(component);
+      }
+    } catch {}
+    walk(root, node => {
+      if (activeOnly && !isActive(node)) return;
+      for (const component of node._components || []) {
+        if (componentName(component) === wanted && !rows.includes(component)) rows.push(component);
+      }
+    });
+    return rows;
+  }
+
+  function activePanel() {
+    const root = scene();
+    if (!root) throw new Error("게임 Cocos scene을 찾지 못했습니다.");
+    const panel = componentsByName(root, TARGET_PANEL, true)[0] || null;
+    if (!panel?.node) throw new Error("CQ26MainRankPanel을 열어주세요.");
+    return panel;
+  }
+
+  function activePersonNode(panel) {
+    const contentList = Array.isArray(panel?._contentList) ? panel._contentList : [];
+    const selectedIndex = Number(panel?._selectIdx);
+    if (selectedIndex !== 2) {
+      throw new Error(`개인 공훈 랭킹 탭을 먼저 여세요. 현재 메인 탭 인덱스: ${selectedIndex}`);
+    }
+    const selected = contentList[selectedIndex];
+    if (selected?.name === PERSON_NODE && isActive(selected)) return selected;
+    const fallback = contentList.find(node => node?.name === PERSON_NODE && isActive(node));
+    if (!fallback) throw new Error("활성 CQ26PresonRankNode를 찾지 못했습니다.");
+    return fallback;
+  }
+
+  function rankComponent(personNode) {
+    const candidates = componentsByName(personNode, RANK_COMPONENT, true)
+      .filter(component => Array.isArray(component?.rankList));
+    const component = candidates.sort((a, b) => b.rankList.length - a.rankList.length)[0] || null;
+    if (!component) throw new Error("활성 공훈 rankList를 찾지 못했습니다.");
+    if (!component.rankList.length) throw new Error("공훈 데이터가 아직 로드되지 않았습니다. 잠시 후 다시 실행하세요.");
+    return component;
+  }
+
+  function findComponentOnNode(node, wanted) {
+    return (node?._components || []).find(component => componentName(component) === wanted) || null;
+  }
+
+  function parseObject(value) {
+    if (value && typeof value === "object" && !Array.isArray(value)) return value;
+    if (typeof value !== "string" || !value.trim()) return {};
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function firstValue(...values) {
+    return values.find(value => value !== undefined && value !== null && value !== "") ?? null;
+  }
+
+  function normalizeRankRow(raw) {
+    const playerInfo = parseObject(firstValue(
+      raw?.playerInfo,
+      raw?.player?.playerInfo,
+      raw?.userInfo,
+      raw?.roleInfo
+    ));
+    return {
+      rank: Number(firstValue(raw?.rank, raw?.ranking, raw?.no)) || null,
+      nickname: String(firstValue(
+        playerInfo.username,
+        playerInfo.nickname,
+        playerInfo.userName,
+        raw?.username,
+        raw?.nickname,
+        raw?.playerName,
+        raw?.name
+      ) || ""),
+      merit: Number(firstValue(
+        raw?.score,
+        raw?.merit,
+        raw?.token,
+        raw?.tokens,
+        raw?.point,
+        raw?.points,
+        raw?.value,
+        raw?.val
+      )) || 0,
+      uid: String(firstValue(raw?.uid, raw?.pid, raw?.playerId, raw?.userId, raw?.roleId) || ""),
+      serverId: Number(firstValue(raw?.sid, raw?.serverId, raw?.server, raw?.worldId)) || null,
+      level: Number(firstValue(playerInfo.level, raw?.level, raw?.lv)) || null,
+      countryFlag: Number(firstValue(
+        playerInfo.nationalflag,
+        playerInfo.nationalFlag,
+        raw?.nationalflag
+      )) || null,
+      gender: Number(firstValue(playerInfo.usergender, playerInfo.gender, raw?.gender)) || 0,
+      headFrameId: Number(firstValue(raw?.headFrameId, raw?.frameId)) || 0
+    };
+  }
+
+  function seoulDate(date = new Date()) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(date);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return `${values.year}-${values.month}-${values.day}`;
+  }
+
+  function seoulDateTime(date = new Date()) {
+    return new Intl.DateTimeFormat("sv-SE", {
+      timeZone: TIME_ZONE,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    }).format(date);
+  }
+
+  function inspectCurrent() {
+    const panel = activePanel();
+    const personNode = activePersonNode(panel);
+    const rank = rankComponent(personNode);
+    const personComponent = findComponentOnNode(personNode, PERSON_NODE);
+    const request = rank.data || {};
+    const requestParam = request.requestParam || {};
+    const viewType = Number(requestParam.type ?? request.checkType);
+    const round = Number(firstValue(
+      requestParam.round,
+      request.cellExtraData?.round,
+      personComponent?._curRound
+    )) || null;
+    const totalRound = Number(personComponent?._totalRound) || null;
+    const rows = rank.rankList.map(normalizeRankRow)
+      .filter(row => row.rank !== null)
+      .sort((a, b) => a.rank - b.rank);
+    const viewName = viewType === VIEW_TYPE.CURRENT_SERVER
+      ? "current-server"
+      : viewType === VIEW_TYPE.ALL_SERVERS
+        ? "all-servers"
+        : viewType === VIEW_TYPE.SECTOR_ROUND
+          ? "sector-round"
+          : "unknown";
+    return {
+      target: TARGET_PANEL,
+      viewType,
+      viewName,
+      requestId: Number(request.requestId) || null,
+      round,
+      totalRound,
+      count: rows.length,
+      panelPath: nodePath(panel.node),
+      rankPath: nodePath(rank.node),
+      rows
+    };
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function nextFrame() {
+    return new Promise(resolve => {
+      if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 16);
+    });
+  }
+
+  function assertNotStopped() {
+    if (!runtime.stopRequested) return;
+    const error = new Error("사용자가 데이터 불러오기를 중지했습니다.");
+    error.code = "CQ26_EXPORT_STOPPED";
+    throw error;
+  }
+
+  function activeScrollView(personNode, rank) {
+    const candidates = [];
+    const add = component => {
+      const name = componentName(component);
+      if (!component || !/ScrollView$/i.test(name) || !isActive(component.node) || candidates.includes(component)) return;
+      candidates.push(component);
+    };
+
+    // 랭킹 컴포넌트가 붙은 scrollView 노드와 그 부모를 가장 먼저 조사한다.
+    let node = rank?.node || null;
+    for (let depth = 0; node && depth < 5; depth++, node = node.parent) {
+      try { add(node.getComponent?.(window.cc?.ScrollView)); } catch {}
+      try { add(node.getComponent?.("cc.ScrollView")); } catch {}
+      for (const component of node._components || []) add(component);
+    }
+
+    for (const field of ["_scrollView", "scrollView", "_scroll", "scroll"]) add(rank?.[field]);
+    for (const component of componentsByName(personNode, "cc.ScrollView", true)) add(component);
+
+    const rankPath = nodePath(rank?.node);
+    return candidates.sort((a, b) => {
+      const score = component => {
+        const path = nodePath(component?.node);
+        let value = 0;
+        if (component?.node === rank?.node) value += 1000;
+        if (path === rankPath) value += 500;
+        if (rankPath.startsWith(`${path}/`) || path.startsWith(`${rankPath}/`)) value += 200;
+        if (/scrollview/i.test(String(component?.node?.name || ""))) value += 50;
+        try {
+          const max = component.getMaxScrollOffset?.();
+          if (Math.abs(Number(max?.y || 0)) > 0) value += 20;
+        } catch {}
+        return value;
+      };
+      return score(b) - score(a);
+    })[0] || null;
+  }
+
+  function dispatchBottomLoad(personNode, rank) {
+    const scroll = activeScrollView(personNode, rank);
+    const eventType = window.cc?.ScrollView?.EventType?.SCROLL_TO_BOTTOM || "scroll-to-bottom";
+    try {
+      // ScrollView가 실제 하단 도달 시 사용하는 동일한 이벤트 경로다.
+      // 좌표를 움직이지 않으므로 화면이 튀지 않고 scrollEvents와 node 이벤트를 모두 실행한다.
+      if (typeof scroll?._dispatchEvent === "function") {
+        scroll._dispatchEvent(eventType);
+        return { triggered: true, method: "dispatch" };
+      }
+    } catch {}
+
+    try {
+      const handlers = scroll?.scrollEvents;
+      const emitEvents = window.cc?.Component?.EventHandler?.emitEvents;
+      if (Array.isArray(handlers) && handlers.length && typeof emitEvents === "function") {
+        emitEvents(handlers, scroll, eventType);
+        scroll?.node?.emit?.(eventType, scroll);
+        return { triggered: true, method: "handlers" };
+      }
+    } catch {}
+
+    try {
+      if (scroll?.node && typeof scroll.node.emit === "function") {
+        scroll.node.emit(eventType, scroll);
+        return { triggered: true, method: "node-event" };
+      }
+    } catch {}
+
+    return { triggered: false, method: "none" };
+  }
+
+  async function triggerVisibleBottomLoad(personNode, rank, options = {}) {
+    const scroll = activeScrollView(personNode, rank);
+    const table = rank?._tableView || null;
+    const duration = Math.max(0.02, Math.min(0.25, Number(options.duration ?? 0.06)));
+    let moved = false;
+
+    try {
+      const max = scroll?.getMaxScrollOffset?.();
+      if (max && typeof scroll?.scrollToOffset === "function") {
+        scroll.stopAutoScroll?.();
+        scroll.scrollToOffset({ x: Number(max.x || 0), y: Number(max.y || 0) }, duration, false);
+        moved = true;
+      } else if (typeof scroll?.scrollToBottom === "function") {
+        // 새 데이터로 늘어난 높이만큼 짧게 따라붙어 연속 스크롤처럼 보이게 한다.
+        scroll.stopAutoScroll?.();
+        scroll.scrollToBottom(duration, false);
+        moved = true;
+      }
+    } catch {}
+    if (!moved) {
+      for (const method of ["scrollToBottom", "scrollToEnd"]) {
+        try {
+          if (typeof table?.[method] === "function") {
+            table[method](duration);
+            moved = true;
+            break;
+          }
+        } catch {}
+      }
+    }
+    await sleep(Math.ceil(duration * 1000) + 20);
+    await nextFrame();
+
+    // 좌표 이동만으로 하단 콜백을 발생시키지 않는 Cocos 빌드가 있어 실제 이동 후 명시적으로 전달한다.
+    if (moved) dispatchBottomLoad(personNode, rank);
+    return {
+      moved,
+      hasScrollView: !!scroll,
+      hasTableView: !!table,
+      scrollPath: nodePath(scroll?.node)
+    };
+  }
+
+  async function triggerOriginalBottomLoad(personNode, rank, force = false) {
+    const scroll = activeScrollView(personNode, rank);
+    const table = rank?._tableView || null;
+    let moved = false;
+
+    // 최초 구현에서 추가 로딩을 다시 발생시켰던 짧은 위/아래 이동을 그대로 유지한다.
+    if (force && scroll) {
+      try {
+        const max = scroll.getMaxScrollOffset?.();
+        if (max && typeof scroll.scrollToOffset === "function") {
+          scroll.scrollToOffset({
+            x: Number(max.x || 0),
+            y: Math.max(0, Number(max.y || 0) - 24)
+          }, 0, false);
+          await nextFrame();
+        }
+      } catch {}
+    }
+
+    try {
+      if (typeof scroll?.scrollToBottom === "function") {
+        scroll.scrollToBottom(0, false);
+        moved = true;
+      }
+    } catch {}
+    if (!moved) {
+      for (const method of ["scrollToBottom", "scrollToEnd"]) {
+        try {
+          if (typeof table?.[method] === "function") {
+            table[method](0);
+            moved = true;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    await nextFrame();
+    await nextFrame();
+    if (force) dispatchBottomLoad(personNode, rank);
+    return { moved, forced: force, scrollPath: nodePath(scroll?.node) };
+  }
+
+  async function triggerPullPastBottom(personNode, rank, options = {}) {
+    const scroll = activeScrollView(personNode, rank);
+    const content = scroll?.content;
+    if (!scroll || !content) return triggerOriginalBottomLoad(personNode, rank, true);
+
+    const pullDistance = Math.max(24, Math.min(180, Number(options.pullDistance ?? 72)));
+    const pullSteps = Math.max(2, Math.min(8, Number(options.pullSteps ?? 4)));
+    let direction = 1;
+
+    try {
+      scroll.stopAutoScroll?.();
+      const max = scroll.getMaxScrollOffset?.();
+      if (max && typeof scroll.scrollToOffset === "function") {
+        scroll.scrollToOffset({
+          x: Number(max.x || 0),
+          y: Math.max(0, Number(max.y || 0) - 32)
+        }, 0, false);
+        await nextFrame();
+        const nearY = Number(content.position?.y ?? content.y ?? 0);
+        scroll.scrollToBottom?.(0, false);
+        await nextFrame();
+        const bottomY = Number(content.position?.y ?? content.y ?? nearY);
+        direction = Math.sign(bottomY - nearY) || 1;
+      } else {
+        scroll.scrollToBottom?.(0, false);
+        await nextFrame();
+      }
+    } catch {}
+
+    const stepY = direction * pullDistance / pullSteps;
+    for (let index = 0; index < pullSteps; index++) {
+      assertNotStopped();
+      let moved = false;
+      try {
+        if (typeof scroll._moveContent === "function" && typeof window.cc?.v2 === "function") {
+          scroll._moveContent(window.cc.v2(0, stepY), false);
+          moved = true;
+        }
+      } catch {}
+      if (!moved) {
+        try {
+          const x = Number(content.position?.x ?? content.x ?? 0);
+          const y = Number(content.position?.y ?? content.y ?? 0) + stepY;
+          if (typeof content.setPosition === "function") content.setPosition(x, y);
+          else content.y = y;
+          moved = true;
+        } catch {}
+      }
+      try { scroll._dispatchEvent?.("scrolling"); } catch {}
+      try { scroll.node?.emit?.("scrolling", scroll); } catch {}
+      await nextFrame();
+    }
+
+    // 실제 휠 조작과 동일하게 경계 밖 상태에서 하단 이벤트와 휠 입력을 함께 전달한다.
+    try { scroll._dispatchEvent?.("scroll-to-bottom"); } catch {}
+    try { scroll.node?.emit?.("scroll-to-bottom", scroll); } catch {}
+    await triggerWheelLoad(personNode, rank, {
+      pulses: Number(options.wheelPulses ?? 2),
+      deltaY: Number(options.wheelDelta ?? 360),
+      intervalMs: 8
+    });
+    await sleep(25);
+
+    // 휠을 놓았을 때 Cocos가 발생시키는 탄성 복귀와 종료 이벤트까지 재현한다.
+    try {
+      if (!scroll._startBounceBackIfNeeded?.()) scroll.scrollToBottom?.(0.06, false);
+    } catch {
+      try { scroll.scrollToBottom?.(0.06, false); } catch {}
+    }
+    await sleep(75);
+    for (const eventType of ["bounce-bottom", "scroll-ended"]) {
+      try { scroll._dispatchEvent?.(eventType); } catch {}
+      try { scroll.node?.emit?.(eventType, scroll); } catch {}
+    }
+    await nextFrame();
+    return {
+      moved: true,
+      pullDistance,
+      pullSteps,
+      direction,
+      scrollPath: nodePath(scroll.node)
+    };
+  }
+
+  function gameCanvas() {
+    return window.cc?.game?.canvas
+      || document.querySelector?.("#GameCanvas")
+      || document.querySelector?.("canvas")
+      || null;
+  }
+
+  function wheelPoint(canvas, node) {
+    const rect = canvas?.getBoundingClientRect?.();
+    if (!rect) return { clientX: 0, clientY: 0 };
+    let xRatio = 0.5;
+    let yRatio = 0.52;
+    try {
+      const box = node?.getBoundingBoxToWorld?.();
+      const visible = window.cc?.view?.getVisibleSize?.();
+      if (box && Number(visible?.width) > 0 && Number(visible?.height) > 0) {
+        xRatio = (Number(box.x || 0) + Number(box.width || 0) / 2) / Number(visible.width);
+        yRatio = 1 - (Number(box.y || 0) + Number(box.height || 0) / 2) / Number(visible.height);
+      }
+    } catch {}
+    return {
+      clientX: rect.left + Math.max(0.05, Math.min(0.95, xRatio)) * rect.width,
+      clientY: rect.top + Math.max(0.05, Math.min(0.95, yRatio)) * rect.height
+    };
+  }
+
+  function cocosNodeWheel(scroll, rank, deltaY) {
+    const cc = window.cc;
+    const target = scroll?.content || rank?.node || scroll?.node;
+    const MouseEvent = cc?.Event?.EventMouse || cc?.EventMouse;
+    const eventType = cc?.Node?.EventType?.MOUSE_WHEEL || "mouse-wheel";
+    if (!target || typeof MouseEvent !== "function") return false;
+    try {
+      const event = new MouseEvent(eventType, true);
+      const box = target.getBoundingBoxToWorld?.() || scroll?.node?.getBoundingBoxToWorld?.();
+      const worldX = Number(box?.x || 0) + Number(box?.width || 0) / 2;
+      const worldY = Number(box?.y || 0) + Number(box?.height || 0) / 2;
+      event.setLocation?.(worldX, worldY);
+      event.setScrollData?.(0, -Math.max(1, Math.round(deltaY / 120)));
+      event._button = 0;
+      if (typeof target.dispatchEvent === "function") target.dispatchEvent(event);
+      else target.emit?.(eventType, event);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function inputManagerWheel(canvas, point, deltaY) {
+    const cc = window.cc;
+    const managers = [cc?.internal?.inputManager, cc?._inputManager, cc?.inputManager]
+      .filter((value, index, values) => value && values.indexOf(value) === index);
+    const manager = managers.find(value => typeof value?._mouseWheelHandler === "function");
+    if (!manager || !canvas) return false;
+    try {
+      const event = {
+        target: canvas,
+        button: 0,
+        clientX: point.clientX,
+        clientY: point.clientY,
+        pageX: point.clientX + Number(window.scrollX || 0),
+        pageY: point.clientY + Number(window.scrollY || 0),
+        deltaX: 0,
+        deltaY,
+        detail: Math.max(1, Math.round(deltaY / 120)),
+        wheelDelta: -deltaY,
+        wheelDeltaY: -deltaY,
+        preventDefault() {},
+        stopPropagation() {}
+      };
+      manager._mouseWheelHandler(event);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function triggerWheelLoad(personNode, rank, options = {}) {
+    const canvas = gameCanvas();
+    const Wheel = window.WheelEvent;
+    const scroll = activeScrollView(personNode, rank);
+    const point = wheelPoint(canvas, scroll?.node || rank?.node);
+    const pulses = Math.max(1, Math.min(30, Number(options.pulses ?? 8)));
+    const deltaY = Math.max(120, Math.min(4000, Number(options.deltaY ?? 1000)));
+    const intervalMs = Math.max(4, Math.min(40, Number(options.intervalMs ?? 10)));
+
+    let dispatched = 0;
+    const routes = { cocosNode: 0, inputManager: 0, dom: 0 };
+    for (let index = 0; index < pulses; index++) {
+      assertNotStopped();
+      let pulseSent = false;
+      if (cocosNodeWheel(scroll, rank, deltaY)) {
+        routes.cocosNode++;
+        pulseSent = true;
+      }
+      if (inputManagerWheel(canvas, point, deltaY)) {
+        routes.inputManager++;
+        pulseSent = true;
+      }
+      // Cocos Creator 버전에 따라 wheel 또는 구형 mousewheel/DOMMouseScroll을 구독한다.
+      for (const eventType of canvas?.dispatchEvent && typeof Wheel === "function"
+        ? ["wheel", "mousewheel", "DOMMouseScroll"]
+        : []) {
+        try {
+          const event = new Wheel(eventType, {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: point.clientX,
+            clientY: point.clientY,
+            deltaX: 0,
+            deltaY,
+            deltaMode: 0
+          });
+          try { Object.defineProperty(event, "wheelDelta", { value: -deltaY }); } catch {}
+          try { Object.defineProperty(event, "wheelDeltaY", { value: -deltaY }); } catch {}
+          try { Object.defineProperty(event, "detail", { value: Math.max(1, Math.round(deltaY / 120)) }); } catch {}
+          canvas.dispatchEvent(event);
+          routes.dom++;
+          pulseSent = true;
+        } catch {}
+      }
+      if (pulseSent) dispatched++;
+      if (index + 1 < pulses) await sleep(intervalMs);
+    }
+    await nextFrame();
+    return { dispatched: dispatched > 0, pulses: dispatched, canvas: !!canvas, point, routes };
+  }
+
+  async function waitForRankGrowth(rank, beforeLength, options = {}) {
+    const timeoutMs = Math.max(250, Number(options.timeoutMs || 1000));
+    const settleMs = Math.max(30, Number(options.settleMs || 60));
+    const startedAt = Date.now();
+    let lastLength = Number(rank?.rankList?.length || 0);
+    let lastChangeAt = startedAt;
+    while (Date.now() - startedAt < timeoutMs) {
+      assertNotStopped();
+      await sleep(25);
+      const length = Number(rank?.rankList?.length || 0);
+      if (length !== lastLength) {
+        lastLength = length;
+        lastChangeAt = Date.now();
+      }
+      if (length > beforeLength && Date.now() - lastChangeAt >= settleMs) {
+        return { grew: true, length, elapsedMs: Date.now() - startedAt };
+      }
+    }
+    return {
+      grew: Number(rank?.rankList?.length || 0) > beforeLength,
+      length: Number(rank?.rankList?.length || 0),
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  function progressText(progress) {
+    const speed = progress.elapsedMs > 0
+      ? Math.round((progress.count - progress.startedCount) * 1000 / progress.elapsedMs)
+      : 0;
+    return `현재 확보 ${progress.count.toLocaleString()}명\n${speed.toLocaleString()}명/초 · 종료 확인 ${progress.stable}/${progress.stableTarget}`;
+  }
+
+  function reportStatus(options, message, tone = "normal") {
+    try { options?.onStatus?.(message, tone); } catch {}
+  }
+
+  async function loadRankRowsUntilStable(options = {}) {
+    const before = inspectCurrent();
+    if (![VIEW_TYPE.CURRENT_SERVER, VIEW_TYPE.ALL_SERVERS].includes(before.viewType)) {
+      if (before.viewType === VIEW_TYPE.SECTOR_ROUND) {
+        throw new Error("해당 섹터 이번 라운드 공훈은 내보내기 제외 대상입니다.");
+      }
+      throw new Error(`지원하지 않는 공훈 view type입니다: ${before.viewType}`);
+    }
+
+    const panel = activePanel();
+    const personNode = activePersonNode(panel);
+    const rank = rankComponent(personNode);
+    const isAllServers = before.viewType === VIEW_TYPE.ALL_SERVERS;
+    const stableTarget = Math.max(1, Number(options.stableRounds ?? (isAllServers ? 3 : 2)));
+    const maxIterations = Math.max(1, Number(options.maxIterations ?? (isAllServers ? 2500 : 200)));
+    const minTimeoutMs = Math.max(250, Number(options.minPageTimeoutMs ?? (isAllServers ? 650 : 500)));
+    const maxTimeoutMs = Math.max(minTimeoutMs, Number(options.maxPageTimeoutMs ?? (isAllServers ? 1800 : 1300)));
+    const startedAt = Date.now();
+    const startedCount = rank.rankList.length;
+    let stable = 0;
+    let iterations = 0;
+    let growthEvents = 0;
+    let averageResponseMs = isAllServers ? 350 : 250;
+    let usedForcedRetry = false;
+
+    runtime.stopRequested = false;
+    while (stable < stableTarget && iterations < maxIterations) {
+      assertNotStopped();
+      if (!isActive(panel.node) || !isActive(personNode) || !isActive(rank.node)) {
+        throw new Error("데이터를 불러오는 중 랭킹 패널 또는 선택 탭이 닫혔습니다.");
+      }
+      const currentView = Number(rank?.data?.requestParam?.type ?? rank?.data?.checkType);
+      if (currentView !== before.viewType) {
+        throw new Error("데이터를 불러오는 중 공훈 하위 탭이 변경되었습니다.");
+      }
+
+      iterations++;
+      const beforeLength = rank.rankList.length;
+      const adaptiveTimeoutMs = Math.max(
+        minTimeoutMs,
+        Math.min(maxTimeoutMs, Math.round(averageResponseMs * 2.4 + 180))
+      );
+      await triggerPullPastBottom(personNode, rank, {
+        pullDistance: options.pullDistance ?? (isAllServers ? 76 : 60),
+        pullSteps: options.pullSteps ?? 4
+      });
+      let growth = await waitForRankGrowth(rank, beforeLength, {
+        timeoutMs: adaptiveTimeoutMs,
+        settleMs: options.settleMs
+      });
+      if (!growth.grew) {
+        usedForcedRetry = true;
+        await triggerPullPastBottom(personNode, rank, {
+          pullDistance: options.retryPullDistance ?? (isAllServers ? 120 : 88),
+          pullSteps: options.retryPullSteps ?? 5
+        });
+        growth = await waitForRankGrowth(rank, beforeLength, {
+          timeoutMs: Math.min(maxTimeoutMs, Math.max(minTimeoutMs, adaptiveTimeoutMs)),
+          settleMs: options.settleMs
+        });
+      }
+
+      if (growth.grew) {
+        stable = 0;
+        growthEvents++;
+        averageResponseMs = Math.max(60, Math.round(averageResponseMs * 0.7 + growth.elapsedMs * 0.3));
+      } else {
+        stable++;
+      }
+
+      const progress = {
+        viewType: before.viewType,
+        count: rank.rankList.length,
+        startedCount,
+        stable,
+        stableTarget,
+        iterations,
+        growthEvents,
+        elapsedMs: Date.now() - startedAt
+      };
+      options.onProgress?.(progress);
+      if (!options.onProgress && (growth.grew || stable === stableTarget)) {
+        console.log(`[CQ26 Merit Exporter] ${progressText(progress).replace("\n", " · ")}`);
+      }
+      if (growth.grew) await sleep(isAllServers ? 10 : 5);
+    }
+
+    assertNotStopped();
+    if (iterations >= maxIterations && stable < stableTarget) {
+      throw new Error(`최대 반복 횟수 ${maxIterations}회에 도달했습니다. 현재 ${rank.rankList.length}명.`);
+    }
+    if (isAllServers && startedCount <= 30 && rank.rankList.length === startedCount) {
+      throw new Error(
+        `휠 입력 후에도 전체 랭킹이 ${startedCount}명에서 증가하지 않았습니다. `
+        + "잘못된 30명 JSON은 저장하지 않았습니다."
+      );
+    }
+
+    const result = {
+      viewType: before.viewType,
+      startedCount,
+      finalCount: rank.rankList.length,
+      addedCount: rank.rankList.length - startedCount,
+      iterations,
+      growthEvents,
+      stableRounds: stable,
+      loadMethod: usedForcedRetry ? "pull-past-bottom+retry" : "pull-past-bottom",
+      elapsedMs: Date.now() - startedAt
+    };
+    console.log("[CQ26 Merit Exporter] 스크롤 데이터 불러오기 완료", result);
+    return result;
+  }
+
+  function sheetCell(value, forceText = false) {
+    let text = String(value ?? "").replace(/[\t\r\n]+/g, " ").trim();
+    if (forceText && text) text = `'${text}`;
+    else if (/^[=+\-@]/.test(text)) text = `'${text}`;
+    return text;
+  }
+
+  function buildCurrentServerSheet(options = {}) {
+    const current = inspectCurrent();
+    if (current.viewType !== VIEW_TYPE.CURRENT_SERVER) {
+      throw new Error(`본 서버 공훈을 연 뒤 실행하세요. 현재 view: ${current.viewName} (type ${current.viewType})`);
+    }
+    const now = new Date();
+    const date = seoulDate(now);
+    const extractedAtKst = seoulDateTime(now);
+    const includeHeader = options.includeHeader !== false;
+    const lines = [];
+    if (includeHeader) {
+      lines.push(["날짜", "추출시각(KST)", "라운드", "등수", "닉네임", "획득토큰", "UID", "서버ID", "레벨", "국가코드"].join("\t"));
+    }
+    for (const row of current.rows) {
+      lines.push([
+        sheetCell(date),
+        sheetCell(extractedAtKst),
+        sheetCell(current.round),
+        sheetCell(row.rank),
+        sheetCell(row.nickname),
+        sheetCell(row.merit),
+        sheetCell(row.uid, true),
+        sheetCell(row.serverId),
+        sheetCell(row.level),
+        sheetCell(row.countryFlag)
+      ].join("\t"));
+    }
+    return {
+      text: lines.join("\n"),
+      date,
+      extractedAtKst,
+      round: current.round,
+      rows: current.rows
+    };
+  }
+
+  async function writeClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {}
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.cssText = "position:fixed;left:-99999px;top:-99999px";
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    const ok = document.execCommand("copy");
+    area.remove();
+    if (!ok) throw new Error("클립보드 복사에 실패했습니다.");
+    return true;
+  }
+
+  async function copyCurrentServerSheet(options = {}) {
+    if (options.loadAll !== false) {
+      const loaded = await loadRankRowsUntilStable(options);
+      reportStatus(options, `${loaded.finalCount.toLocaleString()}명 불러오기 완료\nSheets 복사 중…`);
+    }
+    const output = buildCurrentServerSheet(options);
+    await writeClipboard(output.text);
+    reportStatus(options, `저장 완료 · ${output.rows.length.toLocaleString()}명\nGoogle Sheets용 복사`, "ok");
+    console.log(
+      `[CQ26 Merit Exporter] 본 서버 공훈 ${output.rows.length}행 복사 완료 · ${output.date} · 라운드 ${output.round}`
+    );
+    return output;
+  }
+
+  let historyDbPromise = null;
+  let legacyMigrationPromise = null;
+
+  function openHistoryDb() {
+    if (historyDbPromise) return historyDbPromise;
+    historyDbPromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(HISTORY_STORE)) {
+          db.createObjectStore(HISTORY_STORE, { keyPath: "date" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error || new Error("CQ26 히스토리 DB 열기 실패"));
+      request.onblocked = () => reject(new Error("CQ26 히스토리 DB가 다른 탭에서 사용 중입니다."));
+    });
+    return historyDbPromise;
+  }
+
+  async function historyStoreOperation(mode, operation) {
+    const db = await openHistoryDb();
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(HISTORY_STORE, mode);
+      const store = transaction.objectStore(HISTORY_STORE);
+      let result;
+      try {
+        result = operation(store);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      transaction.oncomplete = () => resolve(result?.result ?? result);
+      transaction.onerror = () => reject(transaction.error || new Error("CQ26 히스토리 DB 작업 실패"));
+      transaction.onabort = () => reject(transaction.error || new Error("CQ26 히스토리 DB 작업 중단"));
+    });
+  }
+
+  function putDailySnapshotDirect(snapshot) {
+    return historyStoreOperation("readwrite", store => store.put(snapshot));
+  }
+
+  function readDailySnapshotsDirect() {
+    return historyStoreOperation("readonly", store => store.getAll());
+  }
+
+  function clearDailySnapshotsDirect() {
+    return historyStoreOperation("readwrite", store => store.clear());
+  }
+
+  async function migrateLegacyHistory() {
+    if (legacyMigrationPromise) return legacyMigrationPromise;
+    legacyMigrationPromise = (async () => {
+      let parsed = null;
+      try { parsed = JSON.parse(localStorage.getItem(HISTORY_KEY) || "null"); } catch {}
+      if (parsed?.dataset === DATASET && parsed?.dates && typeof parsed.dates === "object") {
+        for (const snapshot of Object.values(parsed.dates)) {
+          if (snapshot?.date) await putDailySnapshotDirect(snapshot);
+        }
+        localStorage.removeItem(HISTORY_KEY);
+      }
+    })();
+    return legacyMigrationPromise;
+  }
+
+  function buildHistory(snapshots) {
+    const sorted = [...(snapshots || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    return {
+      schemaVersion: 2,
+      dataset: DATASET,
+      timezone: TIME_ZONE,
+      updatedAt: sorted.at(-1)?.extractedAt || null,
+      dates: Object.fromEntries(sorted.map(snapshot => [snapshot.date, snapshot]))
+    };
+  }
+
+  async function readHistory() {
+    await migrateLegacyHistory();
+    return buildHistory(await readDailySnapshotsDirect());
+  }
+
+  async function captureAllServersDaily() {
+    const current = inspectCurrent();
+    if (current.viewType !== VIEW_TYPE.ALL_SERVERS) {
+      throw new Error(`전체 서버 총 공훈을 연 뒤 실행하세요. 현재 view: ${current.viewName} (type ${current.viewType})`);
+    }
+    const now = new Date();
+    const date = seoulDate(now);
+    const extractedAt = now.toISOString();
+    const extractedAtKst = seoulDateTime(now);
+    const serverIds = [...new Set(current.rows.map(row => row.serverId).filter(Number.isFinite))]
+      .sort((a, b) => a - b);
+    const snapshot = {
+      date,
+      extractedAt,
+      extractedAtKst,
+      round: current.round,
+      totalRound: current.totalRound,
+      requestId: current.requestId,
+      count: current.rows.length,
+      serverCount: serverIds.length,
+      serverIds,
+      rankings: current.rows
+    };
+    await migrateLegacyHistory();
+    await putDailySnapshotDirect(snapshot);
+    console.log(
+      `[CQ26 Merit Exporter] 전체 서버 총 공훈 ${date} 저장 · ${snapshot.count}명 · ${snapshot.serverCount}개 서버`,
+      snapshot
+    );
+    return { snapshot };
+  }
+
+  function downloadJson(filename, value) {
+    const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return filename;
+  }
+
+  async function downloadAllServersHistory(options = {}) {
+    if (options.loadAll !== false) {
+      const loaded = await loadRankRowsUntilStable(options);
+      reportStatus(options, `${loaded.finalCount.toLocaleString()}명 불러오기 완료\n날짜 기록 저장 중…`);
+    }
+    const { snapshot } = await captureAllServersDaily();
+    reportStatus(options, `IndexedDB 저장 · ${snapshot.count.toLocaleString()}명\nJSON 만드는 중…`);
+    const dailyPayload = buildHistory([snapshot]);
+    const filename = `cq26-all-server-merit-${snapshot.date}.json`;
+    downloadJson(filename, dailyPayload);
+    reportStatus(options, `저장 완료 · ${snapshot.count.toLocaleString()}명\n${snapshot.date} JSON`, "ok");
+    console.log(`[CQ26 Merit Exporter] 홈페이지용 날짜 JSON 다운로드: ${filename}`);
+    return { filename, history: dailyPayload, snapshot };
+  }
+
+  async function exportCurrent(options = {}) {
+    const current = inspectCurrent();
+    if (current.viewType === VIEW_TYPE.CURRENT_SERVER) {
+      return copyCurrentServerSheet(options);
+    }
+    if (current.viewType === VIEW_TYPE.ALL_SERVERS) {
+      return await downloadAllServersHistory(options);
+    }
+    if (current.viewType === VIEW_TYPE.SECTOR_ROUND) {
+      throw new Error("해당 섹터 이번 라운드 공훈은 내보내기 제외 대상입니다.");
+    }
+    throw new Error(`지원하지 않는 공훈 view type입니다: ${current.viewType}`);
+  }
+
+  async function importHistory(value) {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    if (parsed?.dataset !== DATASET || !parsed?.dates || typeof parsed.dates !== "object") {
+      throw new Error("CQ26 전체 서버 공훈 히스토리 JSON 형식이 아닙니다.");
+    }
+    await migrateLegacyHistory();
+    for (const snapshot of Object.values(parsed.dates)) {
+      if (snapshot?.date) await putDailySnapshotDirect(snapshot);
+    }
+    return readHistory();
+  }
+
+  async function clearHistory() {
+    await clearDailySnapshotsDirect();
+    localStorage.removeItem(HISTORY_KEY);
+    console.warn("[CQ26 Merit Exporter] IndexedDB 전체 서버 공훈 히스토리를 초기화했습니다.");
+    return true;
+  }
+
+  async function downloadStoredHistory() {
+    const history = await readHistory();
+    const dates = Object.keys(history.dates || {}).sort();
+    if (!dates.length) throw new Error("저장된 전체 서버 공훈 히스토리가 없습니다.");
+    const latestDate = dates[dates.length - 1];
+    const filename = `cq26-all-server-merit-history-${latestDate}.json`;
+    downloadJson(filename, history);
+    return { filename, history, dates };
+  }
+
+  function setUiStatus(message, tone = "normal") {
+    const status = document.querySelector(`#${UI_ID} .cq26-export-status`);
+    if (!status) return;
+    status.textContent = String(message || "");
+    status.dataset.tone = tone;
+  }
+
+  function installStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      #${UI_ID}{position:fixed;right:10px;top:118px;width:214px;z-index:2147483647;
+        color:#eaf2ff;background:#172238;border:1px solid #52698f;border-radius:8px;
+        box-shadow:0 5px 18px #0008;font:11px/1.35 Arial,"Malgun Gothic",sans-serif;overflow:hidden}
+      #${UI_ID} *{box-sizing:border-box}
+      #${UI_ID} .cq26-export-head{height:30px;display:flex;align-items:center;justify-content:space-between;
+        padding:0 7px 0 9px;background:#263a5d;font-weight:700;cursor:move;user-select:none;touch-action:none}
+      #${UI_ID} .cq26-export-close{width:22px;height:22px;border:0;background:transparent;color:#dbe7ff;
+        font-size:16px;line-height:20px;cursor:pointer;padding:0}
+      #${UI_ID} .cq26-export-body{padding:7px}
+      #${UI_ID} .cq26-export-status{min-height:30px;padding:5px 6px;margin-bottom:6px;border-radius:4px;
+        color:#afbdd4;background:#0e1728;white-space:pre-wrap;word-break:break-word}
+      #${UI_ID} .cq26-export-status[data-tone="ok"]{color:#8ef0ad}
+      #${UI_ID} .cq26-export-status[data-tone="error"]{color:#ff9c9c}
+      #${UI_ID} .cq26-export-actions{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+      #${UI_ID} .cq26-export-actions button{height:29px;padding:4px;border:1px solid #60779c;border-radius:4px;
+        color:#eef3ff;background:#31486e;cursor:pointer;font:inherit}
+      #${UI_ID} .cq26-export-actions button:hover{background:#405d8c}
+      #${UI_ID} .cq26-export-current{background:#2e6b57!important}
+    `;
+    document.head.appendChild(style);
+  }
+
+  function savedUiPosition() {
+    try {
+      const value = JSON.parse(localStorage.getItem(UI_POSITION_KEY) || "null");
+      if (Number.isFinite(value?.left) && Number.isFinite(value?.top)) return value;
+    } catch {}
+    return null;
+  }
+
+  function saveUiPosition(panel) {
+    const rect = panel.getBoundingClientRect();
+    try {
+      localStorage.setItem(UI_POSITION_KEY, JSON.stringify({ left: rect.left, top: rect.top }));
+    } catch {}
+  }
+
+  function makeDraggable(panel, handle) {
+    let dragging = false;
+    let pointerId = null;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+    handle.addEventListener("pointerdown", event => {
+      if (event.target.closest("button")) return;
+      const rect = panel.getBoundingClientRect();
+      dragging = true;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      startLeft = rect.left;
+      startTop = rect.top;
+      handle.setPointerCapture?.(pointerId);
+      event.preventDefault();
+    });
+    handle.addEventListener("pointermove", event => {
+      if (!dragging || event.pointerId !== pointerId) return;
+      const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+      const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+      panel.style.left = `${Math.max(0, Math.min(maxLeft, startLeft + event.clientX - startX))}px`;
+      panel.style.top = `${Math.max(0, Math.min(maxTop, startTop + event.clientY - startY))}px`;
+      panel.style.right = "auto";
+    });
+    const finish = event => {
+      if (!dragging || (event?.pointerId != null && event.pointerId !== pointerId)) return;
+      dragging = false;
+      saveUiPosition(panel);
+    };
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
+  }
+
+  async function runCurrentExport() {
+    const current = inspectCurrent();
+    const options = {
+      onProgress: progress => setUiStatus(progressText(progress), "normal"),
+      onStatus: (message, tone) => setUiStatus(message, tone)
+    };
+    if (current.viewType === VIEW_TYPE.CURRENT_SERVER) {
+      const output = await copyCurrentServerSheet(options);
+      setUiStatus(`저장 완료 · ${output.rows.length.toLocaleString()}명\nGoogle Sheets용 복사`, "ok");
+      return output;
+    }
+    if (current.viewType === VIEW_TYPE.ALL_SERVERS) {
+      const output = await downloadAllServersHistory(options);
+      setUiStatus(`저장 완료 · ${output.snapshot.count.toLocaleString()}명\n${output.snapshot.date} JSON`, "ok");
+      return output;
+    }
+    if (current.viewType === VIEW_TYPE.SECTOR_ROUND) {
+      throw new Error("섹터 이번 라운드 공훈은 제외됩니다.");
+    }
+    throw new Error(`지원하지 않는 view type: ${current.viewType}`);
+  }
+
+  function showUi() {
+    if (document.getElementById(UI_ID)) return document.getElementById(UI_ID);
+    installStyle();
+    const panel = document.createElement("section");
+    panel.id = UI_ID;
+    panel.innerHTML = `
+      <div class="cq26-export-head">
+        <span>SSC2 개인랭킹</span>
+        <button class="cq26-export-close" type="button" title="닫기">×</button>
+      </div>
+      <div class="cq26-export-body">
+        <div class="cq26-export-status">공훈 탭 선택 후 내보내기</div>
+        <div class="cq26-export-actions">
+          <button class="cq26-export-current" type="button">현재 내보내기</button>
+          <button class="cq26-export-history" type="button">기록 JSON</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(panel);
+    const position = savedUiPosition();
+    if (position) {
+      panel.style.left = `${Math.max(0, Math.min(window.innerWidth - panel.offsetWidth, position.left))}px`;
+      panel.style.top = `${Math.max(0, Math.min(window.innerHeight - panel.offsetHeight, position.top))}px`;
+      panel.style.right = "auto";
+    }
+    makeDraggable(panel, panel.querySelector(".cq26-export-head"));
+    panel.querySelector(".cq26-export-close").addEventListener("click", () => {
+      if (runtime.loading) runtime.stopRequested = true;
+      panel.remove();
+    });
+    const exportButton = panel.querySelector(".cq26-export-current");
+    const historyButton = panel.querySelector(".cq26-export-history");
+    exportButton.addEventListener("click", async () => {
+      if (runtime.loading) {
+        runtime.stopRequested = true;
+        setUiStatus("안전하게 중지하는 중…", "normal");
+        return;
+      }
+      runtime.loading = true;
+      runtime.stopRequested = false;
+      exportButton.textContent = "중지";
+      historyButton.disabled = true;
+      try {
+        setUiStatus("처리 중…");
+        await runCurrentExport();
+      } catch (error) {
+        const stopped = error?.code === "CQ26_EXPORT_STOPPED";
+        setUiStatus(error?.message || String(error), stopped ? "normal" : "error");
+        if (!stopped) console.error("[CQ26 Merit Exporter] 내보내기 실패", error);
+      } finally {
+        runtime.loading = false;
+        runtime.stopRequested = false;
+        exportButton.textContent = "현재 내보내기";
+        historyButton.disabled = false;
+      }
+    });
+    historyButton.addEventListener("click", async () => {
+      try {
+        const output = await downloadStoredHistory();
+        const totalRows = Object.values(output.history.dates || {})
+          .reduce((sum, snapshot) => sum + Number(snapshot?.count || snapshot?.rankings?.length || 0), 0);
+        setUiStatus(
+          `누적 저장 · ${totalRows.toLocaleString()}명\n${output.dates.length.toLocaleString()}일 기록 JSON`,
+          "ok"
+        );
+      } catch (error) {
+        setUiStatus(error?.message || String(error), "error");
+      }
+    });
+    return panel;
+  }
+
+  function hideUi() {
+    document.getElementById(UI_ID)?.remove();
+  }
+
+  function destroy() {
+    hideUi();
+    document.getElementById(STYLE_ID)?.remove();
+    if (window[API_NAME] === api) delete window[API_NAME];
+  }
+
+  const api = {
+    version: "2.0.0",
+    inspect: inspectCurrent,
+    loadAll: loadRankRowsUntilStable,
+    stop: () => { runtime.stopRequested = true; },
+    exportCurrent,
+    buildCurrentServerSheet,
+    copyCurrentServerSheet,
+    captureAllServersDaily,
+    downloadAllServersHistory,
+    downloadStoredHistory,
+    getHistory: readHistory,
+    importHistory,
+    clearHistory,
+    show: showUi,
+    hide: hideUi,
+    destroy
+  };
+
+  window[API_NAME] = api;
+  showUi();
+  console.log("[CQ26 Merit Exporter] 작은 이동식 UI 설치 완료");
+  console.log("현재 탭 자동 내보내기: await CQ26MeritHistoryExporter.exportCurrent()");
+  console.log("본 서버 공훈 → Google Sheets 복사 / 전체 서버 총 공훈 → 날짜별 히스토리 JSON 다운로드");
+})();
+
+},
 "guildAudit": function install_guildAudit() {
 (()=>{"use strict";const K="__TOPWAR_GUILD_AUDIT_ONESHOT_V4__";window[K]?.destroy?.();const c={memberMaxScrolls:20,memberNoChangeLimit:4,contributionScrolls:10,scrollSteps:3,scrollStepDelay:4,afterScrollDelay:60,fromX:.5,fromY:.78,toX:.5,toY:.27,participationMinimum:1},s={stopped:false,members:new Map,contributions:new Map,result:[],memberSource:null,contributionSource:null},sleep=t=>new Promise(r=>setTimeout(r,t)),json=v=>{if(v&&typeof v==="object")return v;if(typeof v!=="string")return null;try{return JSON.parse(v)}catch{return null}},num=v=>{if(typeof v==="number")return Number.isFinite(v)?v:null;if(v==null||v==="")return null;const t=String(v).trim().replace(/,/g,"").replace(/\s+/g,""),m=t.match(/^(-?\d+(?:\.\d+)?)([kmbt])?$/i);if(m)return Number(m[1])*({K:1e3,M:1e6,B:1e9,T:1e12}[String(m[2]||"").toUpperCase()]||1);const x=t.replace(/[^0-9.+-]/g,"");if(!x)return null;const n=Number(x);return Number.isFinite(n)?n:null},uid=r=>String(r?.uid??r?.pid??r?.playerId??r?.userId??r?.roleId??r?.rid??r?.id??"").trim(),name=r=>{const p=json(r?.playerInfo)||{};return String(p.username||p.nickname||p.userName||r?.name||r?.username||r?.userName||r?.nickname||r?.nickName||r?.playerName||r?.roleName||"").trim()},nkey=v=>String(v??"").normalize("NFKC").replace(/\s+/g,"").toLowerCase(),walk=(n,f,p="")=>{if(!n)return;const q=p?`${p}/${n.name||n._name||"unknown"}`:String(n.name||n._name||"unknown");f(n,q);for(const x of n.children||[])walk(x,f,q)},popup=n=>{const sc=window.cc?.director?.getScene?.();if(!sc)throw Error("Cocos 게임 장면을 찾지 못했습니다.");let z=null;walk(sc,x=>{if(!z&&(x.name||x._name)===n&&x.active!==false&&x.activeInHierarchy!==false)z=x});return z},member=r=>{const u=uid(r);return u?{uid:u,name:name(r),level:r.level??r.lv??r.userLevel??r.roleLevel??null,power:num(r.power??r.cp??r.fight??r.fightPower??r.combatPower??r.totalPower??r.val),role:r.r_level??r.role??r.position??r.memberRole??r.duty??r.job??r.title??r.rank??null,raw:r}:null},contrib=r=>{const u=uid(r);return u&&r?.power!=null?{uid:u,name:name(r),contribution:num(r.power)??0,roleLevel:r.r_level??null,worldId:r.worldId??null,raw:r}:null},findSource=(root,mode)=>{const out=[],vo=new WeakSet,va=new WeakSet;const inspect=(o,p,d=0)=>{if(!o||typeof o!=="object"||d>3||vo.has(o))return;vo.add(o);let ks;try{ks=Object.keys(o)}catch{return}for(const k of ks){let v;try{v=o[k]}catch{continue}if(Array.isArray(v)){if(!v.length||va.has(v))continue;va.add(v);const a=v.filter(x=>x&&typeof x==="object"&&!Array.isArray(x));if(!a.length)continue;const sm=a.slice(0,30),uc=sm.filter(x=>uid(x)).length,nc=sm.filter(x=>name(x)).length,pc=sm.filter(x=>num(x?.power)!=null).length,path=`${p}.${k}`;let score=v.length+400*uc+250*nc;if(mode==="members"){if(uc)score+=1e3;if(nc)score+=500;if(/member/i.test(path))score+=700}else{if(uc&&pc)score+=3e3;if(/rank/i.test(path))score+=700;score+=500*pc}out.push({owner:o,key:k,path,rows:v,uidCount:uc,nameCount:nc,powerCount:pc,score});continue}if(v&&typeof v==="object"&&d<3)inspect(v,`${p}.${k}`,d+1)}};walk(root,(n,p)=>(n._components||[]).forEach((x,i)=>inspect(x,`${p}._components[${i}]`)));out.sort((a,b)=>b.score-a.score);const z=mode==="contributions"?out.find(x=>x.uidCount&&x.powerCount):out.find(x=>x.uidCount);if(!z)throw Error(mode==="contributions"?"uid와 power가 있는 공헌도 배열을 찾지 못했습니다.":"UID가 있는 길드원 배열을 찾지 못했습니다.");console.log(mode==="contributions"?"공헌도 배열 발견:":"길드원 배열 발견:",z.path);return z},rows=(cache,pop,mode)=>{if(cache)try{const a=cache.owner[cache.key];if(Array.isArray(a)&&a.length)return{source:cache,rows:a}}catch{}const z=findSource(pop,mode);return{source:z,rows:z.owner[z.key]}},drag=async()=>{const cv=document.querySelector("canvas");if(!cv)throw Error("게임 canvas를 찾지 못했습니다.");const r=cv.getBoundingClientRect(),sx=r.left+r.width*c.fromX,sy=r.top+r.height*c.fromY,ex=r.left+r.width*c.toX,ey=r.top+r.height*c.toY,P=(t,x,y,b)=>{try{cv.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,pointerId:1,pointerType:"mouse",isPrimary:true,clientX:x,clientY:y,button:0,buttons:b}))}catch{}},M=(t,x,y,b)=>cv.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,clientX:x,clientY:y,button:0,buttons:b}));P("pointermove",sx,sy,0);M("mousemove",sx,sy,0);P("pointerdown",sx,sy,1);M("mousedown",sx,sy,1);for(let i=1;i<=c.scrollSteps;i++){const q=i/c.scrollSteps,x=sx+(ex-sx)*q,y=sy+(ey-sy)*q;P("pointermove",x,y,1);M("mousemove",x,y,1);await sleep(c.scrollStepDelay)}P("pointerup",ex,ey,0);M("mouseup",ex,ey,0);await sleep(c.afterScrollDelay)},collectMembers=async()=>{s.stopped=false;s.members.clear();s.memberSource=null;const p=popup("AllianceMemberPopup");if(!p)throw Error("AllianceMemberPopup을 찾지 못했습니다. 길드원 목록을 열어주세요.");let cache=null,no=0;for(let i=0;i<=c.memberMaxScrolls&&!s.stopped;i++){const f=rows(cache,p,"members");cache=f.source;s.memberSource=cache.path;const before=s.members.size;for(const raw of f.rows){const m=member(raw);if(!m)continue;const old=s.members.get(m.uid);s.members.set(m.uid,{...old,...m,name:m.name||old?.name||"",power:m.power??old?.power??null,role:m.role??old?.role??null})}const add=s.members.size-before;no=add?0:no+1;console.log(`[길드원] 화면 ${i+1} · 전체 ${s.members.size}명 · 신규 ${add}명`);if(no>=c.memberNoChangeLimit)break;if(i<c.memberMaxScrolls)await drag()}const a=[...s.members.values()];console.table(a.map((x,i)=>({번호:i+1,닉네임:x.name,UID:x.uid,전투력:x.power,길드직급:x.role})));console.log(`길드원 ${a.length}명 저장 완료`);return a},collectContrib=async()=>{s.stopped=false;s.contributions.clear();s.contributionSource=null;const p=popup("AllianceKvkFrRankPopup");if(!p)throw Error("AllianceKvkFrRankPopup을 찾지 못했습니다. 공헌도 순위 팝업을 열어주세요.");let cache=null;const map=new Map;for(let i=0;i<=c.contributionScrolls&&!s.stopped;i++){const f=rows(cache,p,"contributions");cache=f.source;s.contributionSource=cache.path;const before=map.size;for(const raw of f.rows){const x=contrib(raw);if(!x)continue;const old=map.get(x.uid);if(!old||x.contribution>=old.contribution)map.set(x.uid,{...old,...x,name:x.name||old?.name||""})}console.log(`[공헌도] 화면 ${i+1}/${c.contributionScrolls+1} · 전체 ${map.size}명 · 신규 ${map.size-before}명`);if(i<c.contributionScrolls)await drag()}const a=[...map.values()].sort((x,y)=>y.contribution-x.contribution||x.name.localeCompare(y.name,"ko")).map((x,i)=>({...x,rank:i+1}));s.contributions=new Map(a.map(x=>[x.uid,x]));console.table(a.map(x=>({공헌순위:x.rank,닉네임:x.name,UID:x.uid,공헌도:x.contribution,길드직급레벨:x.roleLevel})));console.log(`공헌도 ${a.length}명 저장 완료`);return a},build=()=>{if(!s.members.size)throw Error("먼저 길드원 목록에서 await guildAudit.members()를 실행하세요.");if(!s.contributions.size)throw Error("먼저 공헌도 목록에서 await guildAudit.contributions()를 실행하세요.");const byName=new Map;for(const x of s.contributions.values()){const k=nkey(x.name);if(k)byName.set(k,x)}const a=[];for(const m of s.members.values()){const x=s.contributions.get(m.uid)||byName.get(nkey(m.name))||null,v=x?.contribution??0;a.push({rank:"",name:m.name||x?.name||"",contribution:v,participated:!!x&&v>=c.participationMinimum,memberRole:m.role??"",contributionRole:x?.roleLevel??"",memberPower:m.power??""})}a.sort((x,y)=>Number(y.participated)-Number(x.participated)||y.contribution-x.contribution||x.name.localeCompare(y.name,"ko"));let rank=0;for(const x of a)if(x.participated)x.rank=++rank;s.result=a;return a},copyText=async t=>{try{await navigator.clipboard.writeText(t);return true}catch{}const a=document.createElement("textarea");a.value=t;a.style.position="fixed";a.style.left="-999999px";document.body.appendChild(a);a.focus();a.select();const ok=document.execCommand("copy");a.remove();return ok},copyResult=async()=>{const a=build(),h=["공헌순위","닉네임","공헌도","참여여부","길드원직급","공헌도직급레벨","전투력"],t=[h.join("\t"),...a.map(x=>[x.rank,x.name,x.contribution,x.participated?"참여":"불참",x.memberRole,x.contributionRole,x.memberPower].join("\t"))].join("\n"),ok=await copyText(t);console.table(a.map(x=>({공헌순위:x.rank,닉네임:x.name,공헌도:x.contribution,참여여부:x.participated?"참여":"불참",길드원직급:x.memberRole,공헌도직급레벨:x.contributionRole,전투력:x.memberPower})));const n=a.filter(x=>!x.participated).length;console.log(ok?`스프레드시트 복사 완료 · 전체 ${a.length}명 · 참여 ${a.length-n}명 · 불참 ${n}명`:"클립보드 복사에 실패했습니다.");return a},clear=()=>{s.stopped=false;s.members.clear();s.contributions.clear();s.result=[];s.memberSource=s.contributionSource=null;console.log("수집 데이터 초기화 완료")},destroy=()=>{s.stopped=true;delete window.guildAudit;delete window[K];console.log("guildAudit 제거 완료")},api={config:c,state:s,members:collectMembers,contributions:collectContrib,build,copy:copyResult,clear,status:()=>({memberCount:s.members.size,contributionCount:s.contributions.size,resultCount:s.result.length,memberSource:s.memberSource,contributionSource:s.contributionSource,stopped:s.stopped,config:{...c}}),stop:()=>{s.stopped=true},destroy};window.guildAudit=api;window[K]=api;console.log("guildAudit 일회성 minify 코드 설치 완료");console.log("1. await guildAudit.members()");console.log("2. await guildAudit.contributions()");console.log("3. await guildAudit.copy()")})();
 (()=>{const I="topwar-guild-audit-ui",W="__TOPWAR_GUILD_AUDIT_UI__";window[W]?.remove?.();const show=()=>{document.getElementById(I)?.remove();if(!window.guildAudit)throw Error("guildAudit이 설치되지 않았습니다.");const h=document.createElement("div");h.id=I;Object.assign(h.style,{position:"fixed",top:"80px",right:"20px",zIndex:"2147483647",fontFamily:'Arial,"Noto Sans KR",sans-serif'});const d=h.attachShadow({mode:"open"});d.innerHTML=`<style>*{box-sizing:border-box}.p{width:270px;color:#f8fafc;background:#0f172af5;border:1px solid #64748b88;border-radius:14px;box-shadow:0 18px 50px #0008;overflow:hidden}.h{display:flex;align-items:center;justify-content:space-between;padding:11px 13px;background:#1e293bf5;border-bottom:1px solid #64748b55;cursor:move;user-select:none}.t{font-size:14px;font-weight:800}.ic{width:27px;height:27px;padding:0;color:#cbd5e1;background:#ffffff12;border:0;border-radius:7px;cursor:pointer}.ic:hover{background:#ffffff25;color:#fff}.b{padding:12px}.g{padding:8px 9px;margin-bottom:8px;color:#cbd5e1;font-size:11px;line-height:1.45;background:#02061799;border-radius:8px}.btn{width:100%;height:39px;margin-top:7px;color:#fff;font-size:13px;font-weight:700;border:0;border-radius:9px;cursor:pointer}.btn:disabled{opacity:.45;cursor:wait}.m{background:#2563eb}.c{background:#7c3aed}.x{background:#059669}.r{background:#475569}.s{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px}.si{padding:7px;text-align:center;background:#ffffff0f;border-radius:8px}.sl{display:block;color:#94a3b8;font-size:10px}.sv{font-size:16px;font-weight:800}.st{min-height:48px;margin-top:9px;padding:8px 9px;color:#cbd5e1;font-size:11px;line-height:1.45;white-space:pre-wrap;background:#020617aa;border-radius:8px}.run{color:#fde68a}.ok{color:#86efac}.err{color:#fca5a5}.col .b{display:none}</style><section class="p"><header class="h"><span class="t">길드 공헌도 조사</span><span><button class="ic" data-a="min">−</button> <button class="ic" data-a="close">×</button></span></header><div class="b"><div class="g">목록을 맨 위로 올린 뒤 순서대로 누르세요.</div><button class="btn m" data-a="members">1. 길드원 수집</button><button class="btn c" data-a="contributions">2. 공헌도 수집</button><button class="btn x" data-a="copy">3. 결과 복사</button><button class="btn r" data-a="clear">초기화</button><div class="s"><div class="si"><span class="sl">길드원</span><span class="sv" data-v="m">0</span></div><div class="si"><span class="sl">공헌도</span><span class="sv" data-v="c">0</span></div></div><div class="st">준비 완료</div></div></section>`;document.documentElement.appendChild(h);const p=d.querySelector(".p"),st=d.querySelector(".st"),bs=[...d.querySelectorAll(".btn")],cnt=()=>{d.querySelector('[data-v="m"]').textContent=guildAudit.state.members?.size??0;d.querySelector('[data-v="c"]').textContent=guildAudit.state.contributions?.size??0},msg=(v,k="")=>{st.textContent=v;st.className=`st ${k}`},lock=v=>bs.forEach(b=>b.disabled=v),run=async(t,f)=>{lock(true);msg(t,"run");try{const r=await f();cnt();msg(`완료 · ${Array.isArray(r)?r.length:"정상"}건`,"ok");return r}catch(e){console.error(e);msg(e?.message||String(e),"err")}finally{lock(false)}};d.addEventListener("click",e=>{const a=e.target?.dataset?.a;if(!a)return;if(a==="members")run("길드원 수집 중",()=>guildAudit.members());else if(a==="contributions")run("공헌도 수집 중",()=>guildAudit.contributions());else if(a==="copy")run("결과 복사 중",()=>guildAudit.copy());else if(a==="clear"){guildAudit.clear();cnt();msg("초기화 완료","ok")}else if(a==="close")h.remove();else if(a==="min"){p.classList.toggle("col");e.target.textContent=p.classList.contains("col")?"+":"−"}});const hd=d.querySelector(".h");let drag=false,ox=0,oy=0;hd.addEventListener("pointerdown",e=>{if(e.target.closest("button"))return;const r=h.getBoundingClientRect();drag=true;ox=e.clientX-r.left;oy=e.clientY-r.top;h.style.right="auto";hd.setPointerCapture?.(e.pointerId)});hd.addEventListener("pointermove",e=>{if(!drag)return;h.style.left=`${Math.max(0,Math.min(innerWidth-h.offsetWidth,e.clientX-ox))}px`;h.style.top=`${Math.max(0,Math.min(innerHeight-h.offsetHeight,e.clientY-oy))}px`});hd.addEventListener("pointerup",()=>drag=false);cnt();return h},remove=()=>document.getElementById(I)?.remove();window[W]={show,remove};guildAudit.showUI=show;guildAudit.hideUI=remove;show();console.log("길드 공헌도 UI 설치 완료")})();
@@ -66243,13 +68123,23 @@ window.CQ26_SEAL_RANK_PROMISE = (async () => {
     },
     {
       id: "mammothDefense",
-      label: "SSC2 맘모스 방어",
+      label: "SSC2 맘모스 실시간 주둔대열조사",
       oneShot: true,
       embedded: true,
-      help: "게임에서 맘모스 방어 수위병 랭킹 화면과 원하는 하위 탭을 연 뒤 조사하세요.",
-      actionLabel: "랭킹 조사",
-      progressText: "수위병 랭킹 데이터를 찾는 중…",
-      promiseKey: "CQ26_MAMMOTH_DEFENSE_PROMISE"
+      help: "게임에서 맘모스 방어 실시간 주둔 대열 화면을 연 뒤 조사하세요.",
+      actionLabel: "주둔 대열 조사·복사",
+      progressText: "실시간 주둔 대열을 읽는 중…",
+      promiseKey: "CQ26_MAMMOTH_GARRISON_PROMISE"
+    },
+    {
+      id: "mammothScore",
+      label: "SSC2 맘모스 누적점수조사",
+      oneShot: true,
+      embedded: true,
+      help: "게임에서 수위병 랭킹의 개인 포인트 랭킹과 조사할 하위 탭을 연 뒤 실행하세요.",
+      actionLabel: "누적점수 조사·복사",
+      progressText: "현재 선택된 누적점수 랭킹을 읽는 중…",
+      promiseKey: "CQ26_MAMMOTH_SCORE_PROMISE"
     },
     {
       id: "trainMembers",
@@ -66266,6 +68156,31 @@ window.CQ26_SEAL_RANK_PROMISE = (async () => {
       help: "게임에서 봉인석 총 랭킹 또는 라운드 랭킹 탭을 연 뒤 읽으세요.",
       actionLabel: "현재 랭킹 읽기",
       promiseKey: "CQ26_SEAL_RANK_PROMISE"
+    },
+    {
+      id: "wlbRanks",
+      label: "SSC2 서리결정쟁탈전 랭킹조사",
+      oneShot: true,
+      embedded: true,
+      help: "게임에서 서리결정쟁탈전 서버 랭킹 또는 개인 랭킹의 조사할 탭과 라운드를 연 뒤 실행하세요. 결과는 Google Sheets용으로 복사됩니다.",
+      actionLabel: "랭킹 조사·복사",
+      progressText: "활성 서리결정쟁탈전 랭킹을 읽는 중…",
+      promiseKey: "CQ26_WLB_RANK_PROMISE"
+    },
+    {
+      id: "meritHistory",
+      label: "SSC2 개인랭킹",
+      panelIds: ["cq26-merit-exporter-ui"]
+    },
+    {
+      id: "neutralCityRanks",
+      label: "SSC2 중립도시 랭킹",
+      oneShot: true,
+      embedded: true,
+      help: "중립도시 포인트 랭킹에서 읽을 날짜 탭을 연 뒤 실행하세요. 현재 열린 탭만 Google Sheets용으로 복사됩니다.",
+      actionLabel: "열린 탭 읽기·복사",
+      progressText: "현재 날짜 탭의 중립도시 랭킹을 읽는 중…",
+      promiseKey: "CQ25_NEUTRAL_CITY_RANK_PROMISE"
     },
     { id: "guildAudit", label: "길드 공헌도", oneShot: true }
   ];
