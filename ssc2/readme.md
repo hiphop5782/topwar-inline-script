@@ -49,3 +49,16 @@ fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/he
 ```js
 fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/mammoth_result.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
+
+## 중립도시 포인트기록
+
+열어야 하는 화면
+
+<img width="489" height="823" alt="image" src="https://github.com/user-attachments/assets/3814c1b1-b0a3-488b-8309-8d473baaf5a8" />
+
+실행시켜야 할 코드
+
+```js
+fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/ncity-result.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
+```
+
