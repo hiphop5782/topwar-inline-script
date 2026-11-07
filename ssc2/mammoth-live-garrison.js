@@ -99,22 +99,28 @@ window.CQ26_MAMMOTH_GARRISON_PROMISE = (async () => {
   }
 
   async function copyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
-    } catch {}
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    let copied = false;
-    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
-    if (!copied && typeof window.copy === "function") {
-      try { window.copy(text); copied = true; } catch {}
+    } catch {
+      return false;
     }
-    return copied;
   }
 
   const panelNode = findPanel();
@@ -141,12 +147,16 @@ window.CQ26_MAMMOTH_GARRISON_PROMISE = (async () => {
     lines.push(cells.join("\t"));
   }
   const tsv = lines.join("\n");
+  window.CQ26_MAMMOTH_GARRISON_TSV = tsv;
   const copied = await copyText(tsv);
-  if (!copied) throw new Error(`${players.length}명은 조사했지만 Google Sheets용 복사에 실패했습니다.`);
+  if (!copied) {
+    console.error(`${players.length}명은 조사했지만 자동 복사에 실패했습니다.`);
+    console.log("대체 명령: copy(window.CQ26_MAMMOTH_GARRISON_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
 
   const result = { dataset: "cq26-mammoth-live-garrison", capturedAt: new Date().toISOString(), count: players.length, copied: true, source: { component: selected.component, field: selected.field, length: selected.length }, players };
   window.CQ26_MAMMOTH_GARRISON_RESULT = result;
-  window.CQ26_MAMMOTH_GARRISON_TSV = tsv;
   console.table(players);
   console.log(`[SSC2 맘모스 실시간 주둔대열조사] ${players.length}명 복사 완료`, result.source);
   return result;

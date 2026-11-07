@@ -102,26 +102,28 @@ window.CQ26_ENERGY_DEFENSE_PROMISE = (async () => {
   window.CQ26_ARK_TSV = tsv;
 
   // 클립보드 복사
+  const textarea = document.createElement("textarea");
+  textarea.value = tsv;
+  textarea.readOnly = true;
+  textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+  document.documentElement.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
+  textarea.setSelectionRange(0, tsv.length);
   let copied = false;
-
-  try {
-    await navigator.clipboard.writeText(tsv);
-    copied = true;
-  } catch {
-    const textarea = document.createElement("textarea");
-    textarea.value = tsv;
-    textarea.style.cssText =
-      "position:fixed;left:-9999px;top:0";
-
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-
+  try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+  if (!copied) {
     try {
-      copied = document.execCommand("copy");
-    } finally {
-      textarea.remove();
-    }
+      if (typeof copy === "function") {
+        copy(tsv);
+        copied = true;
+      }
+    } catch {}
+  }
+  if (!copied) {
+    try {
+      await navigator.clipboard.writeText(tsv);
+      copied = true;
+    } catch {}
   }
 
   console.table(players);
@@ -130,9 +132,8 @@ window.CQ26_ENERGY_DEFENSE_PROMISE = (async () => {
   if (copied) {
     console.log("클립보드 복사 완료 → Ctrl+V");
   } else {
-    console.warn(
-      "자동 복사 실패: copy(window.CQ26_ARK_TSV) 실행"
-    );
+    console.error("자동 복사에 실패했습니다.");
+    console.log("대체 명령: copy(window.CQ26_ARK_TSV)");
   }
   const result = { count: players.length, copied, players };
   window.CQ26_ENERGY_DEFENSE_RESULT = result;

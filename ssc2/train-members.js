@@ -145,25 +145,34 @@ window.CQ26_TRAIN_MEMBERS_PROMISE = (async () => {
     throw new Error(`참여자 ${players.length}명 중 ${missing.length}명의 UID 또는 닉네임이 없습니다.`);
   }
 
+  const textarea = document.createElement("textarea");
+  textarea.value = tsv;
+  textarea.readOnly = true;
+  textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+  document.documentElement.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
+  textarea.setSelectionRange(0, tsv.length);
   let copied = false;
-  try {
-    await navigator.clipboard.writeText(tsv);
-    copied = true;
-  } catch {}
+  try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
   if (!copied) {
-    const textarea = document.createElement("textarea");
-    textarea.value = tsv;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    try {
+      if (typeof copy === "function") {
+        copy(tsv);
+        copied = true;
+      }
+    } catch {}
   }
-  if (!copied && typeof window.copy === "function") {
-    window.copy(tsv);
-    copied = true;
+  if (!copied) {
+    try {
+      await navigator.clipboard.writeText(tsv);
+      copied = true;
+    } catch {}
   }
-  if (!copied) throw new Error(`${players.length}명은 조사했지만 클립보드 복사에 실패했습니다.`);
+  if (!copied) {
+    console.error(`${players.length}명은 조사했지만 자동 복사에 실패했습니다.`);
+    console.log("대체 명령: copy(window.CQ26_TROOPS_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
 
   const result = {
     count: players.length,

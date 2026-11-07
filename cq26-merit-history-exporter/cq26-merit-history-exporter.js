@@ -833,20 +833,30 @@
   }
 
   async function writeClipboard(text) {
+    window.CQ26_MERIT_SHEET_TSV = text;
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.readOnly = true;
+    area.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(area);
+    area.focus({ preventScroll: true });
+    area.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { area.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {}
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.style.cssText = "position:fixed;left:-99999px;top:-99999px";
-    document.body.appendChild(area);
-    area.focus();
-    area.select();
-    const ok = document.execCommand("copy");
-    area.remove();
-    if (!ok) throw new Error("클립보드 복사에 실패했습니다.");
-    return true;
+    console.error("자동 복사에 실패했습니다.");
+    console.log("대체 명령: copy(window.CQ26_MERIT_SHEET_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
   }
 
   async function copyCurrentServerSheet(options = {}) {

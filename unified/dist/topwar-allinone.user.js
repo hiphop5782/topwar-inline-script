@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar All-in-One UI
 // @namespace    https://github.com/hiphop5782/topwar-inline-script
-// @version      0.2.6
+// @version      0.2.8
 // @description  Existing TopWar tools connected through one component-based UI
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -65392,26 +65392,28 @@ window.CQ26_ENERGY_DEFENSE_PROMISE = (async () => {
   window.CQ26_ARK_TSV = tsv;
 
   // 클립보드 복사
+  const textarea = document.createElement("textarea");
+  textarea.value = tsv;
+  textarea.readOnly = true;
+  textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+  document.documentElement.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
+  textarea.setSelectionRange(0, tsv.length);
   let copied = false;
-
-  try {
-    await navigator.clipboard.writeText(tsv);
-    copied = true;
-  } catch {
-    const textarea = document.createElement("textarea");
-    textarea.value = tsv;
-    textarea.style.cssText =
-      "position:fixed;left:-9999px;top:0";
-
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-
+  try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+  if (!copied) {
     try {
-      copied = document.execCommand("copy");
-    } finally {
-      textarea.remove();
-    }
+      if (typeof copy === "function") {
+        copy(tsv);
+        copied = true;
+      }
+    } catch {}
+  }
+  if (!copied) {
+    try {
+      await navigator.clipboard.writeText(tsv);
+      copied = true;
+    } catch {}
   }
 
   console.table(players);
@@ -65420,9 +65422,8 @@ window.CQ26_ENERGY_DEFENSE_PROMISE = (async () => {
   if (copied) {
     console.log("클립보드 복사 완료 → Ctrl+V");
   } else {
-    console.warn(
-      "자동 복사 실패: copy(window.CQ26_ARK_TSV) 실행"
-    );
+    console.error("자동 복사에 실패했습니다.");
+    console.log("대체 명령: copy(window.CQ26_ARK_TSV)");
   }
   const result = { count: players.length, copied, players };
   window.CQ26_ENERGY_DEFENSE_RESULT = result;
@@ -65532,22 +65533,28 @@ window.CQ26_MAMMOTH_GARRISON_PROMISE = (async () => {
   }
 
   async function copyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
-    } catch {}
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    let copied = false;
-    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
-    if (!copied && typeof window.copy === "function") {
-      try { window.copy(text); copied = true; } catch {}
+    } catch {
+      return false;
     }
-    return copied;
   }
 
   const panelNode = findPanel();
@@ -65574,12 +65581,16 @@ window.CQ26_MAMMOTH_GARRISON_PROMISE = (async () => {
     lines.push(cells.join("\t"));
   }
   const tsv = lines.join("\n");
+  window.CQ26_MAMMOTH_GARRISON_TSV = tsv;
   const copied = await copyText(tsv);
-  if (!copied) throw new Error(`${players.length}명은 조사했지만 Google Sheets용 복사에 실패했습니다.`);
+  if (!copied) {
+    console.error(`${players.length}명은 조사했지만 자동 복사에 실패했습니다.`);
+    console.log("대체 명령: copy(window.CQ26_MAMMOTH_GARRISON_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
 
   const result = { dataset: "cq26-mammoth-live-garrison", capturedAt: new Date().toISOString(), count: players.length, copied: true, source: { component: selected.component, field: selected.field, length: selected.length }, players };
   window.CQ26_MAMMOTH_GARRISON_RESULT = result;
-  window.CQ26_MAMMOTH_GARRISON_TSV = tsv;
   console.table(players);
   console.log(`[SSC2 맘모스 실시간 주둔대열조사] ${players.length}명 복사 완료`, result.source);
   return result;
@@ -65725,22 +65736,28 @@ window.CQ26_MAMMOTH_SCORE_PROMISE = (async () => {
   }
 
   async function copyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
-    } catch {}
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    let copied = false;
-    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
-    if (!copied && typeof window.copy === "function") {
-      try { window.copy(text); copied = true; } catch {}
+    } catch {
+      return false;
     }
-    return copied;
   }
 
   const panelNode = findPanel();
@@ -65773,12 +65790,16 @@ window.CQ26_MAMMOTH_SCORE_PROMISE = (async () => {
     lines.push(cells.join("\t"));
   }
   const tsv = lines.join("\n");
+  window.CQ26_MAMMOTH_SCORE_TSV = tsv;
   const copied = await copyText(tsv);
-  if (!copied) throw new Error(`${rows.length}행은 조사했지만 Google Sheets용 복사에 실패했습니다.`);
+  if (!copied) {
+    console.error(`${rows.length}행은 조사했지만 자동 복사에 실패했습니다.`);
+    console.log("대체 명령: copy(window.CQ26_MAMMOTH_SCORE_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
 
   const result = { dataset: "cq26-mammoth-cumulative-score", capturedAt: new Date().toISOString(), count: rows.length, copied: true, source: { component: selected.component, field: selected.field, length: selected.length }, rows };
   window.CQ26_MAMMOTH_SCORE_RESULT = result;
-  window.CQ26_MAMMOTH_SCORE_TSV = tsv;
   console.table(rows);
   console.log(`[SSC2 맘모스 누적점수조사] ${rows.length}행 복사 완료`, result.source);
   return result;
@@ -65933,25 +65954,34 @@ window.CQ26_TRAIN_MEMBERS_PROMISE = (async () => {
     throw new Error(`참여자 ${players.length}명 중 ${missing.length}명의 UID 또는 닉네임이 없습니다.`);
   }
 
+  const textarea = document.createElement("textarea");
+  textarea.value = tsv;
+  textarea.readOnly = true;
+  textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+  document.documentElement.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
+  textarea.setSelectionRange(0, tsv.length);
   let copied = false;
-  try {
-    await navigator.clipboard.writeText(tsv);
-    copied = true;
-  } catch {}
+  try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
   if (!copied) {
-    const textarea = document.createElement("textarea");
-    textarea.value = tsv;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    try {
+      if (typeof copy === "function") {
+        copy(tsv);
+        copied = true;
+      }
+    } catch {}
   }
-  if (!copied && typeof window.copy === "function") {
-    window.copy(tsv);
-    copied = true;
+  if (!copied) {
+    try {
+      await navigator.clipboard.writeText(tsv);
+      copied = true;
+    } catch {}
   }
-  if (!copied) throw new Error(`${players.length}명은 조사했지만 클립보드 복사에 실패했습니다.`);
+  if (!copied) {
+    console.error(`${players.length}명은 조사했지만 자동 복사에 실패했습니다.`);
+    console.log("대체 명령: copy(window.CQ26_TROOPS_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
 
   const result = {
     count: players.length,
@@ -66196,19 +66226,28 @@ window.CQ26_SEAL_RANK_PROMISE = (async () => {
   }
 
   async function copyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
-    } catch {}
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    let copied = false;
-    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
-    return copied;
+    } catch {
+      return false;
+    }
   }
 
   const panelNode = findPanel();
@@ -66272,11 +66311,15 @@ window.CQ26_SEAL_RANK_PROMISE = (async () => {
   };
 
   const json = JSON.stringify(result, null, 2);
+  window.CQ26_SEAL_RANK_JSON = json;
   const copied = await copyText(json);
-  if (!copied) throw new Error("랭킹은 읽었지만 JSON 클립보드 복사에 실패했습니다.");
+  if (!copied) {
+    console.error("랭킹은 읽었지만 자동 복사에 실패했습니다.");
+    console.log("대체 명령: copy(window.CQ26_SEAL_RANK_JSON)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
   result.copied = true;
   window.CQ26_SEAL_RANK_RESULT = result;
-  window.CQ26_SEAL_RANK_JSON = json;
   console.log(`[SSC2 봉인석 랭킹] ${view} · ${result.count}행 JSON 복사 완료`, {
     view: result.view,
     mode: result.mode,
@@ -66521,23 +66564,28 @@ window.CQ26_WLB_RANK_PROMISE = (async () => {
   }
 
   async function copyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
-    } catch {}
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    let copied = false;
-    try { copied = document.execCommand("copy"); }
-    finally { textarea.remove(); }
-    if (!copied && typeof window.copy === "function") {
-      try { window.copy(text); copied = true; } catch {}
+    } catch {
+      return false;
     }
-    return copied;
   }
 
   const panelNode = findPanel();
@@ -66570,8 +66618,13 @@ window.CQ26_WLB_RANK_PROMISE = (async () => {
     lines.push(cells.join("\t"));
   }
   const tsv = lines.join("\n");
+  window.CQ26_WLB_RANK_TSV = tsv;
   const copied = await copyText(tsv);
-  if (!copied) throw new Error(`${rows.length}행은 조사했지만 스프레드시트용 복사에 실패했습니다.`);
+  if (!copied) {
+    console.error(`${rows.length}행은 조사했지만 자동 복사에 실패했습니다.`);
+    console.log("대체 명령: copy(window.CQ26_WLB_RANK_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
 
   const result = {
     dataset: "cq26-wlb-ranking",
@@ -66589,7 +66642,6 @@ window.CQ26_WLB_RANK_PROMISE = (async () => {
     rows
   };
   window.CQ26_WLB_RANK_RESULT = result;
-  window.CQ26_WLB_RANK_TSV = tsv;
   const candidateSummaries = [];
   for (const { raw, ...candidate } of candidates) candidateSummaries.push(candidate);
   window.CQ26_WLB_RANK_CANDIDATES = candidateSummaries;
@@ -66764,22 +66816,28 @@ window.CQ25_NEUTRAL_CITY_RANK_PROMISE = (async () => {
   }
 
   async function copyText(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.readOnly = true;
+    textarea.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
-    } catch {}
-    const textarea = document.createElement("textarea");
-    textarea.value = text;
-    textarea.style.cssText = "position:fixed;left:-99999px;top:-99999px;opacity:0";
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    let copied = false;
-    try { copied = document.execCommand("copy"); } finally { textarea.remove(); }
-    if (!copied && typeof window.copy === "function") {
-      try { window.copy(text); copied = true; } catch {}
+    } catch {
+      return false;
     }
-    return copied;
   }
 
   const panelNode = findPanel();
@@ -66813,12 +66871,16 @@ window.CQ25_NEUTRAL_CITY_RANK_PROMISE = (async () => {
     lines.push(cells.join("\t"));
   }
   const tsv = lines.join("\n");
+  window.CQ25_NEUTRAL_CITY_RANK_TSV = tsv;
   const copied = await copyText(tsv);
-  if (!copied) throw new Error(`${rows.length}행은 읽었지만 Google Sheets용 복사에 실패했습니다.`);
+  if (!copied) {
+    console.error(`${rows.length}행은 읽었지만 자동 복사에 실패했습니다.`);
+    console.log("대체 명령: copy(window.CQ25_NEUTRAL_CITY_RANK_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
+  }
 
   const result = { dataset: "cq25-neutral-city-ranking", capturedAt: new Date().toISOString(), date, count: rows.length, copied: true, source: { component: selected.component, field: selected.field, length: selected.length }, rows };
   window.CQ25_NEUTRAL_CITY_RANK_RESULT = result;
-  window.CQ25_NEUTRAL_CITY_RANK_TSV = tsv;
   console.table(rows);
   console.log(`[SSC2 중립도시 랭킹] ${date || "현재 탭"} · ${rows.length}행 복사 완료`, result.source);
   return result;
@@ -67661,20 +67723,30 @@ window.CQ25_NEUTRAL_CITY_RANK_PROMISE = (async () => {
   }
 
   async function writeClipboard(text) {
+    window.CQ26_MERIT_SHEET_TSV = text;
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.readOnly = true;
+    area.style.cssText = "position:fixed;left:0;top:0;width:1px;height:1px;opacity:.01;z-index:2147483647";
+    document.documentElement.appendChild(area);
+    area.focus({ preventScroll: true });
+    area.setSelectionRange(0, text.length);
+    let copied = false;
+    try { copied = document.execCommand("copy"); } finally { area.remove(); }
+    if (copied) return true;
+    try {
+      if (typeof copy === "function") {
+        copy(text);
+        return true;
+      }
+    } catch {}
     try {
       await navigator.clipboard.writeText(text);
       return true;
     } catch {}
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.style.cssText = "position:fixed;left:-99999px;top:-99999px";
-    document.body.appendChild(area);
-    area.focus();
-    area.select();
-    const ok = document.execCommand("copy");
-    area.remove();
-    if (!ok) throw new Error("클립보드 복사에 실패했습니다.");
-    return true;
+    console.error("자동 복사에 실패했습니다.");
+    console.log("대체 명령: copy(window.CQ26_MERIT_SHEET_TSV)");
+    throw new Error("콘솔에 출력된 대체 복사 명령을 실행하세요.");
   }
 
   async function copyCurrentServerSheet(options = {}) {

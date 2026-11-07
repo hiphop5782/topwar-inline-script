@@ -10,7 +10,7 @@ const dist = path.join(unifiedRoot, "dist");
 const metadata = `// ==UserScript==
 // @name         TopWar All-in-One UI
 // @namespace    https://github.com/hiphop5782/topwar-inline-script
-// @version      0.2.6
+// @version      0.2.8
 // @description  Existing TopWar tools connected through one component-based UI
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
