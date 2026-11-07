@@ -11,7 +11,7 @@
 실행시켜야 할 코드
 
 ```js
-fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/energy-defense.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
+fetch(`https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/energy-defense.js?t=${Date.now()}`).then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
 
 ## 설원 열차 인원 목록
@@ -23,7 +23,7 @@ fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/he
 실행시켜야 할 코드
 
 ```js
-fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/train-members.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
+fetch(`https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/train-members.js?t=${Date.now()}`).then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
 
 ## 매머드 전투 주둔목록
@@ -35,7 +35,7 @@ fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/he
 실행시켜야 할 코드
 
 ```js
-fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/mammoth_defense.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
+fetch(`https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/mammoth_defense.js?t=${Date.now()}`).then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
 
 ## 매머드 전투 결과화면
@@ -47,7 +47,7 @@ fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/he
 실행시켜야 할 코드 (목록을 다 불러온뒤 실행해야함)
 
 ```js
-fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/mammoth_result.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
+fetch(`https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/mammoth_result.js?t=${Date.now()}`).then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
 
 ## 중립도시 포인트기록
@@ -59,6 +59,6 @@ fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/he
 실행시켜야 할 코드
 
 ```js
-fetch("https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/ncity-result.js").then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
+fetch(`https://raw.githubusercontent.com/hiphop5782/topwar-inline-script/refs/heads/main/ssc2/ncity-result.js?t=${Date.now()}`).then(r=>{if(!r.ok)throw Error(r.status);return r.text()}).then(code=>(0,eval)(code)).catch(console.error);
 ```
 
