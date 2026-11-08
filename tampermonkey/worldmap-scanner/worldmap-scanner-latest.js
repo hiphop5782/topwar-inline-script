@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Topwar Helper V2.14.9.72 - Unified Server List + Thief Sync
+// @name         Topwar Helper V2.14.9.73 - Long-Run Top100 Performance + Thief Sync
 // @namespace    topwar-unified-automation-v2104-thief-share-ui-log-control
-// @version      2.14.9.72
-// @description  Topwar Helper - full server-list automation and adaptive Top100 waits + Thief DataHub Sync
+// @version      2.14.9.73
+// @description  Topwar Helper - stable long-running Top100 automation + Thief DataHub Sync
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
 // @match        https://*.topwargame.com/*
@@ -26070,6 +26070,8 @@ const loopRuntime = {stopRequested: false,runningPromise: null,abortController: 
 // V2.14.9.48: Top100 사이클은 반드시 시즌조사 1회 성공 후 새 큐로 본 조사를 시작한다.
 // 새로고침 복구는 TOPWAR_ACTIVE_RECOVERY_V1의 mode/serverId/startedAt만 사용한다.
 let runtimeServerQueue = null;
+let runtimeLogs = [];
+let runtimeLogsHydrated = false;
 try { localStorage.removeItem(QUEUE_KEY); } catch {}
 
 const DEFAULT_SETTINGS = {owner: "hiphop5782",repo: "topwar-webutil-vite",branch: "main",
@@ -26426,16 +26428,29 @@ function saveSettings(settings = {}) {
 
 function getState() {
   const persisted = readLocal(STATE_KEY, {version: 1,lastRunAt: null,lastServerId: null,running: false,logs: []});
+  // 상세 로그는 UI 표시용 런타임 데이터다. localStorage에 함께 저장하면 모든
+  // 진행상태 갱신마다 큰 JSON을 동기 직렬화하여 장시간 조사에서 메인 스레드를 막는다.
+  if (!runtimeLogsHydrated) {
+    runtimeLogs = Array.isArray(persisted.logs) ? persisted.logs.slice(-40) : [];
+    runtimeLogsHydrated = true;
+  }
+  delete persisted.logs;
   // localStorage의 running=true는 이전 페이지의 기록일 뿐이다.
   // F5 이후 실행 중인 Promise/AbortController가 없다면 반드시 OFF로 판단해야
   // TOPWAR_RECOVERY.bootstrapRecovery()가 시작 버튼을 중지 버튼으로 오인하지 않는다.
   const actualRunning = !!loopRuntime.abortController || !!loopRuntime.runningPromise ||
     loopRuntime.mode === "resetting";
-  return { ...persisted, running: actualRunning,
+  return { ...persisted, logs: runtimeLogs, running: actualRunning,
     mode: actualRunning ? (persisted.mode || loopRuntime.mode) : "idle" };
 }
 
-function saveState(patch = {}) {const state = {...getState(),...patch,version: 1,updatedAt: nowIso()};writeLocal(STATE_KEY, state);return state;}
+function saveState(patch = {}) {
+  const state = {...getState(),...patch,version: 1,updatedAt: nowIso()};
+  runtimeLogs = Array.isArray(state.logs) ? state.logs.slice(-40) : runtimeLogs;
+  const { logs, ...persisted } = state;
+  writeLocal(STATE_KEY, persisted);
+  return { ...persisted, logs: runtimeLogs };
+}
 
 function compactLogData(data) {
   if (data == null || typeof data === "string" || typeof data === "number" || typeof data === "boolean") {
@@ -26456,12 +26471,10 @@ function compactLogData(data) {
 }
 
 function pushLog(message, data = null) {
-  const state = getState();
+  if (!runtimeLogsHydrated) getState();
   const row = { t: nowIso(), message, data: compactLogData(data) };
-  state.logs = Array.isArray(state.logs) ? state.logs : [];
-  state.logs.push(row);
-  if (state.logs.length > 40) state.logs = state.logs.slice(-40);
-  writeLocal(STATE_KEY, state);
+  runtimeLogs.push(row);
+  if (runtimeLogs.length > 40) runtimeLogs.splice(0, runtimeLogs.length - 40);
   console.log(`[REALPOWER] ${message}`, data ?? "");
   renderPanelSafe();
   return row;
@@ -33456,13 +33469,22 @@ return (
 
 }
 
-function loadServerQueue() {const queue = runtimeServerQueue;if (!queue || typeof queue !== "object") return null;queue.servers = Array.isArray(queue.servers)? queue.servers.map(normalizeServerQueueItem).filter(row => Number.isFinite(row.serverNumber)): [];return queue;}
+function loadServerQueue() {
+  const queue = runtimeServerQueue;
+  if (!queue || typeof queue !== "object") return null;
+  return queue;
+}
 
 function saveServerQueue(servers, patch = {}) {const previous = loadServerQueue();
 
-const compactServers = (servers || [])
-  .map(compactServerQueueItem)
-  .filter(row => Number.isFinite(row.serverNumber));
+// runOneCycle이 이미 정규화된 runtime 배열을 다시 넘기면 전체 서버를 매번
+// map하지 않는다. 현재 서버 행만 교체되므로 동일 배열을 그대로 유지해도 안전하다.
+const sourceServers = Array.isArray(servers) ? servers : [];
+const compactServers = previous?.servers === sourceServers
+  ? sourceServers
+  : sourceServers
+    .map(compactServerQueueItem)
+    .filter(row => Number.isFinite(row.serverNumber));
 
 const queue = {
   // allServers/source/total/currentIndex 등 기존 메타데이터를 보존한다.
@@ -33664,7 +33686,7 @@ return servers;
 async function runOneCycle(options = {}) {const settings = getSettings(options);const startedAt = Date.now();
 
 let servers = loadLastTempDataLikeJava(settings);
-saveServerQueue(servers, {
+servers = saveServerQueue(servers, {
   status: "running",
   startedAt: nowIso(),
   lastError: null,
@@ -33673,7 +33695,7 @@ saveServerQueue(servers, {
     ? "WorldServerListPanel.m_data"
     : "manual-server-ids",
   total: servers.length
-});
+}).servers;
 
 const results = [];
 pushLog(`서버 개수: ${servers.length}`);
@@ -34424,7 +34446,7 @@ return st;
 
 }
 
-async function clearOwnData() {localStorage.removeItem(SETTINGS_KEY);localStorage.removeItem(STATE_KEY);localStorage.removeItem(QUEUE_KEY);localStorage.removeItem(STORAGE_SCHEMA_KEY);localStorage.removeItem(UI_STATE_KEY);await deletePendingFiles();pushLog("독립 설정/상태/임시 데이터 초기화 완료");applyPanelVisibility();return true;}
+async function clearOwnData() {localStorage.removeItem(SETTINGS_KEY);localStorage.removeItem(STATE_KEY);localStorage.removeItem(QUEUE_KEY);localStorage.removeItem(STORAGE_SCHEMA_KEY);localStorage.removeItem(UI_STATE_KEY);runtimeLogs = [];runtimeLogsHydrated = true;await deletePendingFiles();pushLog("독립 설정/상태/임시 데이터 초기화 완료");applyPanelVisibility();return true;}
 
 // ---------------------------------------------------------------------------// Compact UI: start/stop toggle + slide collapse// ---------------------------------------------------------------------------
 
