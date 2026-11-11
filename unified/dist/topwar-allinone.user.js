@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar All-in-One UI
 // @namespace    https://github.com/hiphop5782/topwar-inline-script
-// @version      0.3.0
+// @version      0.3.1
 // @description  Existing TopWar tools connected through one component-based UI
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -59965,6 +59965,31 @@ function inspectCurrentProfileItems() {
         return HERO_BRANCH[Number(value)] || null;
     }
 
+    function branchFromArmyId(value) {
+        const id = Number(value);
+        if (!Number.isFinite(id)) return null;
+
+        // 알려진 일반 병력·오딘·메카 병력은 표시명으로 가장 정확하게 판정한다.
+        const name = ARMY[id] || "";
+        if (name.includes("육군")) return "army";
+        if (name.includes("해군")) return "navy";
+        if (name.includes("공군")) return "air";
+
+        // 일반 병력 ID는 1xx/2xx/3xx 계열이 각각 육/해/공군이다.
+        const standardPrefix = Math.trunc(id / 10000);
+        if (standardPrefix === 1) return "army";
+        if (standardPrefix === 2) return "navy";
+        if (standardPrefix === 3) return "air";
+
+        // 오딘 병력은 901~906 계열이 두 종류씩 같은 병종이다.
+        const odinPrefix = Math.trunc(id / 1000);
+        if (odinPrefix === 901 || odinPrefix === 902) return "army";
+        if (odinPrefix === 903 || odinPrefix === 904) return "navy";
+        if (odinPrefix === 905 || odinPrefix === 906) return "air";
+
+        return null;
+    }
+
     function detectTroopBranch(player) {
         if (TROOP_BRANCHES.includes(player?.troopBranch)) {
             return player.troopBranch;
@@ -59981,8 +60006,29 @@ function inspectCurrentProfileItems() {
         for (const formation of player?.formations || []) {
             for (const hero of formation?.heroes || formation?.heroList || []) {
                 const branch = branchFromHeroId(
-                    hero?.id ?? hero?.heroId
+                    hero?.id ??
+                    hero?.heroId ??
+                    hero?.heroCfgId ??
+                    hero?.cfgId
                 );
+                if (branch) candidates.add(branch);
+            }
+
+            const armyIds = [
+                ...Object.keys(formation?.armyById || {}),
+                ...(formation?.armyList || []).map(army =>
+                    army?.armyId ?? army?.id
+                ),
+                ...(formation?.army || []).map(army =>
+                    army?.armyId ?? army?.id
+                ),
+                ...(formation?.slots || []).map(army =>
+                    army?.armyId ?? army?.id
+                )
+            ];
+
+            for (const armyId of armyIds) {
+                const branch = branchFromArmyId(armyId);
                 if (branch) candidates.add(branch);
             }
         }
@@ -60774,7 +60820,17 @@ function inspectCurrentProfileItems() {
                     return null;
                 }
 
-                return { formations };
+                return {
+                    formations,
+                    armyType:
+                        raw.armyType ??
+                        detailInfo.armyType ??
+                        null,
+                    firstHeroId:
+                        raw.firstHeroId ??
+                        detailInfo.firstHeroId ??
+                        null
+                };
 
             }, CFG.DETAIL_TIMEOUT, CFG.POLL_DELAY);
 
@@ -60795,9 +60851,13 @@ function inspectCurrentProfileItems() {
                 level:
                     data.lv ?? null,
                 armyType:
-                    data.armyType ?? null,
+                    data.armyType ??
+                    response.armyType ??
+                    null,
                 firstHeroId:
-                    data.firstHeroId ?? null,
+                    data.firstHeroId ??
+                    response.firstHeroId ??
+                    null,
 
                 // 랭킹 화면에 표시되는 부대전투력(TP)
                 rankingPower:

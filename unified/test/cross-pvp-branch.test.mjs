@@ -8,7 +8,7 @@ const source = readFileSync(
   "utf8"
 );
 
-const start = source.indexOf("    const TROOP_BRANCHES");
+const start = source.indexOf("    const ARMY =");
 const end = source.indexOf("    const heroName", start);
 
 assert.notEqual(start, -1, "병종 판정 코드 시작점을 찾지 못했습니다.");
@@ -28,6 +28,22 @@ test("uses Cross PVP armyType before legacy hero inference", () => {
   assert.equal(detectTroopBranch({ armyType: 101, firstHeroId: 338 }), "army");
   assert.equal(detectTroopBranch({ armyType: 201 }), "navy");
   assert.equal(detectTroopBranch({ armyType: 301 }), "air");
+});
+
+test("falls back to detailed troop IDs when rank metadata is missing", () => {
+  assert.equal(detectTroopBranch({
+    armyType: null,
+    firstHeroId: null,
+    formations: [{ armyById: { 10103: 4200 }, heroes: [] }]
+  }), "army");
+
+  assert.equal(detectTroopBranch({
+    formations: [{ armyList: [{ armyId: 504531, armyNum: 3500 }] }]
+  }), "navy");
+
+  assert.equal(detectTroopBranch({
+    formations: [{ slots: [{ armyId: 905103, count: 3200 }] }]
+  }), "air");
 });
 
 test("builds the DataHub branch record for the reported failing UID", () => {
