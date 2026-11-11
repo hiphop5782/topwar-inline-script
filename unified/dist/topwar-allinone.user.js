@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TopWar All-in-One UI
 // @namespace    https://github.com/hiphop5782/topwar-inline-script
-// @version      0.2.9
+// @version      0.3.0
 // @description  Existing TopWar tools connected through one component-based UI
 // @match        https://h5.topwargame.com/*
 // @match        https://h5v2.topwargame.com/*
@@ -59937,6 +59937,84 @@ function inspectCurrentProfileItems() {
         507371: "블레이드 엔젤 BA-6 (공군)"
     };
 
+    const TROOP_BRANCHES = ["army", "navy", "air"];
+
+    // DataHub의 구버전 영웅 기반 판정과 동일한 보조 매핑이다.
+    // 랭킹 응답의 armyType을 우선 사용하므로 신규 영웅이 추가돼도 영향을 받지 않는다.
+    const HERO_BRANCH = {
+        151: "army", 153: "army", 165: "army", 169: "army",
+        170: "army", 172: "army", 173: "army", 174: "army", 228: "army",
+        224: "navy", 232: "navy", 234: "navy", 237: "navy",
+        238: "navy", 239: "navy", 240: "navy", 241: "navy",
+        332: "air", 333: "air", 334: "air", 335: "air",
+        336: "air", 337: "air", 338: "air"
+    };
+
+    function branchFromArmyType(value) {
+        const type = Number(value);
+        if (!Number.isFinite(type)) return null;
+
+        return {
+            1: "army",
+            2: "navy",
+            3: "air"
+        }[Math.trunc(type / 100)] || null;
+    }
+
+    function branchFromHeroId(value) {
+        return HERO_BRANCH[Number(value)] || null;
+    }
+
+    function detectTroopBranch(player) {
+        if (TROOP_BRANCHES.includes(player?.troopBranch)) {
+            return player.troopBranch;
+        }
+
+        // NCrossPVPMainPanel 랭킹 데이터가 제공하는 공식 병종 값.
+        const armyTypeBranch = branchFromArmyType(player?.armyType);
+        if (armyTypeBranch) return armyTypeBranch;
+
+        const firstHeroBranch = branchFromHeroId(player?.firstHeroId);
+        if (firstHeroBranch) return firstHeroBranch;
+
+        const candidates = new Set();
+        for (const formation of player?.formations || []) {
+            for (const hero of formation?.heroes || formation?.heroList || []) {
+                const branch = branchFromHeroId(
+                    hero?.id ?? hero?.heroId
+                );
+                if (branch) candidates.add(branch);
+            }
+        }
+
+        return candidates.size === 1
+            ? [...candidates][0]
+            : null;
+    }
+
+    function buildBranches(player, formations = player?.formations) {
+        const branch = detectTroopBranch(player);
+        if (!branch || !Array.isArray(formations) || !formations.length) {
+            return null;
+        }
+
+        const branches = {
+            army: null,
+            navy: null,
+            air: null
+        };
+
+        const power = Number(player?.rankingPower);
+        branches[branch] = {
+            formations: clone(formations),
+            power: Number.isFinite(power) ? power : null,
+            totalArmy: Number(player?.totalArmy) || 0,
+            collectedAt: player?.collectedAt || new Date().toISOString()
+        };
+
+        return branches;
+    }
+
     const heroName = id =>
         HERO[id] || `미확인 영웅(${id})`;
 
@@ -60716,6 +60794,10 @@ function inspectCurrentProfileItems() {
                 username,
                 level:
                     data.lv ?? null,
+                armyType:
+                    data.armyType ?? null,
+                firstHeroId:
+                    data.firstHeroId ?? null,
 
                 // 랭킹 화면에 표시되는 부대전투력(TP)
                 rankingPower:
@@ -60736,6 +60818,18 @@ function inspectCurrentProfileItems() {
                 );
             }
 
+            record.troopBranch =
+                detectTroopBranch(record);
+
+            if (!record.troopBranch) {
+                abort(
+                    `${rank}위 병종 판정 실패 ` +
+                    `(UID ${uid}, armyType ${record.armyType ?? "없음"})`
+                );
+            }
+
+            record.branches = buildBranches(record);
+
             return record;
 
         } finally {
@@ -60755,11 +60849,17 @@ function inspectCurrentProfileItems() {
     // =========================================================
 
     function mapResult(player) {
-        return {
+        const mapped = {
             rank: player.rank,
             uid: player.uid,
             username: player.username,
             serverId: player.serverId,
+            level: player.level,
+            armyType: player.armyType,
+            firstHeroId: player.firstHeroId,
+            troopBranch: player.troopBranch,
+            rankingPower: player.rankingPower,
+            collectedAt: player.collectedAt,
 
             TP: formatTP(player.rankingPower),
             totalArmy: player.totalArmy,
@@ -60796,6 +60896,13 @@ function inspectCurrentProfileItems() {
                 totalArmy: f.totalArmy
             }))
         };
+
+        mapped.branches = buildBranches(
+            mapped,
+            mapped.formations
+        );
+
+        return mapped;
     }
 
     function buildMappedResults() {
@@ -60915,10 +61022,41 @@ function inspectCurrentProfileItems() {
         };
     }
 
+    function validateBranchPayload(payload) {
+        for (const field of ["results", "mappedResults"]) {
+            const players = payload?.[field];
+
+            if (!Array.isArray(players) || players.length !== CFG.LIMIT) {
+                throw new Error(
+                    `${field} 병종 검사 실패: ${CFG.LIMIT}명이 아닙니다.`
+                );
+            }
+
+            for (const player of players) {
+                const populated = TROOP_BRANCHES.filter(branch =>
+                    Array.isArray(
+                        player?.branches?.[branch]?.formations
+                    ) &&
+                    player.branches[branch].formations.length > 0
+                );
+
+                if (populated.length !== 1) {
+                    throw new Error(
+                        `${field} 병종 검사 실패: UID ${player?.uid || "없음"} ` +
+                        `(armyType ${player?.armyType ?? "없음"})`
+                    );
+                }
+            }
+        }
+    }
+
     async function uploadRequired(settings) {
         checkState();
         state.phase = "GitHub 업로드 중";
         renderPanel();
+
+        const payload = buildDownloadPayload();
+        validateBranchPayload(payload);
 
         const requestId = crypto.randomUUID?.() ||
             `cross100-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -60940,7 +61078,7 @@ function inspectCurrentProfileItems() {
                     "X-Scanner-Id": settings.scannerId,
                     "X-Request-Id": requestId
                 },
-                body: JSON.stringify(buildDownloadPayload())
+                body: JSON.stringify(payload)
             }
         );
 
